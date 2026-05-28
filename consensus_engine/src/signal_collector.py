@@ -72,11 +72,10 @@ class SignalCollector:
             
         except Exception as e:
             logger.error("touche_signal_collection_error", error=str(e), symbol=symbol)
-            # Fallback: HOLD sinyali
             return ToucheSignal(
                 symbol=symbol,
                 timeframe=timeframe,
-                signal="BEKLE",
+                signal="HOLD",
                 eqs=50.0,
                 score=50.0,
                 reason=f"Signal collection error: {str(e)}",
@@ -140,15 +139,14 @@ class SignalCollector:
     
     @staticmethod
     def _convert_touche_recommendation(recommendation: str) -> str:
-        """Touche recommendation'ı standard signal'e çevirme."""
-        recommendation = recommendation.upper()
-
-        if "BUY" in recommendation or "AL" in recommendation:
-            return "AL"
-        elif "SELL" in recommendation or "SAT" in recommendation:
-            return "SAT"
+        """Map Touche recommendation string to standard BUY/SELL/HOLD signal."""
+        r = recommendation.upper()
+        if "BUY" in r or "AL" in r or "LONG" in r:
+            return "BUY"
+        elif "SELL" in r or "SAT" in r or "SHORT" in r:
+            return "SELL"
         else:
-            return "BEKLE"
+            return "HOLD"
 
     @staticmethod
     def collect_news_signal(news_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -178,13 +176,13 @@ class SignalCollector:
 
             # Sinyal belirle (impact score'a göre)
             if impact_score > 20:
-                signal = "AL"  # BUY
+                signal = "BUY"
                 confidence = min(0.95, 0.6 + (impact_score / 200))
             elif impact_score < -20:
-                signal = "SAT"  # SELL
+                signal = "SELL"
                 confidence = min(0.95, 0.6 + (abs(impact_score) / 200))
             else:
-                signal = "BEKLE"  # HOLD
+                signal = "HOLD"
                 confidence = 0.5
 
             news_signal = {
@@ -217,7 +215,7 @@ class SignalCollector:
             logger.error("news_signal_collection_error", error=str(e))
             # Fallback: neutral News signal
             return {
-                "signal": "BEKLE",
+                "signal": "HOLD",
                 "score": 50.0,
                 "confidence": 0.0,
                 "articles_count": 0,

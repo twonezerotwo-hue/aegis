@@ -281,6 +281,17 @@ async def health_check():
     }
 
 
+@app.get("/api/config")
+async def get_config():
+    """Return tradable symbols and default selection for the frontend."""
+    return {
+        "symbols": ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XAU/USDT"],
+        "default_symbol": "BTC/USDT",
+        "default_timeframe": "1h",
+        "valid_timeframes": VALID_TIMEFRAMES,
+    }
+
+
 @app.post("/execute")
 async def execute_signal(request: SignalRequest):
     """Execute AI signal on Binance Testnet, limited to configured live timeframes."""
@@ -513,237 +524,15 @@ async def get_backtest_timeframes():
     }
 
 
-def _binance_interval(timeframe: str) -> str:
-    mapping = {
-        "5m": "5m",
-        "15m": "15m",
-        "1h": "1h",
-        "4h": "4h",
-        "1d": "1d",
-        "1w": "1w",
-        "1month": "1M",
-    }
-    return mapping.get(timeframe, "1h")
-
-
-def _to_binance_symbol(symbol: str) -> str:
-    return (symbol or "BTC/USDT").replace("/", "").upper()
-
-
 @app.post("/backtest/run")
-async def run_backtest(request_data: Dict = Body(...)):
-    """AI-driven backtest -- DEPRECATED v7.6: Use router endpoint instead.
-
-    This inline endpoint is kept for backward compatibility only.
-    The router-based endpoint at /backtest/run (via backtest_routes) is the
-    canonical implementation with regime-aware weights, dynamic Kelly, and
-    buy-and-hold fallback.
-
-    This endpoint will be removed in v7.7.
+async def run_backtest_fallback(request_data: Dict = Body(...)):
+    """Safety-net fallback — the backtest_routes router handles this path first.
+    Only reached if the router failed to load at startup.
     """
-    global LATEST_BACKTEST_ID
-    logger.warning("DEPRECATED: Inline /backtest/run called -- this endpoint will be removed in v7.7. Router endpoint is canonical.")
-
-    symbol = request_data.get("symbol", "BTC/USDT")
-    timeframe = request_data.get("timeframe", "1h")
-    start_date = request_data.get("start_date")
-    end_date = request_data.get("end_date")
-    horizon = request_data.get("horizon", "medium")
-    if horizon not in ("short", "medium", "long"):
-        horizon = "medium"
-    initial_capital = float(request_data.get("initial_capital", 10000))
-    try:
-        z_threshold = float(request_data.get("z_threshold")) if request_data.get("z_threshold") is not None else None
-    except (TypeError, ValueError):
-        z_threshold = None
-    try:
-        kelly_cap = float(request_data.get("kelly_cap")) if request_data.get("kelly_cap") is not None else None
-    except (TypeError, ValueError):
-        kelly_cap = None
-    try:
-        rsi_lower = int(request_data.get("rsi_lower")) if request_data.get("rsi_lower") is not None else None
-    except (TypeError, ValueError):
-        rsi_lower = None
-    try:
-        rsi_upper = int(request_data.get("rsi_upper")) if request_data.get("rsi_upper") is not None else None
-    except (TypeError, ValueError):
-        rsi_upper = None
-
-    event_hint = request_data.get("event_hint")  # e.g. PUMP, CRASH, HALVING
-
-    # Parse optional module weights for consensus score
-    module_weights = {}
-    for mod in ("touche", "fundamental", "news", "sentinel", "quantum"):
-        val = request_data.get(f"weight_{mod}")
-        if val is not None:
-            try:
-                module_weights[mod] = float(val)
-            except (TypeError, ValueError):
-                pass
-    if not module_weights:
-        # Auto regime detection: query sentinel for current regime, load matching weights
-        try:
-            module_weights = await get_regime_aware_weights(symbol=symbol, timeframe=timeframe)
-        except Exception as e:
-            logger.warning(f"Auto regime weight detection failed: {e}")
-            module_weights = None
-
-    # Apply event-based weight overrides (Option B) on top of regime weights
-    if module_weights and event_hint:
-        try:
-            from routes.backtest_routes import get_event_aware_weights
-            module_weights = get_event_aware_weights(module_weights, event_hint)
-        except Exception as e:
-            logger.warning(f"Event weight override in main.py failed: {e}")
-
-    if not start_date or not end_date:
-        raise HTTPException(status_code=400, detail="start_date and end_date are required (YYYY-MM-DD)")
-
-    try:
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-
-    if start_dt >= end_dt:
-        raise HTTPException(status_code=400, detail="start_date must be before end_date")
-
-    backtest_id = str(uuid.uuid4())
-    started_at = datetime.now(timezone.utc).isoformat()
-
-    try:
-        # Delegate to the AI signal engine in backtest_routes
-        from routes.backtest_routes import (
-            fetch_real_historical_data,
-            execute_ai_driven_trades,
-            calculate_backtest_metrics,
-            get_news_fetcher,
-        )
-        news_fetcher = get_news_fetcher()
-        df = await fetch_real_historical_data(
-            symbol,
-            timeframe,
-            start_dt,
-            end_dt,
-            news_fetcher=news_fetcher,
-            z_threshold=z_threshold,
-            rsi_lower=rsi_lower,
-            rsi_upper=rsi_upper,
-            module_weights=module_weights,
-            event_hint=event_hint,
-        )
-        if df.empty:
-            trades = []
-        else:
-            trades = execute_ai_driven_trades(df, symbol)
-
-        # Extract per-module average scores from the DataFrame
-        _score_cols = ["touche_score", "fundamental_score", "quantum_score", "sentinel_score", "news_score"]
-        module_scores = {
-            col.replace("_score", ""): round(float(df[col].mean()), 4)
-            for col in _score_cols if col in df.columns
-        } if not df.empty else {}
-
-        # Dynamic Kelly cap from correlation regime
-        effective_kelly = kelly_cap if kelly_cap is not None else 0.25
-        corr_regime = df["corr_regime"].iloc[-1] if not df.empty and "corr_regime" in df.columns else "neutral"
-        corr_mult = float(df["corr_mult"].iloc[-1]) if not df.empty and "corr_mult" in df.columns else 1.0
-        if corr_regime == "stress":
-            effective_kelly = min(effective_kelly, 0.05)
-        elif corr_regime == "decoupling":
-            effective_kelly = min(effective_kelly, 0.15)
-        else:
-            effective_kelly *= corr_mult
-        effective_kelly = max(0.02, min(effective_kelly, 0.30))
-        logger.info(f"Dynamic Kelly: corr_regime={corr_regime}, corr_mult={corr_mult:.2f}, kelly_cap={effective_kelly:.3f}")
-
-        metrics = calculate_backtest_metrics(
-            trades,
-            initial_capital,
-            kelly_cap=effective_kelly,
-        ) if trades else {
-            "pnl": {"total_pnl": 0, "total_pnl_pct": 0, "num_trades": 0},
-            "win_loss": {"win_rate": 0, "win_count": 0, "loss_count": 0, "avg_win": 0, "avg_loss": 0, "profit_factor": 0},
-            "drawdown": {"max_drawdown": 0, "max_drawdown_pct": 0},
-            "sharpe_ratio": 0,
-            "sortino_ratio": 0,
-            "initial_capital": initial_capital,
-            "final_capital": initial_capital,
-        }
-        data_source = "ai_engine"
-        num_points = len(df)
-    except Exception as e:
-        logger.error(f"AI backtest engine failed: {e}", exc_info=True)
-        # Minimal buy-and-hold fallback so the endpoint never 500s
-        klines = []
-        try:
-            interval = _binance_interval(timeframe)
-            symbol_binance = _to_binance_symbol(symbol)
-            params = {
-                "symbol": symbol_binance, "interval": interval,
-                "startTime": int(start_dt.timestamp() * 1000),
-                "endTime": int(end_dt.timestamp() * 1000), "limit": 1000,
-            }
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.get("https://api.binance.com/api/v3/klines", params=params)
-                resp.raise_for_status()
-                klines = resp.json() if isinstance(resp.json(), list) else []
-        except Exception:
-            pass
-        closes = [float(k[4]) for k in klines if len(k) > 4] if klines else [50000.0, 50000.0]
-        pnl_pct = ((closes[-1] - closes[0]) / closes[0]) * 100 if closes[0] else 0.0
-        total_pnl = initial_capital * (pnl_pct / 100.0)
-        trades = []
-        metrics = {
-            "pnl": {"total_pnl": round(total_pnl, 2), "total_pnl_pct": round(pnl_pct, 4), "num_trades": 1},
-            "initial_capital": initial_capital,
-            "final_capital": round(initial_capital + total_pnl, 2),
-        }
-        data_source = "buy_hold_fallback"
-        num_points = len(closes)
-
-    # Derive regime and portfolio allocation
-    try:
-        from services.portfolio_allocator import calculate_dynamic_allocation
-        _last_regime = "NORMALIZATION"
-        if 'df' in dir() and not df.empty and "consensus_regime" in df.columns:
-            _last_regime = str(df["consensus_regime"].iloc[-1])
-        portfolio_allocation = calculate_dynamic_allocation(
-            horizon=horizon,
-            regime=_last_regime,
-            module_scores=module_scores if 'module_scores' in dir() else {},
-        )
-    except Exception as e:
-        logger.warning(f"Portfolio allocator failed: {e}")
-        portfolio_allocation = {}
-        _last_regime = "NORMALIZATION"
-
-    result = {
-        "success": True,
-        "backtest_id": backtest_id,
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "horizon": horizon,
-        "date_range": {"start": start_date, "end": end_date},
-        "data_source": data_source,
-        "metrics": metrics,
-        "module_scores": module_scores if 'module_scores' in dir() else {},
-        "portfolio_allocation": portfolio_allocation,
-        "regime": _last_regime,
-        "total_trades": len(trades),
-        "trades": trades[:20],
-        "data_points": num_points,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    BACKTEST_RUNS[backtest_id] = {
-        "status": "completed",
-        "started_at": started_at,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-        "result": result,
-    }
-    LATEST_BACKTEST_ID = backtest_id
-    return result
+    raise HTTPException(
+        status_code=503,
+        detail="Backtest router unavailable. Check service logs for import errors.",
+    )
 
 
 @app.get("/backtest/status")

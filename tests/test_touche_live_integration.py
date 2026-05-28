@@ -24,7 +24,7 @@ def _set_live_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATA_MODE", "LIVE")
     monkeypatch.setenv("BINANCE_BASE_URL", "https://api.binance.com")
     monkeypatch.setenv("BINANCE_API_KEY", "test_key")
-    monkeypatch.setenv("BINANCE_SECRET_KEY", "test_secret")
+    monkeypatch.setenv("BINANCE_API_SECRET", "test_secret")
     monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
 
 

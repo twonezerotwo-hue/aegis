@@ -92,13 +92,11 @@ class GlassnodeServiceClient:
     ) -> Dict[str, Any]:
         """
         Fetch multiple on-chain metrics for a symbol.
-
-        Returns combined dict with `source` and `cached` flags.
-        LIVE_INTEGRATION: Only calls Glassnode if API key is configured.
+        Priority: Glassnode (paid) → Twelve Data → CoinGecko (free) → mock
         """
         if not self._api_key:
             if self._twelve_key:
-                logger.info("[FUNDAMENTAL] GLASSNODE yok; Twelve Data fallback aktif (%s)", symbol)
+                logger.info("[FUNDAMENTAL] Twelve Data fallback active (%s)", symbol)
                 result: Dict[str, Any] = {
                     "source": "twelve_data",
                     "cached": False,
@@ -108,9 +106,12 @@ class GlassnodeServiceClient:
                     result.update(await self._twelve_metric(symbol.upper(), metric))
                 return result
 
-            logger.info(
-                "[FUNDAMENTAL] GLASSNODE_API_KEY not set – returning mock data for %s", symbol
-            )
+            # CoinGecko free tier as second fallback
+            cg_result = await self._coingecko_metrics(symbol.upper(), metrics)
+            if cg_result:
+                return cg_result
+
+            logger.info("[FUNDAMENTAL] No API keys – returning mock data for %s", symbol)
             result = {"source": "mock", "cached": False, "symbol": symbol.upper()}
             for metric in metrics:
                 result.update(_mock_metric(metric))
@@ -186,6 +187,50 @@ class GlassnodeServiceClient:
             return {**twelve, "cached": False}
 
         return {**_mock_metric(metric), "cached": True}
+
+    async def _coingecko_metrics(self, symbol: str, metrics: List[str]) -> Optional[Dict[str, Any]]:
+        """CoinGecko free public API — no key required."""
+        coin_map = {"BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin", "SOL": "solana"}
+        coin_id = coin_map.get(symbol, "bitcoin")
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={
+                        "ids": coin_id,
+                        "vs_currencies": "usd",
+                        "include_market_cap": "true",
+                        "include_24hr_vol": "true",
+                        "include_24hr_change": "true",
+                        "include_7d_change": "true",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json().get(coin_id, {})
+            price = float(data.get("usd") or 0.0)
+            change_24h = float(data.get("usd_24h_change") or 0.0)
+            change_7d = float(data.get("usd_7d_change") or 0.0)
+            vol = float(data.get("usd_24h_vol") or 0.0)
+            mcap = float(data.get("usd_market_cap") or 1.0)
+            vol_mcap = min(vol / max(mcap, 1.0), 0.1) / 0.1
+            result: Dict[str, Any] = {
+                "source": "coingecko",
+                "cached": False,
+                "symbol": symbol,
+                # Derived proxies — not true on-chain but live and free
+                "mvrv_z_score": round((price / 50000.0) * 2.0, 4) if price else None,
+                "nupl": round(max(-1.0, min(1.0, (change_7d) / 30.0)), 4),
+                "transaction_volume": round(vol, 2),
+                "active_addresses": int(max(100_000, min(2_000_000, vol_mcap * 2_000_000))),
+                "quality": "live_proxy",
+                "price_usd": price,
+                "change_24h": change_24h,
+            }
+            logger.info("[FUNDAMENTAL] CoinGecko free data fetched for %s", symbol)
+            return result
+        except Exception as exc:
+            logger.warning("[FUNDAMENTAL] CoinGecko fallback failed: %s", exc)
+            return None
 
     async def _twelve_metric(self, symbol: str, metric: str) -> Dict[str, Any]:
         """AEGIS v7.2: Twelve Data fiyatindan temel fallback metriklerini turetir."""

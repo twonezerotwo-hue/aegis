@@ -6,4 +6,6 @@ streamlit
 plotly
 redis
 ccxt
-pytest
+PyYAML>=6.0
+python-dotenv
+httpx

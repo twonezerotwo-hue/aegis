@@ -226,7 +226,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVICE_NAME: touche-ai
       BINANCE_API_KEY: ${BINANCE_API_KEY}
-      BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY:-${BINANCE_API_SECRET}}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET}
       DATA_MODE: ${DATA_MODE:-LIVE}
       BINANCE_TIMEOUT: ${BINANCE_TIMEOUT:-5.0}
       BINANCE_RATE_LIMIT_PER_MIN: ${BINANCE_RATE_LIMIT_PER_MIN:-1200}
@@ -290,7 +290,7 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVICE_NAME: quantum-ai
       BINANCE_API_KEY: ${BINANCE_API_KEY}
-      BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY:-${BINANCE_API_SECRET}}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET}
     ports:
       - "8003:8003"
     networks:
@@ -426,7 +426,6 @@ services:
       - "3001:3001"
     networks:
       - aegis_network
-      - aegis_clean_v71_aegis_network
     depends_on:
       - dashboard-backend
     healthcheck:
@@ -454,7 +453,7 @@ services:
       ANALYZER_URL: "http://analyzer-ai:8007"
       BINANCE_API_KEY: "${BINANCE_API_KEY}"
       BINANCE_API_SECRET: "${BINANCE_API_SECRET}"
-      BINANCE_BASE_URL: "${BINANCE_BASE_URL:-https://testnet.binance.vision}"
+      BINANCE_BASE_URL: "${BINANCE_BASE_URL:-https://api.binance.com}"
       DRY_RUN: "${DRY_RUN:-true}"
       LIVE_TIMEFRAMES: "${LIVE_TIMEFRAMES:-4h,1d}"
       MAX_RISK_PER_TRADE: "${MAX_RISK_PER_TRADE:-0.02}"
@@ -467,7 +466,6 @@ services:
       - ./consensus_engine/config:/app/consensus_engine/config
     networks:
       - aegis_network
-      - aegis_clean_v71_aegis_network
     depends_on:
       - prometheus
       - touche-api
@@ -580,11 +578,6 @@ services:
 networks:
   aegis_network:
     driver: bridge
-  # External network from the legacy aegis_clean_v71 compose project.
-  # dashboard-backend and dashboard-frontend join this so they can reach
-  # sentinel, consensus, analyzer and other services started from that project.
-  aegis_clean_v71_aegis_network:
-    external: true
 
 volumes:
   postgres_data:

@@ -74,26 +74,60 @@ _metric_values = {
     'fundamental_metric_quality': random.uniform(0, 100),
 }
 
+async def _fetch_coingecko_score(symbol: str = "BTC") -> tuple:
+    """Fetch real fundamental score from CoinGecko free API."""
+    coin_map = {"BTC": "bitcoin", "ETH": "ethereum", "BNB": "binancecoin", "SOL": "solana"}
+    coin_id = coin_map.get(symbol.upper(), "bitcoin")
+    try:
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": coin_id,
+                    "vs_currencies": "usd",
+                    "include_market_cap": "true",
+                    "include_24hr_vol": "true",
+                    "include_24hr_change": "true",
+                    "include_7d_change": "true",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json().get(coin_id, {})
+        change_24h = float(data.get("usd_24h_change") or 0.0)
+        change_7d = float(data.get("usd_7d_change") or 0.0)
+        vol = float(data.get("usd_24h_vol") or 0.0)
+        mcap = float(data.get("usd_market_cap") or 1.0)
+        vol_mcap = min(vol / max(mcap, 1.0), 0.1) / 0.1
+        price_score = min(max((change_24h + 10) / 20 * 100, 0), 100)
+        trend_score = min(max((change_7d + 20) / 40 * 100, 0), 100)
+        volume_score = vol_mcap * 100
+        score = round(price_score * 0.4 + volume_score * 0.3 + trend_score * 0.3, 1)
+        return score, 95.0
+    except Exception as e:
+        logger.warning(f"CoinGecko fetch failed: {e}")
+        return None, None
+
+
 def update_metrics_background():
-    """Background thread to update metrics every 10 seconds"""
+    """Background thread to update Prometheus metrics every 60 seconds using CoinGecko."""
     while True:
         try:
-            fundamental_value = random.uniform(20, 95)
-            quality_value = random.uniform(0, 100)
+            result = asyncio.run(_fetch_coingecko_score())
+            fundamental_value, quality_value = result if result[0] is not None else (
+                _metric_values.get('fundamental_score', 50.0), 60.0
+            )
 
-            # Update gauge objects (this is what Prometheus scrapes!)
             FUNDAMENTAL_SCORE.set(fundamental_value)
             METRIC_QUALITY.set(quality_value)
-
-            # Also update cache
             _metric_values['fundamental_score'] = fundamental_value
             _metric_values['fundamental_metric_quality'] = quality_value
 
-            logger.info(f"Updated metrics: Score={fundamental_value:.1f}, Quality={quality_value:.1f}")
-            time.sleep(10)
+            logger.info(f"CoinGecko metrics updated: Score={fundamental_value:.1f}, Quality={quality_value:.1f}")
+            time.sleep(60)
         except Exception as e:
             logger.error(f"Error updating metrics: {e}")
-            time.sleep(10)
+            time.sleep(60)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

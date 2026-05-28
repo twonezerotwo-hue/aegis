@@ -80,7 +80,7 @@ class BinanceDataFetcher:
         self._base_url = (base_url or os.getenv("BINANCE_BASE_URL", "https://api.binance.com")).rstrip("/")
         # LIVE_INTEGRATION: API key read only from env/config, never hard-coded
         _key = api_key or os.getenv("BINANCE_API_KEY", "")
-        _secret = secret_key or os.getenv("BINANCE_SECRET_KEY", "")
+        _secret = secret_key or os.getenv("BINANCE_API_SECRET", "")
         self._headers: Dict[str, str] = {}
         if _key:
             self._headers["X-MBX-APIKEY"] = _key

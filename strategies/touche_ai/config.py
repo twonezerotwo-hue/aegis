@@ -28,7 +28,7 @@ class ToucheConfig(BaseSettings):
 
     # LIVE_INTEGRATION: Keys read only from env – never hard-coded
     binance_api_key: str = Field(default="", validation_alias="BINANCE_API_KEY")
-    binance_secret_key: str = Field(default="", validation_alias="BINANCE_SECRET_KEY")
+    binance_secret_key: str = Field(default="", validation_alias="BINANCE_API_SECRET")
 
     cache_ttl_seconds: int = 300
     fallback_to_mock: bool = True
