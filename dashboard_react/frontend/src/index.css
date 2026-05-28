@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-dark text-white;
+  }
+}
+
+@layer components {
+  .metric-card {
+    @apply rounded-lg border border-gray-700 bg-gray-900 p-6 backdrop-blur-sm transition-all duration-300 hover:border-gray-600 hover:shadow-xl;
+  }
+
+  .metric-value {
+    @apply text-4xl font-bold;
+  }
+
+  .metric-label {
+    @apply text-sm font-semibold uppercase tracking-wider text-gray-400;
+  }
+
+  .status-badge {
+    @apply inline-block rounded-full px-3 py-1 text-xs font-medium uppercase;
+  }
+
+  .status-healthy {
+    @apply bg-green-500 bg-opacity-20 text-green-300;
+  }
+
+  .status-warning {
+    @apply bg-yellow-500 bg-opacity-20 text-yellow-300;
+  }
+
+  .status-down {
+    @apply bg-red-500 bg-opacity-20 text-red-300;
+  }
+}
+
+/* V2 animations */
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Light mode overrides */
+.light body,
+.light {
+  --bg-primary: #f8fafc;
+  --text-primary: #0f172a;
+}
+.light .bg-slate-950 { background-color: #f8fafc; }
+.light .bg-slate-900\/80 { background-color: rgba(241, 245, 249, 0.9); }
+.light .text-white { color: #0f172a; }
+.light .text-slate-300 { color: #334155; }
+.light .text-slate-400 { color: #475569; }
+.light .text-slate-500 { color: #64748b; }
+.light .border-slate-700\/50 { border-color: rgba(203, 213, 225, 0.5); }
+.light .bg-slate-800 { background-color: #ffffff; }
+.light .border-slate-600 { border-color: #cbd5e1; }
+.light .bg-slate-700\/60 { background-color: rgba(226, 232, 240, 0.6); }
+.light .hover\:bg-slate-800\/30:hover { background-color: rgba(241, 245, 249, 0.5); }

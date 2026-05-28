@@ -1,0 +1,121 @@
+# ─────────────────────────────────────────────────────────────────
+# Touche AI Limited — Strateji Parametreleri
+# AEGIS Holding | Teknik Analiz Motoru v1.0
+# ─────────────────────────────────────────────────────────────────
+
+strategy:
+  name: "touche_ai"
+  version: "1.0.0"
+  mode: "live"               # live | backtest | paper
+
+# ─── İndikatör Parametreleri ──────────────────────────────────────
+indicators:
+  rsi:
+    period: 14
+    overbought: 70
+    oversold: 30
+
+  stoch_rsi:
+    rsi_period: 14
+    stoch_period: 14
+    smooth_k: 3
+    smooth_d: 3
+    overbought: 80
+    oversold: 20
+
+  macd:
+    fast: 12
+    slow: 26
+    signal: 9
+
+  adx:
+    period: 14
+    strong_trend_threshold: 25
+    very_strong_threshold: 40
+
+  ema:
+    fast: 20
+    slow: 50
+    trend: 200
+
+  atr:
+    period: 14
+
+  bollinger:
+    period: 20
+    std_dev: 2.0
+
+  obv:
+    enabled: true
+
+  volume_ratio:
+    period: 20
+    high_threshold: 1.5
+    low_threshold: 0.5
+
+  swing_points:
+    lookback: 5
+
+  pivots:
+    method: "classic"        # classic | fibonacci | woodie
+
+# ─── Faz Parametreleri ────────────────────────────────────────────
+phases:
+  phase1_liquidity:
+    enabled: true
+    sweep_atr_threshold: 0.5   # Min ATR çarpanı wick için
+    min_wick_body_ratio: 0.6   # Wick / (Wick+Body) minimum oran
+    lookback_bars: 20          # Kaç bar geriye bak
+
+  phase2_structure:
+    enabled: true
+    swing_lookback: 5
+    divergence_lookback: 10
+    min_swing_points: 2
+
+  phase3_zones:
+    enabled: true
+    zone_tolerance_atr: 0.3    # Bölge toleransı (ATR çarpanı)
+    confluence_min: 2          # Min confluence sayısı
+    zone_strength_bars: 3      # Bölge oluşum bar sayısı
+
+  phase4_confirm:
+    enabled: true
+    volume_ratio_threshold: 1.5
+    lookback_bars: 10
+    obv_trend_bars: 5
+
+  phase5_timing:
+    enabled: true
+    engulfing_ratio: 1.2       # Engulfing body ratio
+    pin_bar_wick_ratio: 0.65   # Pin bar wick/range ratio
+    doji_body_ratio: 0.1       # Doji body/range ratio
+
+  phase6_risk:
+    enabled: true
+    sl_atr_multiplier: 1.5
+    min_rr_ratio: 1.5
+    max_rr_ratio: 10.0
+    tp_rr_ratio: 2.0
+
+  phase7_macro:
+    enabled: true
+    fundamental_block_threshold: 30.0   # Bu skorun altı HOLD
+    fundamental_boost_threshold: 70.0   # Bu skorun üstü güven artışı
+    macro_weight: 0.3                   # Makro ağırlığı (0-1)
+
+# ─── EQS Ağırlıkları ──────────────────────────────────────────────
+scoring:
+  weights:
+    phase1: 0.15   # Likidite Süpürmesi
+    phase2: 0.20   # Piyasa Yapısı + Diverjans
+    phase3: 0.20   # Bölgeler & Confluence
+    phase4: 0.15   # Teyit (Hacim / OBV)
+    phase5: 0.15   # Giriş Zamanlaması
+    phase6: 0.05   # Risk/Ödül Filtresi
+    phase7: 0.10   # Makro Filtre
+
+  thresholds:
+    strong_signal: 75      # EQS >= 75 → Güçlü sinyal
+    weak_signal:   50      # EQS >= 50 → Zayıf sinyal
+    no_trade:      40      # EQS <  40 → İşlem yapma

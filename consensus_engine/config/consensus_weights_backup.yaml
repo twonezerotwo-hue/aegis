@@ -1,0 +1,18 @@
+current_phase: "production_v6"
+modules:
+  touche_weight: 0.35
+  fundamental_weight: 0.30
+  news_weight: 0.20
+  sentinel_weight: 0.10
+  quantum_weight: 0.05
+thresholds:
+  buy_min: 52
+  sell_max: 48
+# v7.0: factory-default weights used as rollback target by BoundedUpdater.
+# This block is intentionally static — do NOT edit manually.
+backup_weights:
+  touche_weight: 0.35
+  fundamental_weight: 0.30
+  news_weight: 0.20
+  sentinel_weight: 0.10
+  quantum_weight: 0.05

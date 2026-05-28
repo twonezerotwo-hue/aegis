@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  macro-bridge:
+    build: .
+    container_name: macro-bridge
+    environment:
+      AEGIS_CONSENSUS_URL: http://host.docker.internal:8005
+      AEGIS_CBR_URL: http://host.docker.internal:8010
+      MACRO_BRIDGE_TIMEOUT: 6
+      MACRO_BRIDGE_REDIS_URL: redis://host.docker.internal:6379/9
+    ports:
+      - "8601:8601"
+    command: python run.py

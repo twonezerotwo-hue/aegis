@@ -1,0 +1,27 @@
+{
+  "official_engine": "aegis_core",
+  "version": "7.2_core",
+  "approved_routes": [
+    "/aegis-core/health",
+    "/aegis-core/signal",
+    "/aegis-core/backtest-evidence"
+  ],
+  "forbidden_fields": [
+    "action",
+    "position_size",
+    "order",
+    "broker",
+    "execution"
+  ],
+  "forbidden_legacy_surfaces": [
+    "/execute",
+    "/process",
+    "/signal",
+    "paper_trading",
+    "optimizer_service",
+    "bounded_updater",
+    "execution_engine"
+  ],
+  "final_decision_allowed": false,
+  "execution_allowed": false
+}

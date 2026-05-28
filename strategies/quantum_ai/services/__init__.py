@@ -1,0 +1,1 @@
+# AEGIS v6.0 - Quantum AI Futures Extension | Purpose: Service package exports.

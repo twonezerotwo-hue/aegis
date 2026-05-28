@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package aegis.signals;
+
+// Fundamental Signal Definition
+message FundamentalSignal {
+  string strategy_id = 1;
+  string signal_id = 2;
+  int64 timestamp = 3;
+  string symbol = 4;
+  double fundamental_score = 5;
+  double confidence = 6;
+  double onchain_score = 7;
+  double flow_score = 8;
+  double sentiment_score = 9;
+  double network_score = 10;
+  string recommendation = 11;
+  repeated string warnings = 12;
+}
+
+// Technical Signal Definition
+message TechnicalSignal {
+  string strategy_id = 1;
+  string signal_id = 2;
+  int64 timestamp = 3;
+  string symbol = 4;
+  double eqs_score = 5;
+  double confidence = 6;
+  string recommendation = 7;
+  string regime = 8;
+  string hypothesis = 9;
+}
+
+// Order Definitions
+message OrderRequest {
+  string signal_id = 1;
+  string symbol = 2;
+  string side = 3;         // e.g., "BUY", "SELL"
+  double quantity = 4;
+  string order_type = 5;   // e.g., "MARKET", "LIMIT"
+  double limit_price = 6;
+}
+
+message OrderResponse {
+  string order_id = 1;
+  string status = 2;
+  string message = 3;
+}
+
+message OrderStatusRequest {
+  string order_id = 1;
+}
+
+message OrderStatusResponse {
+  string order_id = 1;
+  string status = 2;
+  double filled_quantity = 3;
+  double avg_price = 4;
+}
+
+message FillReport {
+  string order_id = 1;
+  string signal_id = 2;
+  string symbol = 3;
+  double filled_quantity = 4;
+  double avg_price = 5;
+  string exchange = 6;
+  int64 timestamp = 7;
+}
+
+// Risk Definitions
+message RiskCheckRequest {
+  string strategy_id = 1;
+  string symbol = 2;
+  string side = 3;
+  double quantity = 4;
+  double estimated_value = 5;
+}
+
+message RiskCheckResponse {
+  bool approved = 1;
+  string rejection_reason = 2;
+  double adjusted_quantity = 3;
+}
+
+// Generic response for signals
+message SignalResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Services
+service SignalService {
+  rpc SendFundamentalSignal(FundamentalSignal) returns (SignalResponse);
+  rpc SendTechnicalSignal(TechnicalSignal) returns (SignalResponse);
+}
+
+service ExecutionService {
+  rpc SubmitOrder(OrderRequest) returns (OrderResponse);
+  rpc GetOrderStatus(OrderStatusRequest) returns (OrderStatusResponse);
+}
+
+service RiskService {
+  rpc CheckLimits(RiskCheckRequest) returns (RiskCheckResponse);
+}

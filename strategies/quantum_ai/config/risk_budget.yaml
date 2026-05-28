@@ -1,0 +1,78 @@
+# Risk Management and Budget Configuration
+
+# Capital Allocation
+capital:
+  # Total capital for MM
+  total_capital: 100000.0
+  
+  # Max capital allocation to single instrument
+  max_per_instrument: 0.20
+  
+  # Risk capital (max loss)
+  risk_capital: 5000.0
+
+# Position Limits
+position_limits:
+  # Max net inventory (absolute)
+  max_net_inventory: 500.0
+  
+  # Max gross inventory (long + short)
+  max_gross_inventory: 1000.0
+  
+  # Max concentration (% of capital)
+  max_concentration: 0.15
+
+# Daily Limits
+daily_limits:
+  # Max daily loss
+  max_daily_loss: 2000.0
+  
+  # Max daily trades
+  max_daily_trades: 5000.0
+  
+  # Max daily volume notional
+  max_daily_volume: 500000.0
+
+# Risk Metrics
+risk_metrics:
+  # Value at Risk (95% confidence, 1-day horizon)
+  var_95_1d: 1500.0
+  
+  # Expected Shortfall
+  es_95_1d: 2500.0
+  
+  # Max drawdown tolerance (%)
+  max_drawdown_pct: 10.0
+
+# Inventory Risk
+inventory_risk:
+  # Max position value ($)
+  max_position_value: 50000.0
+  
+  # Position cost threshold (when to rebalance)
+  rebalance_threshold: 0.10
+  
+  # Cost per basis point (for rebalancing)
+  cost_per_bps: 1.0
+
+# Arbitrage Limits
+arbitrage:
+  # Min arb spread to trade (bps)
+  min_spread_bps: 0.5
+  
+  # Max time to close arb (seconds)
+  max_arb_duration: 60.0
+  
+  # Execution timeout (ms)
+  execution_timeout_ms: 5000.0
+
+# Stress Testing
+stress:
+  # Vol shock (x)
+  vol_shock: 2.0
+  
+  # Price shock (bps)
+  price_shock_bps: 100.0
+  
+  # Liquidity shock (reduction %)
+  liquidity_shock_pct: 50.0

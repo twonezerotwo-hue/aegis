@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aegis_core/schemas/aegis_signal.schema.json",
+  "title": "AEGIS Signal",
+  "type": "object",
+  "required": [
+    "source_engine",
+    "source_version",
+    "symbol",
+    "timeframe",
+    "module_scores",
+    "consensus_score",
+    "raw_regime",
+    "decision_permission",
+    "final_decision",
+    "warnings"
+  ],
+  "properties": {
+    "source_engine": {
+      "const": "AEGIS"
+    },
+    "source_version": {
+      "const": "7.2_core"
+    },
+    "symbol": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timeframe": {
+      "type": "string",
+      "minLength": 1
+    },
+    "module_scores": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100
+      }
+    },
+    "consensus_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "raw_regime": {
+      "type": "string"
+    },
+    "weight_key": {
+      "type": "string"
+    },
+    "weights_used": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    "source_config": {
+      "type": "object"
+    },
+    "confluence": {
+      "type": "object",
+      "required": [
+        "original_score",
+        "adjusted_score",
+        "multiplier",
+        "status",
+        "warnings"
+      ],
+      "properties": {
+        "original_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "adjusted_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "multiplier": {
+          "type": "number",
+          "minimum": 0.3,
+          "maximum": 1.5
+        },
+        "status": {
+          "type": "string"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "decision_permission": {
+      "const": "SIGNAL_ONLY_NOT_FINAL"
+    },
+    "final_decision": {
+      "const": false
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "not": {
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "position_size"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "order"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "execution"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "broker"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,50 @@
+# ─────────────────────────────────────────────────────────────────
+# Touche AI Limited — Desteklenen Enstrümanlar
+# AEGIS Holding | Teknik Analiz Motoru v1.0
+# ─────────────────────────────────────────────────────────────────
+
+instruments:
+  crypto:
+    - symbol: "BTCUSDT"
+      display: "Bitcoin / USDT"
+      pip_value: 0.01
+      min_lot: 0.001
+      category: "major"
+      enabled: true
+
+    - symbol: "ETHUSDT"
+      display: "Ethereum / USDT"
+      pip_value: 0.01
+      min_lot: 0.01
+      category: "major"
+      enabled: true
+
+    - symbol: "SOLUSDT"
+      display: "Solana / USDT"
+      pip_value: 0.001
+      min_lot: 0.1
+      category: "altcoin"
+      enabled: true
+
+    - symbol: "BNBUSDT"
+      display: "BNB / USDT"
+      pip_value: 0.01
+      min_lot: 0.01
+      category: "altcoin"
+      enabled: true
+
+    - symbol: "AVAXUSDT"
+      display: "Avalanche / USDT"
+      pip_value: 0.001
+      min_lot: 0.1
+      category: "altcoin"
+      enabled: false
+
+timeframes:
+  primary:      "4h"    # Ana analiz zaman dilimi
+  confirmation: "1h"    # Faz teyidi
+  entry:        "15m"   # Giriş zamanlaması
+  macro:        "1d"    # Makro görünüm (Faz 7)
+
+default_exchange: "binance"
+data_source: "ccxt"

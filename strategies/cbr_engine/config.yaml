@@ -1,0 +1,244 @@
+# AEGIS CBR Engine - Configuration
+# All 8 phases configuration centralized
+
+version: "1.0.0"
+status: "PRODUCTION_READY"
+
+# ============================================================================
+# FAZ 1: FINGERPRINT PIPELINE
+# ============================================================================
+fingerprint:
+  # Feature extraction parameters
+  min_history_bars: 200
+  lookback_window: 90  # days for rolling correlations
+
+  features:
+    price_structure:
+      - current_price
+      - distance_from_ath
+      - distance_from_200ma
+      - atr_14
+      - volatility_regime
+
+    technical_indicators:
+      - rsi_14
+      - macd_histogram
+      - stoch_rsi
+      - obv_trend
+      - volume_profile
+      - liquidity_sweep
+      - structure_score
+
+    macro_correlation:
+      - dxy_14d_corr
+      - gold_14d_corr
+      - brent_14d_corr
+      - vix_level
+
+    sentiment:
+      - fear_greed_index
+      - us_10y_yield
+
+    onchain:
+      - exchange_netflow_7d
+      - funding_rate_avg
+      - open_interest_change
+
+    temporal:
+      - day_of_week
+      - hour_of_day
+      - days_from_halving
+      - macro_event_window
+
+  market_patterns:
+    dip_confidence_threshold: 0.55
+    peak_confidence_threshold: 0.55
+    breakout_min_touches: 2
+    rejection_wick_ratio: 0.60
+
+# ============================================================================
+# FAZ 2: DIMENSIONALITY REDUCTION
+# ============================================================================
+dimensionality_reduction:
+  # PCA reduction
+  pca:
+    target_components: 12
+    variance_threshold: 0.95
+    max_components: 20
+
+  # Autoencoder (optional, requires TensorFlow)
+  autoencoder:
+    encoding_dim: 12
+    epochs: 50
+    batch_size: 32
+    validation_split: 0.1
+
+  # Hybrid approach
+  hybrid:
+    use_hybrid: false
+    pca_components: 8
+    ae_components: 8
+
+# ============================================================================
+# FAZ 3: VECTOR DATABASE
+# ============================================================================
+vector_database:
+  # HNSW indexing
+  hnsw:
+    space: "cosine"
+    ef_construction: 200
+    m: 16
+    max_elements: 50000
+
+  # Regime stratification
+  regime_stratified: true
+  similarity_threshold: 0.50
+  search_k: 10
+  search_timeout_ms: 100
+
+# ============================================================================
+# FAZ 4: PROBABILISTIC SIZING & RISK GATE
+# ============================================================================
+decision_making:
+  # Bayesian confidence weights
+  confidence_weights:
+    win_rate: 0.25
+    return: 0.20
+    consistency: 0.20
+    sample_ratio: 0.15
+    similarity: 0.20
+
+  # Kelly Criterion
+  kelly:
+    fractional_kelly: 0.25  # Use 25% of Kelly for safety
+    max_position: 0.10  # 10% max position
+
+  # Risk gates
+  risk_gates:
+    vix:
+      enabled: true
+      threshold: 35
+      penalty: 0.40
+
+    fear_greed:
+      enabled: true
+      min_level: 15  # Extreme fear threshold
+
+    dxy_correlation:
+      enabled: true
+      max_correlation: 0.65
+
+# ============================================================================
+# FAZ 5: CONTINUOUS LEARNING
+# ============================================================================
+continuous_learning:
+  # Weekly optimization
+  weekly_optimizer:
+    enabled: true
+    objective_metric: "sharpe_ratio"  # sharpe_ratio, win_rate, expectancy
+    optuna_trials: 100
+    min_trades_for_optimization: 5
+
+  # SHAP explanations
+  shap:
+    enabled: true
+    explain_every_trade: true
+
+  # Auto-labeling
+  auto_labeler:
+    enabled: true
+    outcome_categories: ["GREAT_WIN", "WIN", "BREAKEVEN", "SMALL_LOSS", "BIG_LOSS"]
+
+# ============================================================================
+# FAZ 6: PAPER → LIVE
+# ============================================================================
+execution:
+  # Slippage simulation
+  slippage:
+    enabled: true
+    base_slippage_bps: 5
+    max_slippage_bps: 100
+
+  # Order book depth assumptions
+  order_book_depth: 100  # BTC at bid/ask
+
+  # Liquidity adjustments
+  time_multiplier:
+    low_liquidity_hours: [2, 3, 4, 5]  # UTC - 2-5am
+    low_liquidity_factor: 1.50
+    high_impact_hours: [12, 13, 14, 15]
+    high_impact_factor: 1.20
+
+# ============================================================================
+# FAZ 7-8: MONITORING & DEPLOYMENT
+# ============================================================================
+monitoring:
+  # Alert thresholds
+  alerts:
+    max_drawdown_warning: 0.10  # 10%
+    max_drawdown_critical: 0.20  # 20%
+    win_rate_minimum: 0.40  # 40%
+    expectancy_minimum: 0.005  # 0.5%
+
+  # Backtest acceptance criteria
+  backtest_criteria:
+    min_trades: 40
+    max_trades: 100
+    min_win_rate: 0.45
+    max_win_rate: 0.55
+    min_sharpe: 1.4
+    max_sharpe: 2.0
+    max_drawdown: 0.25
+
+# ============================================================================
+# DATABASE
+# ============================================================================
+database:
+  type: "postgresql"
+  connection:
+    host: "localhost"
+    port: 5432
+    database: "aegis_cbr"
+    user: "aegis_user"
+
+  tables:
+    fingerprints: "fingerprints"
+    forward_returns: "forward_returns"
+    cases: "cases"
+    embeddings: "embeddings"
+    optimization_weights: "optimization_weights"
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "aegis_cbr.log"
+  max_bytes: 10485760  # 10 MB
+  backup_count: 5
+
+# ============================================================================
+# DEPLOYMENT
+# ============================================================================
+deployment:
+  environment: "production"  # production, staging, development
+
+  # Production safeguards
+  safeguards:
+    max_position_size: 0.05  # 5%
+    daily_loss_limit: -0.02  # -2%
+    max_consecutive_losses: 5  # Stop after 5 consecutive losses
+
+  # API configuration
+  api:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8000
+    workers: 4
+
+  # Backup & recovery
+  backups:
+    enabled: true
+    interval_hours: 24
+    retention_days: 30

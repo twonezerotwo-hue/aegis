@@ -1,0 +1,9 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir prometheus-client requests
+
+COPY push_metrics_to_prometheus.py .
+
+CMD ["python3", "push_metrics_to_prometheus.py"]

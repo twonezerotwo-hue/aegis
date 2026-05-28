@@ -1,0 +1,35 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY consensus_engine/requirements.txt* ./requirements.txt
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY consensus_engine ./consensus_engine
+COPY scripts/healthcheck.py ./healthcheck.py
+
+# Create entrypoint
+COPY scripts/entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python /app/healthcheck.py http://localhost:8005/health || exit 1
+
+EXPOSE 8005
+
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["consensus-engine"]

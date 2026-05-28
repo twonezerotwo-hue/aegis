@@ -1,0 +1,51 @@
+# Sentinel AI — Makro Ekonomik Eşikler
+
+vix:
+  # Korku Endeksi
+  extreme_fear_threshold: 35   # VIX > 35
+  fear_threshold: 25            # VIX > 25
+  complacency_threshold: 15     # VIX < 15
+
+vix_multipliers:
+  extreme_fear: 0.4   # VIX > 35
+  fear: 0.7           # VIX > 25
+  complacency: 1.1    # VIX < 15 (max 1.0)
+
+dxy:
+  # Dolar Endeksi
+  strong_threshold_1: 105.5  # DXY > 105.5
+  strong_threshold_2: 108.0  # DXY > 108.0
+
+dxy_multipliers:
+  strong_1: 0.8   # DXY > 105.5
+  strong_2: 0.6   # DXY > 108.0
+
+fear_greed:
+  # Fear & Greed Index (0-100)
+  extreme_fear: 20   # Index < 20
+  fear: 40           # Index < 40
+  extreme_greed: 80  # Index > 80
+
+fear_greed_multipliers:
+  extreme_fear: 0.7   # Index < 20
+  fear: 0.9           # Index < 40
+  extreme_greed: 0.8  # Index > 80
+
+fed_rates:
+  # Federal Reserve Faiz Oranı
+  high_threshold: 5.0     # > 5.0%
+
+fed_rates_multipliers:
+  high: 0.9   # Faiz > 5.0
+
+oil_prices:
+  # WTI Petrol Fiyatı (USD/barrel)
+  high_threshold: 100     # > $100
+
+oil_multipliers:
+  high: 0.85  # WTI > $100
+
+# Global Constraints
+multiplier_floor: 0.1     # Minimum
+multiplier_ceiling: 1.0   # Maximum
+default_multiplier: 1.0   # Starting point

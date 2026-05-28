@@ -1,0 +1,9 @@
+requests
+pandas
+numpy
+yfinance
+streamlit
+plotly
+redis
+ccxt
+pytest

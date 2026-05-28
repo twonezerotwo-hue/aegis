@@ -1,0 +1,85 @@
+# ─── Secrets & Environment ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.Python
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+*.log
+
+# ─── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+dashboard_react/frontend/dist/
+dashboard_react/frontend/.vite/
+dashboard_react/frontend/coverage/
+*.tsbuildinfo
+
+# ─── Docker ───────────────────────────────────────────────────────────────────
+# Keep Dockerfiles and compose tracked; exclude local override
+docker-compose.override.yml
+.dockerignore
+
+# ─── Data & Large Files ───────────────────────────────────────────────────────
+backtest_reports/
+optimizer_service/trials/
+*.db
+*.sqlite
+*.sqlite3
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.parquet
+*.csv
+*.json.gz
+
+# ─── Logs & Temp ──────────────────────────────────────────────────────────────
+logs/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+pytest-cache-files-*/
+clean_backups/
+
+# ─── IDE / OS ─────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Grafana provisioned data ─────────────────────────────────────────────────
+grafana/data/
+
+# ─── Archive (keep tracked for reference) ─────────────────────────────────────
+# archive/ and quarantine/ are intentionally tracked

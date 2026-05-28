@@ -1,0 +1,64 @@
+# consensus_engine/config/horizon_configs.yaml
+# Vade (horizon) bazlı pipeline konfigürasyonu.
+# Tüm değerler runtime'da okunur; container restart gerektirmez.
+# horizon parametresi yoksa "medium" varsayılanları kullanılır.
+
+short:
+  label: "Kısa Vade (1–4 Hafta)"
+  timeframes: ["15m", "1h", "4h", "1d"]
+  primary_tf: "4h"
+  window_days: 7
+  kelly_fraction: 0.15
+  volatility_lookback_days: 14
+  cbr_window_days: 90
+  source_priority: breaking         # Acil/breaking haber öncelikli
+  bias_mode: momentum               # BUY-only bias; HOLD/SELL → Bias Dışı
+  tf_label: "TF: 4H/1D"
+  window_label: "Pencere: 7g"
+  kelly_label: "Kelly: 0.15"
+  module_weights:
+    touche: 0.40        # Momentum — teknik ağırlık artar
+    fundamental: 0.25
+    news: 0.15
+    sentinel: 0.12
+    quantum: 0.08
+
+medium:
+  label: "Orta Vade (1–3 Ay)"
+  timeframes: ["1h", "4h", "1d"]
+  primary_tf: "1d"
+  window_days: 30
+  kelly_fraction: 0.25
+  volatility_lookback_days: 30
+  cbr_window_days: 180
+  source_priority: trend            # Sektör/trend haberleri öncelikli
+  bias_mode: balanced               # BUY uyumlu, HOLD nötr
+  tf_label: "TF: 1D/4H"
+  window_label: "Pencere: 30g"
+  kelly_label: "Kelly: 0.25"
+  module_weights:
+    touche: 0.35
+    fundamental: 0.30
+    news: 0.20
+    sentinel: 0.10
+    quantum: 0.05
+
+long:
+  label: "Uzun Vade (6 Ay+)"
+  timeframes: ["4h", "1d", "1w"]
+  primary_tf: "1w"
+  window_days: 90
+  kelly_fraction: 0.40
+  volatility_lookback_days: 60
+  cbr_window_days: 730
+  source_priority: macro            # Makro/döngüsel haberler öncelikli
+  bias_mode: cyclical               # BUY veya HOLD uyumlu (trend holding kabul)
+  tf_label: "TF: 1W/1D"
+  window_label: "Pencere: 90g"
+  kelly_label: "Kelly: 0.40"
+  module_weights:
+    touche: 0.25        # Uzun vade — temel analiz ağırlık artar
+    fundamental: 0.40
+    news: 0.10
+    sentinel: 0.15
+    quantum: 0.10

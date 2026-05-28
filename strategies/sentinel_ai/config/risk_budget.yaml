@@ -1,0 +1,61 @@
+# Sentinel AI — Risk Budget & Data Sources
+
+data_sources:
+  vix:
+    api: "https://api.example.com/vix"
+    source: "CBOE"
+    update_frequency_minutes: 1
+    retry_attempts: 3
+    timeout_seconds: 5
+
+  dxy:
+    api: "https://api.example.com/dxy"
+    source: "ICE"
+    update_frequency_minutes: 5
+    retry_attempts: 3
+    timeout_seconds: 5
+
+  fear_greed:
+    api: "https://api.example.com/fear-greed"
+    source: "Alternative.me"
+    update_frequency_minutes: 60
+    retry_attempts: 3
+    timeout_seconds: 5
+
+  fed_rates:
+    api: "https://api.example.com/fed-rates"
+    source: "Federal Reserve"
+    update_frequency_minutes: 1440  # Daily
+    retry_attempts: 2
+    timeout_seconds: 10
+
+  oil_prices:
+    api: "https://api.example.com/oil-wti"
+    source: "EIA"
+    update_frequency_minutes: 60
+    retry_attempts: 3
+    timeout_seconds: 5
+
+# Risk Tolerance Thresholds
+risk_tolerance:
+  maximum_daily_loss_pct: 2.0
+  maximum_weekly_loss_pct: 5.0
+  maximum_monthly_loss_pct: 10.0
+
+# Regime Detection
+regime_detection:
+  lookback_hours: 24
+  volatility_window: 20
+  trend_window: 50
+
+# Alert Settings
+alerts:
+  multiplier_below: 0.3  # Alert if multiplier drops below 30%
+  multiplier_above: 1.0  # Alert if multiplier exceeds 100%
+
+# Backtest Settings
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2024-01-01"
+  initial_capital: 100000
+  fee_bps: 10

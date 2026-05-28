@@ -1,0 +1,113 @@
+# Trading Instruments Configuration
+
+instruments:
+  BTCUSDT:
+    symbol: BTCUSDT
+    name: Bitcoin USDT
+    type: spot
+    enabled: true
+    
+    # Tick size and lot size
+    tick_size: 0.01
+    lot_size: 0.00001
+    
+    # Limits
+    min_order_size: 0.001
+    max_order_size: 100.0
+    
+    # Fees
+    maker_fee_bps: 1.0
+    taker_fee_bps: 1.5
+    
+    # Volatility (annualized, %)
+    volatility_annual_pct: 65.0
+    
+    # Mean reversion half-life (minutes)
+    mean_reversion_half_life: 30.0
+    
+    # Liquidity metrics
+    estimated_daily_volume: 1000000000.0
+    bid_ask_spread_bps: 0.5
+    
+    # Priority (higher = more capital)
+    priority: 1
+    
+    # Market quality
+    market_quality_score: 9.5
+  
+  ETHUSDT:
+    symbol: ETHUSDT
+    name: Ethereum USDT
+    type: spot
+    enabled: true
+    
+    tick_size: 0.01
+    lot_size: 0.0001
+    
+    min_order_size: 0.01
+    max_order_size: 500.0
+    
+    maker_fee_bps: 1.0
+    taker_fee_bps: 1.5
+    
+    volatility_annual_pct: 75.0
+    mean_reversion_half_life: 25.0
+    
+    estimated_daily_volume: 500000000.0
+    bid_ask_spread_bps: 0.6
+    
+    priority: 1
+    market_quality_score: 9.0
+
+# Exchange Connections
+exchanges:
+  binance:
+    name: Binance
+    enabled: true
+    priority: 1
+    latency_ms: 50.0
+    
+  bybit:
+    name: Bybit
+    enabled: true
+    priority: 2
+    latency_ms: 100.0
+  
+  okx:
+    name: OKX
+    enabled: true
+    priority: 2
+    latency_ms: 120.0
+
+# Perpetual Contracts (for funding arb)
+perpetuals:
+  BTCUSDT:
+    symbol: BTCUSDT
+    type: perpetual
+    enabled: true
+    
+    # Funding rate (daily, %)
+    funding_rate_daily: 0.01
+    
+    # Funding rate frequency
+    funding_frequency_hours: 8.0
+    
+    # Max funding to capture (%)
+    max_funding_capture: 0.05
+
+# Market Conditions Thresholds
+market_conditions:
+  # High volatility threshold (%)
+  high_vol_threshold: 50.0
+  
+  # Low liquidity threshold (daily volume, $M)
+  low_liq_threshold: 100.0
+  
+  # Stress mode triggers
+  stress_triggers:
+    - name: "vol_spike"
+      vol_multiplier: 2.5
+    - name: "liquidity_crash"
+      volume_reduction: 0.5
+    - name: "price_gap"
+      gap_bps: 50.0

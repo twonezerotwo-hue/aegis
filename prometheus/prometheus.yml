@@ -1,0 +1,113 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'aegis-trading'
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # PostgreSQL metrics via postgres_exporter
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'postgres'
+
+  # Redis metrics
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'redis'
+
+  # Touche AI metrics
+  - job_name: 'touche-api'
+    static_configs:
+      - targets: ['touche-api:8001']
+    metrics_path: '/metrics'
+    scrape_interval: 1m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'touche-ai'
+
+  # Fundamental AI metrics
+  - job_name: 'fundamental-api'
+    static_configs:
+      - targets: ['fundamental-api:8002']
+    metrics_path: '/metrics'
+    scrape_interval: 1m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'fundamental-ai'
+
+  # Quantum AI metrics
+  - job_name: 'quantum-api'
+    static_configs:
+      - targets: ['quantum-api:8003']
+    metrics_path: '/metrics'
+    scrape_interval: 1m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'quantum-ai'
+
+  # Sentinel AI metrics
+  - job_name: 'sentinel-api'
+    static_configs:
+      - targets: ['sentinel-api:8004']
+    metrics_path: '/metrics'
+    scrape_interval: 1m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'sentinel-ai'
+
+  # Consensus Engine metrics
+  - job_name: 'consensus-api'
+    static_configs:
+      - targets: ['consensus-api:8005']
+    metrics_path: '/metrics'
+    scrape_interval: 1m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'consensus-engine'
+
+  # News AI Limited metrics
+  - job_name: 'news-ai'
+    static_configs:
+      - targets: ['news-ai-limited:8006']
+    metrics_path: '/metrics'
+    scrape_interval: 1m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'news-ai'
+
+  # Prometheus Pushgateway - for AEGIS test data generator
+  - job_name: 'pushgateway'
+    static_configs:
+      - targets: ['pushgateway:9091']
+    honor_labels: true
+    scrape_interval: 5s
+
+# Alerting configuration (optional)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            # - 'alertmanager:9093'
+
+# Load alert rules
+rule_files:
+  # - 'alert.rules'

@@ -1,0 +1,41 @@
+﻿{
+    "MockFallbacks":  {
+
+                      },
+    "NegativeCases":  [
+                          {
+                              "PnL":  -13.76,
+                              "Period":  "6M",
+                              "TF":  "1h"
+                          },
+                          {
+                              "PnL":  -37.76,
+                              "Period":  "6M",
+                              "TF":  "4h"
+                          },
+                          {
+                              "PnL":  -29.39,
+                              "Period":  "6M",
+                              "TF":  "1d"
+                          },
+                          {
+                              "PnL":  -10.36,
+                              "Period":  "12M",
+                              "TF":  "1d"
+                          }
+                      ],
+    "RegimeDistribution":  [
+                               {
+                                   "Count":  27,
+                                   "Name":  "2"
+                               },
+                               {
+                                   "Count":  16,
+                                   "Name":  "0"
+                               },
+                               {
+                                   "Count":  17,
+                                   "Name":  "1"
+                               }
+                           ]
+}

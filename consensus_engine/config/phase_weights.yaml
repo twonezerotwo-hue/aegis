@@ -1,0 +1,109 @@
+# AEGIS Dynamic Phase Weights Configuration
+#
+# Maps market regimes to 7-phase weight distributions
+# All distributions sum to 1.0 for normalization
+#
+# Regimes:
+#   - trending: Strong directional move (ADX > 25)
+#   - ranging: Consolidation/sideways (ADX < 25, BB squeeze)
+#   - crash: Panic/stress mode (VIX > 35 or Fear < 25)
+#   - high_vol: Elevated volatility but not panic
+#   - normal: Default neutral state
+
+regimes:
+  trending:
+    name: "Strong Trending Market"
+    description: "Market moving decisively. Structure and confirmation phases dominate."
+    conditions:
+      adx_threshold: 25
+      vix_max: 25
+    phase_weights:
+      phase_1_liquidity: 0.15
+      phase_2_structure: 0.20
+      phase_3_zones: 0.10
+      phase_4_confirmation: 0.15
+      phase_5_timing: 0.15
+      phase_6_risk: 0.10
+      phase_7_macro: 0.15
+
+  ranging:
+    name: "Range-Bound / Consolidation"
+    description: "Market in consolidation. Zones and confirmation crucial."
+    conditions:
+      adx_threshold: 13
+      bb_width_pct_max: 3.0
+    phase_weights:
+      phase_1_liquidity: 0.10
+      phase_2_structure: 0.10
+      phase_3_zones: 0.25
+      phase_4_confirmation: 0.20
+      phase_5_timing: 0.15
+      phase_6_risk: 0.05
+      phase_7_macro: 0.15
+
+  crash:
+    name: "Crash / Panic Mode"
+    description: "Risk management dominates. Liquidity and risk are critical."
+    conditions:
+      vix_threshold: 35
+      fear_greed_max: 25
+    phase_weights:
+      phase_1_liquidity: 0.05
+      phase_2_structure: 0.05
+      phase_3_zones: 0.10
+      phase_4_confirmation: 0.10
+      phase_5_timing: 0.10
+      phase_6_risk: 0.35
+      phase_7_macro: 0.25
+
+  high_vol:
+    name: "High Volatility (Not Crash)"
+    description: "Elevated uncertainty. Risk and timing balance returns."
+    conditions:
+      vix_threshold: 20
+      vix_max: 35
+    phase_weights:
+      phase_1_liquidity: 0.12
+      phase_2_structure: 0.12
+      phase_3_zones: 0.15
+      phase_4_confirmation: 0.12
+      phase_5_timing: 0.12
+      phase_6_risk: 0.20
+      phase_7_macro: 0.17
+
+  normal:
+    name: "Normal / Baseline State"
+    description: "Balanced weighting across all phases."
+    conditions:
+      adx_threshold: 15
+      vix_threshold: 15
+    phase_weights:
+      phase_1_liquidity: 0.14
+      phase_2_structure: 0.15
+      phase_3_zones: 0.14
+      phase_4_confirmation: 0.15
+      phase_5_timing: 0.14
+      phase_6_risk: 0.14
+      phase_7_macro: 0.14
+
+# Learning configuration
+learning:
+  learning_rate: 0.01  # 1% per trade
+  boost_factor: 1.01  # Multiply winning phases by this
+  penalty_factor: 0.995  # Multiply losing phases by this (0.5x learning_rate)
+  normalize_after_update: true
+  min_phase_weight: 0.05  # Minimum 5% per phase
+  max_phase_weight: 0.35  # Maximum 35% per phase
+
+# Persistence and tracking
+persistence:
+  save_every_n_trades: 10  # Save weights YAML every N trades
+  history_size: 1000  # Keep last N weight snapshots in memory
+  regime_persistence_threshold: 3  # Require 3 candles before regime shift confirmed
+
+# Integration
+integration:
+  regex_detector_required: true  # Must detect regime before weights used
+  validate_weights_sum: true  # Ensure each regime sums to 1.0
+  log_every_update: true  # Log each weight update
+  attribution_correlation_enabled: true  # Track phase correlation with PnL

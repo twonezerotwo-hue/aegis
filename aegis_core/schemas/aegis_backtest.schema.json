@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aegis_core/schemas/aegis_backtest.schema.json",
+  "title": "AEGIS Backtest Evidence",
+  "type": "object",
+  "required": [
+    "metrics",
+    "evidence_source",
+    "decision_permission",
+    "warnings"
+  ],
+  "properties": {
+    "metrics": {
+      "type": "object",
+      "description": "Evidence-only metrics block carried forward for later BrainChain review."
+    },
+    "evidence_source": {
+      "const": "AEGIS_BACKTEST"
+    },
+    "decision_permission": {
+      "const": "EVIDENCE_ONLY_NOT_FINAL"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "not": {
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "position_size"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "order"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "execution"
+        ]
+      }
+    },
+    {
+      "not": {
+        "required": [
+          "broker"
+        ]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

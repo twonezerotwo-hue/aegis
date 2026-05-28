@@ -1,0 +1,8 @@
+﻿auth_modules:
+  postgres:
+    type: userpass
+    userpass:
+      username: ${DATA_SOURCE_USER:-postgres}
+      password: ${DATA_SOURCE_PASS:-postgres}
+    options:
+      sslmode: disable

@@ -1,0 +1,46 @@
+analyzer:
+  port: 8007
+  host: "127.0.0.1"
+
+services:
+  # Dev ortamı: localhost kullan
+  # Docker: container names kullan (touche-api:8001, vs.)
+  touche_url: "http://localhost:8001"
+  fundamental_url: "http://localhost:8002"
+  quantum_url: "http://localhost:8003"
+  sentinel_url: "http://localhost:8004"
+  consensus_url: "http://localhost:8005"
+  news_url: "http://localhost:8006"
+  prometheus_url: "http://localhost:9090"
+
+  # Timeout ayarları
+  timeout: 5
+
+timeframes:
+  - 5m
+  - 15m
+  - 1h
+  - 4h
+  - 1d
+  - 1w
+  - 1month
+
+report:
+  include_fibonacci: true
+  include_rsi: true
+  include_macd: true
+  include_stoch_rsi: true
+  include_order_book: true
+  include_sentiment: true
+
+thresholds:
+  confidence_min: 0.4
+  fear_greed_warning: 70
+  spread_max: 0.1
+
+weights:
+  touche: 0.35
+  fundamental: 0.30
+  quantum: 0.15
+  sentinel: 0.15
+  news: 0.05

@@ -1,0 +1,45 @@
+generated_at: '2026-04-17T18:33:18.292791+00:00'
+params:
+  base_position_size: 0.0165795634483245
+  buy_threshold: 52.57668545838477
+  cbr_min_samples: 20
+  cbr_min_winrate: 0.6492598663217561
+  fundamental_weight: 0.16990012847961602
+  kelly_cap: 0.28024840743701185
+  news_weight: 0.1330622212842202
+  quantum_weight: 0.00035708105107460963
+  sell_threshold: 42.50425903900381
+  sentinel_weight: 0.24348130316921685
+  touche_weight: 0.4531992660158723
+  vol_adjust_factor: 1.1618725537370849
+study_id: opt_2026w16
+walk_forward:
+  overfitting_detail: OK
+  overfitting_warning: false
+  test:
+    max_drawdown: -0.0493
+    profit_factor: 2.7496
+    sharpe_ratio: 7.0124
+    sortino_ratio: 17.8854
+    total_trades: 100
+    win_rate: 0.68
+  train:
+    max_drawdown: -0.0716
+    profit_factor: 2.744
+    sharpe_ratio: 6.9421
+    sortino_ratio: 17.3339
+    total_trades: 300
+    win_rate: 0.6467
+  validation:
+    max_drawdown: -0.0382
+    profit_factor: 2.1884
+    sharpe_ratio: 5.1694
+    sortino_ratio: 12.6984
+    total_trades: 100
+    win_rate: 0.61
+weight_deltas:
+  fundamental: -0.1301
+  news: -0.0669
+  quantum: -0.0496
+  sentinel: 0.1435
+  touche: 0.1032

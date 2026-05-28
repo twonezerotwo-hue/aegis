@@ -1,0 +1,79 @@
+# Consensus Engine — Risk Limits ve Constraints
+
+# Global Risk Parameters
+global_risk:
+  # Portfolio seviyesi maximum loss
+  max_portfolio_loss_percent: 2.0
+  
+  # Daily volatility limit
+  max_daily_volatility: 0.03
+  
+  # Position concentration limit
+  max_concentration: 0.20
+  
+  # Duration limit for single trade (hours)
+  max_position_duration: 168
+
+# Signal-Specific Risk
+signal_risk:
+  # Touche AI High Confidence (EQS > 80)
+  high_confidence_position:
+    max_size: 0.12
+    stop_loss_percent: 2.0
+    take_profit_target: 1.5x
+  
+  # Touche AI Medium Confidence (40 < EQS < 80)
+  medium_confidence_position:
+    max_size: 0.08
+    stop_loss_percent: 1.5
+    take_profit_target: 1.0x
+  
+  # Touche AI Low Confidence (EQS < 40)
+  low_confidence_position:
+    max_size: 0.03
+    stop_loss_percent: 1.0
+    take_profit_target: 0.5x
+
+# Fundamental AI Risk
+fundamental_risk:
+  # BULLISH fundamental
+  bullish_multiplier: 1.2
+  
+  # BEARISH fundamental
+  bearish_multiplier: 0.8
+  
+  # NEUTRAL fundamental
+  neutral_multiplier: 1.0
+
+# Correlation Risk
+correlation:
+  # Maximum allowed correlation with existing positions
+  max_correlation: 0.70
+  
+  # Rebalance if drawdown exceeds
+  rebalance_drawdown_threshold: 0.10
+
+# Liquidity Requirements
+liquidity:
+  # Minimum volume to consider
+  min_daily_volume: 1000000
+  
+  # Maximum slippage tolerance
+  max_slippage: 0.001
+
+# Sentiment Risk (için ileride)
+sentiment:
+  # Very negative sentiment threshold
+  very_negative: 20.0
+  
+  # Negative sentiment threshold
+  negative: 40.0
+  
+  # Neutral sentiment threshold
+  neutral: 50.0
+  
+  # Positive sentiment threshold
+  positive: 60.0
+  
+  # Very positive sentiment threshold
+  very_positive: 80.0

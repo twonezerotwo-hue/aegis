@@ -1,0 +1,21 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY dashboard/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app and strategies (NEW: app_pro.py with 3-way weighting)
+COPY dashboard/app_pro.py .
+COPY dashboard/app.py .
+COPY dashboard/paper_trading.py .
+COPY strategies ./strategies
+COPY scripts ./scripts
+
+# Create data directory
+RUN mkdir -p /app/data
+
+# Run streamlit with NEW professional dashboard (app_pro.py)
+EXPOSE 8501
+CMD ["streamlit", "run", "app_pro.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.enableCORS=true", "--server.enableXsrfProtection=false"]

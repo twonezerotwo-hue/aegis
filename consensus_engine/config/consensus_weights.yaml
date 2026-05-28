@@ -1,0 +1,146 @@
+current_phase: "regime_adaptive_v7"
+modules:
+  touche_weight: 0.30
+  fundamental_weight: 0.40
+  news_weight: 0.10
+  sentinel_weight: 0.15
+  quantum_weight: 0.05
+thresholds:
+  buy_min: 52
+  sell_max: 48
+
+# === Regime-Adaptive Weights (from 45-run grid search 2026-04-19) ===
+# Scoring: (PnL×0.6) + (WR×0.3) + (Sharpe×0.1)
+regime_weights:
+  bull:
+    primary_tf: "1h"
+    touche_weight: 0.30
+    fundamental_weight: 0.40
+    news_weight: 0.10
+    sentinel_weight: 0.15
+    quantum_weight: 0.05
+  accumulation:
+    primary_tf: "1d"
+    touche_weight: 0.30
+    fundamental_weight: 0.40
+    news_weight: 0.10
+    sentinel_weight: 0.15
+    quantum_weight: 0.05
+  mega_bull:
+    primary_tf: "4h"
+    touche_weight: 0.30
+    fundamental_weight: 0.40
+    news_weight: 0.10
+    sentinel_weight: 0.15
+    quantum_weight: 0.05
+  mega_bull_aggressive:
+    primary_tf: "1d"
+    touche_weight: 0.50
+    fundamental_weight: 0.30
+    news_weight: 0.20
+    sentinel_weight: 0.00
+    quantum_weight: 0.00
+  default:
+    primary_tf: "1h"
+    touche_weight: 0.25
+    fundamental_weight: 0.25
+    news_weight: 0.15
+    sentinel_weight: 0.25
+    quantum_weight: 0.10
+  bear_2022:
+    description: "69k→15.5k crash — defensive, capital preservation focus"
+    primary_tf: "1d"
+    window_days: 90
+    kelly_fraction: 0.10
+    touche_weight: 0.20
+    fundamental_weight: 0.45
+    news_weight: 0.15
+    sentinel_weight: 0.15
+    quantum_weight: 0.05
+    bias_mode: "defensive"
+    risk_multiplier_cap: 0.50
+
+correlation_overrides:
+  risk_on:
+    condition: "BTC-SP500/QQQ/HYG rolling corr > 0.7"
+    modifier: "multiply"  # Boost selected weights
+    weights_boost:
+      touche: 1.15
+      quantum: 1.10
+      sentinel: 1.05
+    weights: {touche: 0.30, fundamental: 0.35, news: 0.10, sentinel: 0.20, quantum: 0.05}
+  decoupling:
+    condition: "BTC-macro corr < 0.3 AND DXY corr < -0.4"
+    modifier: "override"  # Full override for crypto-native regime
+    weights: {touche: 0.20, fundamental: 0.50, news: 0.10, sentinel: 0.15, quantum: 0.05}
+  stress:
+    condition: "PCA signal < -1.5 OR DXY spike > 2σ"
+    modifier: "override"
+    weights: {touche: 0.15, fundamental: 0.45, news: 0.20, sentinel: 0.15, quantum: 0.05}
+    kelly_cap: 0.05  # Hard cap during stress
+  default:
+    modifier: "none"  # No change
+
+phases:
+  phase1:
+    touche_weight: 0.50
+    fundamental_weight: 0.35
+    news_weight: 0.15
+  phase2:
+    touche_weight: 0.40
+    fundamental_weight: 0.35
+    news_weight: 0.25
+  phase3:
+    touche_weight: 0.40
+    fundamental_weight: 0.30
+    news_weight: 0.30
+  phaseproduction_v6:
+    touche_weight: 0.50
+    fundamental_weight: 0.35
+    news_weight: 0.15
+
+# === EVENT-AWARE WEIGHT OVERRIDES (Option B - v7.3) ===
+# Modify module weights based on event_hint parameter
+# modifier: "multiply" = boost selected weights & renormalize | "override" = full replacement
+event_overrides:
+
+  # CRASH / DUMP / BANK_CRISIS — Defensive macro focus
+  crash_events:
+    event_hints: ["CRASH", "DUMP", "BANK_CRISIS", "CONTAGION", "LIQUIDATION_SPIKE"]
+    modifier: "override"
+    weights:
+      touche: 0.20
+      fundamental: 0.45
+      news: 0.10
+      sentinel: 0.20
+      quantum: 0.05
+    kelly_cap: 0.15
+    rationale: "Capital preservation: macro + fundamental dominance"
+
+  # PUMP / ATH / BREAKOUT / ETF — Momentum + news focus
+  pump_events:
+    event_hints: ["PUMP", "ATH", "BREAKOUT", "ETF_PUMP", "FOMO_SURGE"]
+    modifier: "multiply"
+    weights_boost:
+      touche: 1.20
+      news: 1.50
+      sentinel: 0.90
+    rationale: "Momentum capture: technical + news synergy"
+
+  # STRUCTURAL events (Halving, Fork, Upgrade) — Fundamental + news blend
+  structural_events:
+    event_hints: ["HALVING", "FORK", "UPGRADE", "MAINNET_LAUNCH"]
+    modifier: "override"
+    weights:
+      touche: 0.25
+      fundamental: 0.45
+      news: 0.20
+      sentinel: 0.08
+      quantum: 0.02
+    rationale: "Structural shifts: fundamental value + narrative alignment"
+
+  # RECOVERY / CONSOLIDATION — Use regime weights as-is
+  recovery_events:
+    event_hints: ["RECOVERY", "CONSOLIDATION", "SIDEWAYS"]
+    modifier: "none"
+    rationale: "Baseline regime weights apply"

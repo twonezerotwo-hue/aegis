@@ -1,0 +1,90 @@
+# Quantum AI Limited — Market Making Parameters
+
+# Avellaneda-Stoikov Algorithm
+avellaneda_stoikov:
+  # Risk aversion coefficient (gamma) - higher = wider spreads
+  gamma: 0.075
+  
+  # Inventory target (shares)
+  inventory_target: 0.0
+  
+  # Order arrival rate (lambda) - expected orders per second
+  order_arrival_lambda: 10.0
+  
+  # Time horizon (seconds) - how often to update
+  time_horizon: 60.0
+  
+  # Min spread (basis points)
+  min_spread_bps: 0.5
+  
+  # Max spread (basis points)
+  max_spread_bps: 10.0
+
+# Spread Optimization
+spread_optimizer:
+  # Volatility window (lookback in minutes)
+  volatility_window: 60
+  
+  # Volatility multiplier for spread adjustment
+  volatility_multiplier: 2.0
+  
+  # Base spread (bps) when vol = 0
+  base_spread_bps: 1.0
+  
+  # Max spread increase from volatility
+  max_vol_spread_bps: 8.0
+
+# Skew Management
+skew:
+  # Inventory skew factor (how much to move spreads based on inventory)
+  skew_factor: 0.001
+  
+  # Max inventory level (absolute)
+  max_inventory: 1000.0
+  
+  # Risk weight for inventory (how aggressive to rebalance)
+  inventory_risk_weight: 0.5
+
+# Order Book Strategy
+orderbook:
+  # Levels to quote (how many price levels)
+  quote_levels: 5
+  
+  # Size per level (contracts/shares)
+  size_per_level: 10.0
+  
+  # Max order age (seconds before cancel)
+  max_order_age_seconds: 30.0
+  
+  # Minimum order lifetime (seconds)
+  min_order_lifetime_seconds: 5.0
+
+# Fill Targets
+fill_targets:
+  # Target fill rate (%)
+  target_fill_rate: 0.15
+  
+  # Min fill rate before widening spread
+  min_fill_rate: 0.05
+  
+  # Max fill rate before tightening spread
+  max_fill_rate: 0.30
+
+# Performance
+performance:
+  # Target daily PnL (bps)
+  target_daily_pnl_bps: 50.0
+  
+  # Sharpe ratio target
+  target_sharpe: 3.0
+
+# Execution
+execution:
+  # Max position size per order
+  max_order_size: 100.0
+  
+  # Max position lifetime (seconds)
+  max_position_lifetime: 300.0
+  
+  # Rebalance interval (seconds)
+  rebalance_interval: 10.0
