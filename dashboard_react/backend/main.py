@@ -356,8 +356,11 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
         logger.info(f"Dashboard query: symbol={symbol}, timeframe={timeframe}")
 
         # Try live AI service calls first (real-time), fall back to Prometheus
-        from routes.dashboard import _fetch_live_scores
-        live_scores = await _fetch_live_scores(symbol, timeframe)
+        from routes.dashboard import _fetch_live_scores, _fetch_module_details, _build_metric_summary
+        live_scores, module_details = await asyncio.gather(
+            _fetch_live_scores(symbol, timeframe),
+            _fetch_module_details(symbol, timeframe),
+        )
 
         # Prometheus as secondary source for anything the live call missed
         prom_scores = (None, None, None, None, None)
@@ -429,13 +432,14 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
 
         now_ts = datetime.now(timezone.utc).isoformat()
 
-        def _metric_payload(name: str, score: float, color: str, missing: bool, src: str = "live_service_api", include_symbol: bool = True, include_macro: bool = False) -> Dict[str, Any]:
+        def _metric_payload(name: str, score: float, color: str, missing: bool, src: str = "live_service_api", include_symbol: bool = True, include_macro: bool = False, summary: str = "") -> Dict[str, Any]:
             is_live = src == "live_service_api" and not missing
             payload: Dict[str, Any] = {
                 "name": name,
                 "score": round(score, 4),
                 "health": "healthy" if score > 0.5 else "warning" if score > 0.3 else "down",
                 "color": color,
+                "summary": summary,
                 "timeframe": timeframe,
                 "timestamp": now_ts if is_live else None,
                 "last_updated": now_ts if is_live else None,
@@ -474,11 +478,11 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             "symbol": symbol,
             "timeframe": timeframe,
             "metrics": {
-                "touche": _metric_payload("Touche EQS", touche_score, "#3B82F6", missing_metrics["touche"], sources["touche"]),
-                "fundamental": _metric_payload("Fundamental Score", fundamental_score, "#10B981", missing_metrics["fundamental"], sources["fundamental"]),
-                "quantum": _metric_payload("Quantum Score", quantum_score, "#F59E0B", missing_metrics["quantum"], sources["quantum"]),
-                "sentinel": _metric_payload("Sentinel Score", sentinel_score, "#8B5CF6", missing_metrics["sentinel"], sources["sentinel"], include_macro=True),
-                "news": _metric_payload("News Sentiment", news_score, "#EC4899", missing_metrics["news"], sources["news"], include_symbol=False),
+                "touche": _metric_payload("Touche EQS", touche_score, "#3B82F6", missing_metrics["touche"], sources["touche"], summary=_build_metric_summary("touche", touche_score, module_details.get("touche"))),
+                "fundamental": _metric_payload("Fundamental Score", fundamental_score, "#10B981", missing_metrics["fundamental"], sources["fundamental"], summary=_build_metric_summary("fundamental", fundamental_score, module_details.get("fundamental"))),
+                "quantum": _metric_payload("Quantum Score", quantum_score, "#F59E0B", missing_metrics["quantum"], sources["quantum"], summary=_build_metric_summary("quantum", quantum_score, None)),
+                "sentinel": _metric_payload("Sentinel Score", sentinel_score, "#8B5CF6", missing_metrics["sentinel"], sources["sentinel"], include_macro=True, summary=_build_metric_summary("sentinel", sentinel_score, module_details.get("sentinel"))),
+                "news": _metric_payload("News Sentiment", news_score, "#EC4899", missing_metrics["news"], sources["news"], include_symbol=False, summary=_build_metric_summary("news", news_score, module_details.get("news"))),
             },
             "consensus": {
                 "weighted_score": round(weighted_score, 4),

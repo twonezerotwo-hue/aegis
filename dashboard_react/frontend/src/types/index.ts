@@ -5,6 +5,7 @@ export interface Metric {
   score: number;
   health: "healthy" | "warning" | "down";
   color: string;
+  summary?: string;
   timestamp?: string | null;
   last_updated?: string | null;
   source?: string;

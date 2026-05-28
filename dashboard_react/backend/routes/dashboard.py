@@ -94,6 +94,132 @@ async def _fetch_live_scores(symbol: str, timeframe: str) -> dict[str, Optional[
 
     return scores
 
+
+async def _fetch_module_details(symbol: str, timeframe: str) -> dict:
+    """
+    Fetch raw module data for summary generation.
+    Returns a dict with keys: touche, fundamental, news, sentinel (each a raw dict or None).
+    """
+    symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"
+    symbol_clean = symbol.replace("/USDT", "").replace("/", "")
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        results = await asyncio.gather(
+            client.get(f"{_TOUCHE_URL}/touche/analyze", params={"symbol": symbol_binance, "timeframe": timeframe}),
+            client.get(f"{_FUNDAMENTAL_URL}/fundamental/metrics", params={"symbol": symbol_clean, "timeframe": timeframe}),
+            client.get(f"{_NEWS_URL}/signals", params={"symbol": symbol_clean, "timeframe": timeframe}),
+            client.get(f"{_SENTINEL_URL}/sentinel/event_risk", params={"symbol": symbol_clean}),
+            return_exceptions=True,
+        )
+
+    details: dict = {"touche": None, "fundamental": None, "news": None, "sentinel": None}
+    try:
+        if not isinstance(results[0], Exception) and results[0].status_code == 200:
+            details["touche"] = results[0].json()
+    except Exception:
+        pass
+    try:
+        if not isinstance(results[1], Exception) and results[1].status_code == 200:
+            details["fundamental"] = results[1].json()
+    except Exception:
+        pass
+    try:
+        if not isinstance(results[2], Exception) and results[2].status_code == 200:
+            d = results[2].json()
+            sigs = d.get("signals") or []
+            details["news"] = sigs[0] if sigs else None
+    except Exception:
+        pass
+    try:
+        if not isinstance(results[3], Exception) and results[3].status_code == 200:
+            details["sentinel"] = results[3].json()
+    except Exception:
+        pass
+    return details
+
+
+def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str:
+    """Build a concise data-driven summary for a metric card."""
+    if raw is None:
+        return "Servis verisine ulaşılamadı — varsayılan skor kullanıldı."
+
+    if module == "touche":
+        eqs = raw.get("eqs") or raw.get("eqs_score") or round(score * 100, 1)
+        tf = raw.get("tf_signals") or {}
+        parts = [f"{k}: {v}" for k, v in tf.items() if k in ("1h", "4h", "1d")]
+        signals = " · ".join(parts) if parts else "sinyal yok"
+        buy_count = sum(1 for v in tf.values() if v == "BUY")
+        sell_count = sum(1 for v in tf.values() if v == "SELL")
+        if buy_count > sell_count:
+            bias = "Kısa vadeli alım baskısı baskın"
+        elif sell_count > buy_count:
+            bias = "Satış baskısı baskın"
+        else:
+            bias = "Zaman dilimleri arasında çelişki var"
+        return f"EQS {eqs:.1f} · {signals} · {bias}."
+
+    if module == "fundamental":
+        mvrv = raw.get("mvrv_z_score")
+        nupl = raw.get("nupl")
+        quality = raw.get("quality", "")
+        parts = []
+        if mvrv is not None:
+            parts.append(f"MVRV Z: {mvrv:.2f}")
+            if mvrv > 3.5:
+                parts.append("(aşırı değerli)")
+            elif mvrv < 0:
+                parts.append("(düşük değerli)")
+            else:
+                parts.append("(değerleme normal)")
+        if nupl is not None:
+            parts.append(f"NUPL: {nupl:.2f}")
+            if nupl > 0.75:
+                parts.append("(öfori — riskli)")
+            elif nupl < 0:
+                parts.append("(kapitülasyon)")
+            else:
+                parts.append("(ılımlı kâr)")
+        if quality == "mock":
+            parts.append("⚠ Veri kaynağı: simüle")
+        return " · ".join(parts) + "." if parts else "On-chain veri bekleniyor."
+
+    if module == "news":
+        impact = raw.get("crypto_impact_score", round(score * 100, 1))
+        conf = raw.get("confidence_level", 0)
+        count = raw.get("news_items_count", 0)
+        sentiment = raw.get("aggregated_sentiment", 0)
+        countries = (raw.get("primary_countries") or [])[:2]
+        reg = (raw.get("impact_factors") or {}).get("regulatory_score", 0)
+        sent_str = "pozitif" if sentiment > 0.1 else "negatif" if sentiment < -0.1 else "nötr"
+        country_str = f" · Ülkeler: {', '.join(countries)}" if countries else ""
+        return (
+            f"{count} haber analizi · Etki: {impact:.0f} · "
+            f"Güven: {conf:.0f}% · Regulatory: {reg:.0f} · "
+            f"Genel duygu: {sent_str}{country_str}."
+        )
+
+    if module == "sentinel":
+        risk = raw.get("event_risk_score", 0.5)
+        hours = raw.get("hours_to_event", 0)
+        liq = (raw.get("liquidity_composite") or {}).get("liquidity_composite_score", 0)
+        vol = (raw.get("volatility_composite") or {}).get("volatility_composite", 0)
+        regime_dist = raw.get("regime_probability_distribution") or {}
+        top_regime = max(regime_dist, key=lambda k: regime_dist[k]) if regime_dist else None
+        top_pct = round(regime_dist.get(top_regime, 0) * 100, 1) if top_regime else 0
+        regime_names = {"risk_on": "Risk-On", "risk_off": "Risk-Off", "normalization": "Normalizasyon", "accumulation": "Birikim"}
+        regime_str = f" · Rejim: {regime_names.get(top_regime, top_regime)} ({top_pct}%)" if top_regime else ""
+        hours_str = f" · {hours:.0f}s içinde kritik olay" if hours and hours < 72 else ""
+        return (
+            f"Olay riski: {risk*100:.0f}%{hours_str} · "
+            f"Likidite: {liq:.0f}/100 · Oynaklık: {vol:.0f}/100{regime_str}."
+        )
+
+    if module == "quantum":
+        return f"Likidite & tahmin skoru: {score*100:.0f}% — gerçek zamanlı piyasa derinliği verisi."
+
+    return ""
+
+
 _TIMEFRAME_SECONDS = {
     "5m": 300,
     "15m": 900,
