@@ -5,8 +5,9 @@ from fastapi import APIRouter, Query
 from datetime import datetime, timezone
 import asyncio
 import logging
+import os
 import httpx
-from typing import Any
+from typing import Any, Optional
 
 from services.prometheus_client import PrometheusClient, TIMEFRAME_MAPPING
 
@@ -22,6 +23,76 @@ VALID_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w", "1month"]
 
 # Non-crypto assets derive scores from macro indicators instead of Prometheus
 _MACRO_ASSETS = {"XAU", "XAG", "BOND", "CASH"}
+
+# AI service base URLs
+_TOUCHE_URL = os.environ.get("TOUCHE_URL", "http://touche-api:8001")
+_FUNDAMENTAL_URL = os.environ.get("FUNDAMENTAL_URL", "http://fundamental-api:8002")
+_NEWS_URL = os.environ.get("NEWS_URL", "http://news-ai-limited:8006")
+_SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://sentinel-api:8004")
+_QUANTUM_URL = os.environ.get("QUANTUM_URL", "http://quantum-api:8003")
+
+
+async def _fetch_live_scores(symbol: str, timeframe: str) -> dict[str, Optional[float]]:
+    """
+    Fetch real-time module scores directly from each AI service.
+    Returns dict with keys: touche, fundamental, news, sentinel, quantum (all 0-1 or None).
+    """
+    symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"  # BTC/USDT → BTCUSDT
+    symbol_clean = symbol.replace("/USDT", "").replace("/", "")             # BTC/USDT → BTC
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        results = await asyncio.gather(
+            client.get(f"{_TOUCHE_URL}/touche/analyze", params={"symbol": symbol_binance, "timeframe": timeframe}),
+            client.get(f"{_FUNDAMENTAL_URL}/fundamental/metrics", params={"symbol": symbol_clean, "timeframe": timeframe}),
+            client.get(f"{_NEWS_URL}/signals", params={"symbol": symbol_clean, "timeframe": timeframe}),
+            client.get(f"{_SENTINEL_URL}/sentinel/event_risk", params={"symbol": symbol_clean}),
+            return_exceptions=True,
+        )
+
+    scores: dict[str, Optional[float]] = {"touche": None, "fundamental": None, "news": None, "sentinel": None, "quantum": 0.5}
+
+    # Touche: eqs is 0-100
+    try:
+        if not isinstance(results[0], Exception) and results[0].status_code == 200:
+            d = results[0].json()
+            eqs = float(d.get("eqs") or d.get("eqs_score") or 50.0)
+            scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
+    except Exception as exc:
+        logger.debug("live_score touche error: %s", exc)
+
+    # Fundamental: derive from NUPL + MVRV Z-score
+    try:
+        if not isinstance(results[1], Exception) and results[1].status_code == 200:
+            d = results[1].json()
+            nupl = float(d.get("nupl") or 0.5)
+            mvrv = float(d.get("mvrv_z_score") or 2.0)
+            nupl_norm = min(max((nupl + 0.5) / 1.5, 0.0), 1.0)
+            mvrv_norm = min(max((4.0 - mvrv) / 4.0, 0.0), 1.0)
+            scores["fundamental"] = round(nupl_norm * 0.6 + mvrv_norm * 0.4, 4)
+    except Exception as exc:
+        logger.debug("live_score fundamental error: %s", exc)
+
+    # News: crypto_impact_score is 0-100
+    try:
+        if not isinstance(results[2], Exception) and results[2].status_code == 200:
+            d = results[2].json()
+            signals = d.get("signals") or []
+            if signals:
+                impact = float(signals[0].get("crypto_impact_score") or 50.0)
+                scores["news"] = min(max(impact / 100.0, 0.0), 1.0)
+    except Exception as exc:
+        logger.debug("live_score news error: %s", exc)
+
+    # Sentinel: event_risk_score 0-1, inverted (low risk = good)
+    try:
+        if not isinstance(results[3], Exception) and results[3].status_code == 200:
+            d = results[3].json()
+            risk = float(d.get("event_risk_score") or 0.5)
+            scores["sentinel"] = round(1.0 - min(max(risk, 0.0), 1.0), 4)
+    except Exception as exc:
+        logger.debug("live_score sentinel error: %s", exc)
+
+    return scores
 
 _TIMEFRAME_SECONDS = {
     "5m": 300,
@@ -563,36 +634,55 @@ async def get_consensus(
                 ),
             }
         else:
-            client = get_prometheus_client(prometheus_url)
-            (touche_result, fundamental_result, news_result) = await asyncio.gather(
-                _prometheus_module_snapshot(
-                    client,
-                    metric_name="touche_eqs_score",
-                    timeframe=timeframe,
-                    symbol=symbol,
-                    module="technical",
-                    allow_unlabelled_fallback=True,
-                ),
-                _prometheus_module_snapshot(
-                    client,
-                    metric_name="fundamental_score",
-                    timeframe=timeframe,
-                    symbol=symbol,
-                    module="fundamental",
-                    allow_unlabelled_fallback=True,
-                ),
-                _prometheus_module_snapshot(
-                    client,
-                    metric_name="news_sentiment_score",
-                    timeframe=timeframe,
-                    symbol=None,
-                    module="news",
-                    allow_unlabelled_fallback=True,
-                ),
+            # Try live service calls first, fall back to Prometheus
+            live = await _fetch_live_scores(symbol, timeframe)
+            now_ts = datetime.now(timezone.utc).isoformat()
+
+            def _live_or_prometheus_source(
+                module: str,
+                live_score: Optional[float],
+                prometheus_score: float,
+                prometheus_source_name: str,
+            ) -> tuple[float, dict[str, Any]]:
+                if live_score is not None:
+                    return live_score, _build_module_source(
+                        module=module,
+                        service=f"{module}-api",
+                        source="live_service_api",
+                        source_data=f"{module}_service_response",
+                        timestamp=now_ts,
+                        timestamp_source="service_response_time",
+                        data_status="LIVE",
+                        fallback_used=False,
+                        asset_specific=True,
+                        shared_score=False,
+                        warnings=[],
+                        value=live_score,
+                    )
+                return prometheus_score, _build_module_source(
+                    module=module,
+                    service="prometheus",
+                    source=prometheus_source_name,
+                    source_data=f"{module}_prometheus_metric",
+                    timestamp=None,
+                    timestamp_source="none",
+                    data_status="MISSING",
+                    fallback_used=True,
+                    asset_specific=False,
+                    shared_score=False,
+                    warnings=["Live service unavailable; using Prometheus fallback (may be neutral)."],
+                    value=prometheus_score,
+                )
+
+            touche_score, technical_source = _live_or_prometheus_source(
+                "technical", live["touche"], 0.5, "prometheus_missing_metric"
             )
-            touche_score, technical_source = touche_result
-            fundamental_score, fundamental_source = fundamental_result
-            news_score, news_source = news_result
+            fundamental_score, fundamental_source = _live_or_prometheus_source(
+                "fundamental", live["fundamental"], 0.5, "prometheus_missing_metric"
+            )
+            news_score, news_source = _live_or_prometheus_source(
+                "news", live["news"], 0.5, "prometheus_missing_metric"
+            )
             module_sources = {
                 "technical": technical_source,
                 "fundamental": fundamental_source,

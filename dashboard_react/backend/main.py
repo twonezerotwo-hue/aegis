@@ -355,36 +355,44 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
 
         logger.info(f"Dashboard query: symbol={symbol}, timeframe={timeframe}")
 
-        # Get REAL metrics from Prometheus in parallel - NO FALLBACK, NO MOCK DATA
-        (touche_score, fundamental_score, quantum_score, sentinel_score, news_score) = await asyncio.gather(
-            prometheus_client.get_touche_score(symbol, timeframe),
-            prometheus_client.get_fundamental_score(symbol, timeframe),
-            prometheus_client.get_quantum_pnl(symbol, timeframe),
-            prometheus_client.get_sentinel_multiplier(symbol, timeframe),
-            prometheus_client.get_news_sentiment_score(timeframe)
-        )
+        # Try live AI service calls first (real-time), fall back to Prometheus
+        from routes.dashboard import _fetch_live_scores
+        live_scores = await _fetch_live_scores(symbol, timeframe)
 
-        # Log data availability status
-        logger.info(f"Prometheus metrics for {symbol}/{timeframe}: Touche={touche_score}, Fundamental={fundamental_score}, Quantum={quantum_score}, Sentinel={sentinel_score}, News={news_score}")
+        # Prometheus as secondary source for anything the live call missed
+        prom_scores = (None, None, None, None, None)
+        if any(v is None for v in (live_scores["touche"], live_scores["fundamental"], live_scores["news"], live_scores["sentinel"])):
+            prom_scores = await asyncio.gather(
+                prometheus_client.get_touche_score(symbol, timeframe),
+                prometheus_client.get_fundamental_score(symbol, timeframe),
+                prometheus_client.get_quantum_pnl(symbol, timeframe),
+                prometheus_client.get_sentinel_multiplier(symbol, timeframe),
+                prometheus_client.get_news_sentiment_score(timeframe),
+            )
+
+        touche_score    = live_scores["touche"]    or prom_scores[0] or 0.0
+        fundamental_score = live_scores["fundamental"] or prom_scores[1] or 0.0
+        quantum_score   = live_scores["quantum"]   or prom_scores[2] or 0.5
+        sentinel_score  = live_scores["sentinel"]  or prom_scores[3] or 0.5
+        news_score      = live_scores["news"]      or prom_scores[4] or 0.0
 
         missing_metrics = {
-            "touche": touche_score is None,
-            "fundamental": fundamental_score is None,
-            "quantum": quantum_score is None,
-            "sentinel": sentinel_score is None,
-            "news": news_score is None,
+            "touche":      live_scores["touche"] is None and prom_scores[0] is None,
+            "fundamental": live_scores["fundamental"] is None and prom_scores[1] is None,
+            "quantum":     live_scores["quantum"] is None and prom_scores[2] is None,
+            "sentinel":    live_scores["sentinel"] is None and prom_scores[3] is None,
+            "news":        live_scores["news"] is None and prom_scores[4] is None,
         }
 
-        # If any metric is None, log warning
-        if any(missing_metrics.values()):
-            logger.warning(f"Some metrics are None for {symbol}/{timeframe} - Check if AI modules are running and pushing to Prometheus")
+        sources = {
+            "touche":      "live_service_api" if live_scores["touche"] is not None else "prometheus_fallback",
+            "fundamental": "live_service_api" if live_scores["fundamental"] is not None else "prometheus_fallback",
+            "quantum":     "live_service_api" if live_scores["quantum"] is not None else "prometheus_fallback",
+            "sentinel":    "live_service_api" if live_scores["sentinel"] is not None else "prometheus_fallback",
+            "news":        "live_service_api" if live_scores["news"] is not None else "prometheus_fallback",
+        }
 
-        # Use 0.0 if None (instead of mock values) to indicate missing data
-        touche_score = touche_score if touche_score is not None else 0.0
-        fundamental_score = fundamental_score if fundamental_score is not None else 0.0
-        quantum_score = quantum_score if quantum_score is not None else 0.0
-        sentinel_score = sentinel_score if sentinel_score is not None else 0.0
-        news_score = news_score if news_score is not None else 0.0
+        logger.info(f"Scores for {symbol}/{timeframe}: T={touche_score:.3f}({sources['touche']}) F={fundamental_score:.3f} N={news_score:.3f} S={sentinel_score:.3f}")
 
         # Extended macro metrics from Sentinel client.
         macro_metrics = await sentinel_client.fetch_macro_metrics()
@@ -419,18 +427,21 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             action = "HOLD"
             confidence = 0.5
 
-        def _metric_payload(name: str, score: float, color: str, missing: bool, include_symbol: bool = True, include_macro: bool = False) -> Dict[str, Any]:
+        now_ts = datetime.now(timezone.utc).isoformat()
+
+        def _metric_payload(name: str, score: float, color: str, missing: bool, src: str = "live_service_api", include_symbol: bool = True, include_macro: bool = False) -> Dict[str, Any]:
+            is_live = src == "live_service_api" and not missing
             payload: Dict[str, Any] = {
                 "name": name,
                 "score": round(score, 4),
                 "health": "healthy" if score > 0.5 else "warning" if score > 0.3 else "down",
                 "color": color,
                 "timeframe": timeframe,
-                "timestamp": None,
-                "last_updated": None,
-                "source": "prometheus_missing_metric" if missing else "prometheus_live_query",
+                "timestamp": now_ts if is_live else None,
+                "last_updated": now_ts if is_live else None,
+                "source": src,
                 "fallback_used": missing,
-                "data_status": _data_status(None, fallback_used=False, missing_used=missing),
+                "data_status": "LIVE" if is_live else _data_status(None, fallback_used=False, missing_used=missing),
             }
             if include_symbol:
                 payload["symbol"] = symbol
@@ -463,11 +474,11 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             "symbol": symbol,
             "timeframe": timeframe,
             "metrics": {
-                "touche": _metric_payload("Touche EQS", touche_score, "#3B82F6", missing_metrics["touche"]),
-                "fundamental": _metric_payload("Fundamental Score", fundamental_score, "#10B981", missing_metrics["fundamental"]),
-                "quantum": _metric_payload("Quantum Score", quantum_score, "#F59E0B", missing_metrics["quantum"]),
-                "sentinel": _metric_payload("Sentinel Score", sentinel_score, "#8B5CF6", missing_metrics["sentinel"], include_macro=True),
-                "news": _metric_payload("News Sentiment", news_score, "#EC4899", missing_metrics["news"], include_symbol=False),
+                "touche": _metric_payload("Touche EQS", touche_score, "#3B82F6", missing_metrics["touche"], sources["touche"]),
+                "fundamental": _metric_payload("Fundamental Score", fundamental_score, "#10B981", missing_metrics["fundamental"], sources["fundamental"]),
+                "quantum": _metric_payload("Quantum Score", quantum_score, "#F59E0B", missing_metrics["quantum"], sources["quantum"]),
+                "sentinel": _metric_payload("Sentinel Score", sentinel_score, "#8B5CF6", missing_metrics["sentinel"], sources["sentinel"], include_macro=True),
+                "news": _metric_payload("News Sentiment", news_score, "#EC4899", missing_metrics["news"], sources["news"], include_symbol=False),
             },
             "consensus": {
                 "weighted_score": round(weighted_score, 4),
