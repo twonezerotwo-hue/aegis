@@ -9,7 +9,7 @@ CONSENSUS ENGINE - Dynamic Weighting & Conflict Resolution
 """
 from typing import Dict, List
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import structlog
 import json
 from pathlib import Path
@@ -376,7 +376,7 @@ class PerformanceFeedbackLoop:
                 ...
             }
         """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         cutoff_7d = now - timedelta(days=7)
         cutoff_30d = now - timedelta(days=30)
 
@@ -387,7 +387,7 @@ class PerformanceFeedbackLoop:
             trades_7d = [
                 t
                 for t in self.trade_history
-                if datetime.fromisoformat(t["timestamp"]) > cutoff_7d
+                if datetime.fromisoformat(t["timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc) > cutoff_7d
             ]
             accuracy_7d = 0.0
             if trades_7d:
@@ -398,7 +398,7 @@ class PerformanceFeedbackLoop:
             trades_30d = [
                 t
                 for t in self.trade_history
-                if datetime.fromisoformat(t["timestamp"]) > cutoff_30d
+                if datetime.fromisoformat(t["timestamp"].replace("Z", "+00:00")).astimezone(timezone.utc) > cutoff_30d
             ]
             accuracy_30d = 0.0
             if trades_30d:

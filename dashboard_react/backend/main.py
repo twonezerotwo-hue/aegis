@@ -589,10 +589,12 @@ async def backtest_report(backtest_id: str):
 async def get_analysis(symbol: str = Query("BTC/USDT"), timeframe: str = Query("4h")):
     """Get comprehensive AI analysis from Analyzer Service"""
     try:
-        # Get actual scores from Prometheus
-        touche_score = await prometheus_client.get_touche_score(symbol, timeframe) or 50.0
-        fundamental_score = await prometheus_client.get_fundamental_score(symbol, timeframe) or 50.0
-        news_score = await prometheus_client.get_news_sentiment_score(timeframe) or 50.0
+        # Get live scores from AI service APIs
+        from routes.dashboard import _fetch_live_scores
+        live = await _fetch_live_scores(symbol, timeframe)
+        touche_score = (live["touche"] * 100.0) if live["touche"] is not None else (await prometheus_client.get_touche_score(symbol, timeframe) or 50.0)
+        fundamental_score = (live["fundamental"] * 100.0) if live["fundamental"] is not None else (await prometheus_client.get_fundamental_score(symbol, timeframe) or 50.0)
+        news_score = (live["news"] * 100.0) if live["news"] is not None else (await prometheus_client.get_news_sentiment_score(timeframe) or 50.0)
 
         # Normalize to 0-100 range
         touche_score = min(max(float(touche_score), 0.0), 100.0)
@@ -635,90 +637,93 @@ async def get_analysis(symbol: str = Query("BTC/USDT"), timeframe: str = Query("
 
             # Generate detailed analysis comments
             def get_touche_comment(val):
-                if val > 65: return "GÃ¼Ã§lÃ¼ AL sinyali"
-                elif val > 55: return "AL bÃ¶lgesine yakÄ±n"
-                elif val < 35: return "GÃ¼Ã§lÃ¼ SAT sinyali"
-                elif val < 45: return "SAT bÃ¶lgesine yakÄ±n"
-                else: return "KararsÄ±z bÃ¶lge"
+                if val > 65: return "Guclu AL sinyali"
+                elif val > 55: return "AL bolgesine yakin"
+                elif val < 35: return "Guclu SAT sinyali"
+                elif val < 45: return "SAT bolgesine yakin"
+                else: return "Kararsiz bolge"
 
             def get_fundamental_comment(val):
-                if val > 65: return "Blockchain aÄŸÄ± Ã§ok aktif"
-                elif val > 55: return "Blockchain aÄŸÄ± aktif"
-                elif val < 35: return "AÄŸ aktivitesi dÃ¼ÅŸÃ¼k"
-                elif val < 45: return "AÄŸ aktivitesi azalÄ±yor"
-                else: return "AÄŸ aktivitesi nÃ¶tr"
+                if val > 65: return "On-chain ag cok aktif"
+                elif val > 55: return "On-chain ag aktif"
+                elif val < 35: return "Ag aktivitesi dusuk"
+                elif val < 45: return "Ag aktivitesi azaliyor"
+                else: return "Ag aktivitesi notr"
 
             def get_quantum_comment(val):
                 if val > 60: return "Likidite iyi, emirler rahat"
                 elif val > 40: return "Likidite orta seviye"
-                elif val < 30: return "Likidite dÃ¼ÅŸÃ¼k, uyarÄ±!"
-                else: return "Likidite sÄ±nÄ±rlandÄ±rÄ±lmÄ±ÅŸ"
+                elif val < 30: return "Likidite dusuk, uyari!"
+                else: return "Likidite sinirlandirilmis"
 
             def get_sentinel_comment(val):
-                if val > 65: return "Piyasa sakin, iÅŸlem iÃ§inde"
+                if val > 65: return "Piyasa sakin, islem icin uygun"
                 elif val > 45: return "Piyasa normal seviyede"
                 elif val < 35: return "Piyasa riskli, dikkat"
-                else: return "OynaklÄ±k yÃ¼ksek"
+                else: return "Oynaklik yuksek"
 
             def get_news_comment(val):
-                if val > 65: return "Haberler Ã§ok pozitif"
-                elif val > 55: return "Haberler pozitif yÃ¶nde"
-                elif val < 35: return "Haberler negatif yÃ¶nde"
+                if val > 65: return "Haberler cok pozitif"
+                elif val > 55: return "Haberler pozitif yonde"
+                elif val < 35: return "Haberler negatif yonde"
                 elif val < 45: return "Haberler olumsuz"
-                else: return "Haberler kararsÄ±z"
+                else: return "Haberler kararsiz"
 
             # Build detailed analysis
             risk_notes = []
             action_points = []
+            now_ts = datetime.now(timezone.utc).isoformat()
 
             if score < 40:
-                risk_notes.append(f"âš ï¸ GÃ¼Ã§lÃ¼ SAT sinyali - {score:.1f} puanÄ±nda")
-                action_points.append("SAT pozisyonu dÃ¼ÅŸÃ¼n (65+ beklenildiÄŸinde tekrar AL)")
-
+                risk_notes.append(f"Guclu SAT sinyali - {score:.1f} puaninda")
+                action_points.append("SAT pozisyonu dusun (65+ beklediginde tekrar AL)")
             elif score > 65:
-                risk_notes.append(f"âœ… GÃ¼Ã§lÃ¼ AL sinyali - {score:.1f} puanÄ±nda")
-                action_points.append(f"AL pozisyonu dÃ¼ÅŸÃ¼n (Risk: Likidite={fundamental_score:.1f})")
-
+                risk_notes.append(f"Guclu AL sinyali - {score:.1f} puaninda")
+                action_points.append(f"AL pozisyonu dusun (Risk: Fundamental={fundamental_score:.1f})")
             else:
-                risk_notes.append(f"ğŸŸ¡ KararsÄ±z bÃ¶lge - {score:.1f} puanÄ±nda BEKLE")
+                risk_notes.append(f"Kararsiz bolge - {score:.1f} puaninda BEKLE")
                 action_points.append("65+ veya 35- beklemeye devam et")
 
             if fundamental_score < 40:
-                risk_notes.append("ğŸ”— Fundamental skor dÃ¼ÅŸÃ¼k - on-chain aktivite azalÄ±ÅŸ")
-
+                risk_notes.append("Fundamental skor dusuk - on-chain aktivite azalis")
             if touche_score > 60 and news_score < 40:
-                risk_notes.append("ğŸ“° Teknik + hediye - News olumsuz, dikkatli ol")
+                risk_notes.append("Teknik pozitif ama Haberler olumsuz - dikkatli ol")
 
+            effective_ts = analysis_timestamp or now_ts
             return {
                 "success": True,
-                "timestamp": analysis_timestamp,
-                "last_updated": analysis_timestamp,
+                "timestamp": effective_ts,
+                "last_updated": effective_ts,
                 "source": analysis_source,
                 "fallback_used": False,
-                "data_status": _data_status(analysis_timestamp),
+                "data_status": "LIVE",
                 "report": {
                     "symbol": symbol,
                     "timeframe": timeframe,
-                    "timestamp": analysis_timestamp,
+                    "timestamp": effective_ts,
+                    "scores": {
+                        "touche": round(touche_score, 2),
+                        "fundamental": round(fundamental_score, 2),
+                        "news": round(news_score, 2),
+                    },
                     "consensus": {
                         "weighted_score": score,
                         "final_direction": recommendation,
-                        "confidence": confidence * 100  # Convert to 0-100 percentage
+                        "confidence": confidence * 100,
                     },
                     "final_recommendation": recommendation,
                     "final_reason": (
-                        f"ğŸ“ˆ Teknik: {touche_score:.1f}% - {get_touche_comment(touche_score)}\n"
-                        f"ğŸ”— Temel: {fundamental_score:.1f}% - {get_fundamental_comment(fundamental_score)}\n"
-                        f"ğŸ’§ Likidite: {touche_score:.1f}% - {get_quantum_comment(touche_score)}\n"
-                        f"âš ï¸ Risk: {fundamental_score:.1f}% - {get_sentinel_comment(fundamental_score)}\n"
-                        f"ğŸ“° Haber: {news_score:.1f}% - {get_news_comment(news_score)}\n\n"
-                        f"ğŸ¯ Ã–neri: {recommendation} - Skor={score:.2f}% (Confidence={confidence*100:.0f}%)"
+                        f"Teknik: {touche_score:.1f}% - {get_touche_comment(touche_score)}\n"
+                        f"Temel: {fundamental_score:.1f}% - {get_fundamental_comment(fundamental_score)}\n"
+                        f"Likidite: {touche_score:.1f}% - {get_quantum_comment(touche_score)}\n"
+                        f"Risk: {fundamental_score:.1f}% - {get_sentinel_comment(fundamental_score)}\n"
+                        f"Haber: {news_score:.1f}% - {get_news_comment(news_score)}\n\n"
+                        f"Oneri: {recommendation} - Skor={score:.2f}% (Confidence={confidence*100:.0f}%)"
                     ),
                     "risk_notes": [note for note in risk_notes if note],
-                    "action_points": action_points
+                    "action_points": action_points,
                 },
             }
-
     except httpx.ConnectError:
         logger.error(f"Cannot connect to Analyzer at {ANALYZER_URL}")
         return {

@@ -706,11 +706,31 @@ async def _build_snapshot(
         ),
         {"action": "HOLD", "confidence": 0.5, "weighted_score": 0.5, "components": {}, "timestamp": None, "last_updated": None, "source": "gateway_stream_fallback", "fallback_used": True, "data_status": "FALLBACK"},
     )
+    # Extract live scores from gateway to feed into /process
+    _gw_components = gateway_consensus.get("components") or {}
+    _gw_ts = gateway_consensus.get("timestamp") or gateway_consensus.get("last_updated")
+    _process_body: dict = {"symbol": symbol_short, "timeframe": timeframe, "horizon": horizon}
+    if _gw_ts:
+        _process_body["timestamp"] = _gw_ts
+    _touche_score = (_gw_components.get("touche") or {}).get("score")
+    _fundamental_score = (_gw_components.get("fundamental") or {}).get("score")
+    _news_score = (_gw_components.get("news") or {}).get("score")
+    if _touche_score is not None:
+        _process_body["touche_eqs"] = round(float(_touche_score) * 100, 2)
+        if _gw_ts:
+            _process_body["touche_timestamp"] = _gw_ts
+    if _fundamental_score is not None:
+        _process_body["fundamental_score"] = round(float(_fundamental_score) * 100, 2)
+        if _gw_ts:
+            _process_body["fundamental_timestamp"] = _gw_ts
+    if _news_score is not None:
+        _process_body["news_sentiment"] = round(float(_news_score), 4)
+
     process_consensus = await _safe(
         "consensus",
         _fetch_json(
             client, "POST", f"{_CONSENSUS_URL}/process",
-            json={"symbol": symbol_short, "timeframe": timeframe, "horizon": horizon},
+            json=_process_body,
         ),
         {
             "action": "HOLD", "green_light": False,
