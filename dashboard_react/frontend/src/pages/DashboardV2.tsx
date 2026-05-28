@@ -1,11 +1,9 @@
 /**
- * src/pages/DashboardV2.tsx
- * AEGIS v7.1 — Horizon-Driven Dynamic Pipeline.
- * Vade seçimi → AbortController abort → paralel fetch → dinamik label güncelleme.
- * Mevcut SSE feed (useRealTimeFeed) ve routing yapısı korunmuştur.
+ * DashboardV2 — AEGIS unified dashboard.
+ * Tabs: Portföy | Metrikler | AI Analiz | Backtest | Paper Trading
  */
 
-import React from "react";
+import React, { Suspense, lazy } from "react";
 
 import { VadeProvider, useVadeContext } from "../context/VadeContext";
 import type { Vade } from "../context/VadeContext";
@@ -23,9 +21,34 @@ import { DataStatusBadge } from "../components/ui/DataStatusBadge";
 import { SkeletonLoader } from "../components/ui/SkeletonLoader";
 import { DataSyncMonitor } from "../components/debug/DataSyncMonitor";
 
+// V1 components
+import { MetricCard } from "../components/MetricCard";
+import { ConsensusCard } from "../components/ConsensusCard";
+import { SystemStatus } from "../components/SystemStatus";
+import { AlertBanner } from "../components/AlertBanner";
+import AIAnalysisCard from "../components/AIAnalysisCard";
+import { SymbolSelector } from "../components/SymbolSelector";
+import { TimeframeSelector } from "../components/TimeframeSelector";
+import { useMetrics } from "../hooks/useMetrics";
+
 import { useRealTimeFeed } from "../hooks/useRealTimeFeed";
 import { fetchConsensus, fetchMacro } from "../services/apiV2";
 import type { ConsensusResponse, MacroViewModel } from "../types/dashboardV2";
+
+// Lazy-load heavy tab pages
+const Backtest = lazy(() => import("./Backtest").then((m) => ({ default: m.default ?? m })));
+const PaperTrading = lazy(() => import("./PaperTrading").then((m) => ({ default: m.default ?? m })));
+
+// ── Tab definitions ────────────────────────────────────────────────────────────
+type TabId = "portfolio" | "metrics" | "ai_analysis" | "backtest" | "paper_trading";
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: "portfolio",     label: "Portföy" },
+  { id: "metrics",       label: "Metrikler" },
+  { id: "ai_analysis",   label: "AI Analiz" },
+  { id: "backtest",      label: "Backtest" },
+  { id: "paper_trading", label: "Paper Trading" },
+];
 
 // ── Asset catalogue ───────────────────────────────────────────────────────────
 const ASSETS = [
@@ -53,12 +76,17 @@ const INITIAL_ASSET_STATE: Record<AssetKey, AssetState> = {
   cash:      { data: null, loading: true, error: null, lastSuccessfulData: null },
 };
 
-// ── Vade toggle options ───────────────────────────────────────────────────────
 const VADE_OPTIONS: { value: Vade; label: string; sub: string }[] = [
   { value: "short",  label: "Kısa",  sub: "1–4 Hafta" },
   { value: "medium", label: "Orta",  sub: "1–3 Ay" },
   { value: "long",   label: "Uzun",  sub: "6 Ay+" },
 ];
+
+const TabFallback: React.FC = () => (
+  <div className="flex items-center justify-center py-20">
+    <div className="h-8 w-8 animate-spin rounded-full border-4 border-slate-700 border-t-emerald-400" />
+  </div>
+);
 
 // ── Inner (needs VadeContext) ─────────────────────────────────────────────────
 const DashboardV2Inner: React.FC = () => {
@@ -72,11 +100,25 @@ const DashboardV2Inner: React.FC = () => {
     abortController,
   } = useVadeContext();
 
+  // ── Tab state ──────────────────────────────────────────────────────────────
+  const [activeTab, setActiveTab] = React.useState<TabId>("portfolio");
+
+  // ── Metrics tab state (independent symbol/TF) ─────────────────────────────
+  const [metricsSymbol, setMetricsSymbol] = React.useState("BTC/USDT");
+  const [metricsTimeframe, setMetricsTimeframe] = React.useState("1h");
+  const metricsRefreshMs = ["4h", "1d", "1w", "1month"].includes(metricsTimeframe) ? 60000 : 10000;
+  const { data: metricsData, loading: metricsLoading } = useMetrics(
+    metricsSymbol,
+    metricsTimeframe,
+    metricsRefreshMs
+  );
+
+  // ── Toast ──────────────────────────────────────────────────────────────────
   const [toasts, setToasts] = React.useState<ToastItem[]>([]);
   const toastIdRef = React.useRef(0);
   const lastAlertTsRef = React.useRef<string>("");
 
-  // SSE feed (macro + BTC consensus from live stream)
+  // ── SSE feed ───────────────────────────────────────────────────────────────
   const {
     macro,
     consensus: btcConsensusFromSSE,
@@ -89,12 +131,11 @@ const DashboardV2Inner: React.FC = () => {
     latestAlert,
   } = useRealTimeFeed("BTC/USDT", timeframe, "7d", vade);
 
-  // Per-asset consensus — re-fetched whenever horizon changes
+  // ── Per-asset consensus ────────────────────────────────────────────────────
   const [assetConsensus, setAssetConsensus] = React.useState<Record<AssetKey, AssetState>>(
     INITIAL_ASSET_STATE
   );
 
-  // Horizon-specific macro — overrides SSE macro when available
   const [macroHorizon, setMacroHorizon] = React.useState<MacroViewModel | null>(null);
   const [macroFetchError, setMacroFetchError] = React.useState<string | null>(null);
 
@@ -106,7 +147,6 @@ const DashboardV2Inner: React.FC = () => {
     []
   );
 
-  // SSE alert → toast
   React.useEffect(() => {
     if (!latestAlert || latestAlert.ts === lastAlertTsRef.current) return;
     lastAlertTsRef.current = latestAlert.ts;
@@ -114,12 +154,11 @@ const DashboardV2Inner: React.FC = () => {
       title:   latestAlert.type.replace(/_/g, " "),
       message: latestAlert.message,
       tone:
-        latestAlert.severity === "critical" ? "error"   :
+        latestAlert.severity === "critical" ? "error" :
         latestAlert.severity === "warning"  ? "warning" : "info",
     });
   }, [latestAlert, pushToast]);
 
-  // Connectivity toast
   React.useEffect(() => {
     if (connectionStatus !== "fallback") return;
     pushToast({
@@ -129,22 +168,10 @@ const DashboardV2Inner: React.FC = () => {
     });
   }, [connectionStatus, connectionMessage, pushToast]);
 
-  // ── Horizon-driven batch fetch ────────────────────────────────────────────
-  // Deps: [vade, abortController] — both change atomically via setHorizon().
-  // abortController.signal already aborted when this effect re-runs, so
-  // in-flight requests from the previous horizon are cancelled automatically.
+  // ── Horizon-driven batch fetch ─────────────────────────────────────────────
   React.useEffect(() => {
     const signal = abortController.signal;
 
-    // 🐛 DEBUG: Horizon değişimi logu
-    console.group('[DashboardV2] Horizon State Changed');
-    console.log('  Seçili Vade:', vade);
-    console.log('  TF Label:', tfLabel);
-    console.log('  Window:', windowLabel);
-    console.log('  Kelly:', kellyLabel);
-    console.groupEnd();
-
-    // Reset all to loading state immediately while preserving the last successful payload.
     setAssetConsensus((current) =>
       Object.fromEntries(
         ASSETS.map(({ key }) => [
@@ -161,41 +188,22 @@ const DashboardV2Inner: React.FC = () => {
     setMacroHorizon(null);
     setMacroFetchError(null);
 
-    // ── Macro re-fetch for this horizon ──────────────────────────────────────
-    console.log('[DashboardV2] Horizon Changed → Fetching Macro', vade);
     fetchMacro(vade, { signal })
       .then((data) => {
         if (signal.aborted) return;
         setMacroHorizon(data);
         setMacroFetchError(null);
-        console.log('[DashboardV2] Macro updated for horizon', vade, data.regime);
       })
       .catch((err: unknown) => {
         if (signal.aborted) return;
-        const msg = err instanceof Error ? err.message : "Makro veri alinamadi";
+        const msg = err instanceof Error ? err.message : "Makro veri alınamadı";
         setMacroFetchError(msg);
-        console.warn('[DashboardV2] fetchMacro failed, SSE fallback active:', msg);
       });
 
-    // Fetch each asset independently — failures are isolated
     for (const { key, symbol } of ASSETS) {
-      // 🐛 DEBUG: Fetch çağrısı logu
-      console.log('[DashboardV2] Calling fetchConsensus:', {
-        symbol,
-        timeframe,
-        horizon: vade,
-        signalStatus: signal.aborted ? 'aborted' : 'active',
-      });
-
       fetchConsensus(symbol, timeframe, { signal }, vade)
         .then((data) => {
           if (signal.aborted) return;
-          // 🐛 DEBUG: Gelen veri logu
-          console.log(`[DashboardV2] fetchConsensus result [${symbol}]:`, {
-            action: data.action,
-            confidence: data.confidence,
-            horizon_applied: (data as unknown as Record<string, unknown>).horizon_applied ?? vade,
-          });
           setAssetConsensus((cur) => ({
             ...cur,
             [key]: { data, loading: false, error: null, lastSuccessfulData: data },
@@ -204,7 +212,6 @@ const DashboardV2Inner: React.FC = () => {
         .catch((err: unknown) => {
           if (signal.aborted) return;
           const msg = err instanceof Error ? err.message : "Veri alınamadı";
-          console.warn(`[DashboardV2] fetchConsensus error [${symbol}]:`, msg);
           setAssetConsensus((cur) => ({
             ...cur,
             [key]: {
@@ -219,7 +226,7 @@ const DashboardV2Inner: React.FC = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vade, abortController]);
 
-  // BTC card: prefer live SSE consensus (fresher) over batch fetch
+  // BTC SSE override
   React.useEffect(() => {
     if (!btcConsensusFromSSE) return;
     setAssetConsensus((cur) => ({
@@ -233,22 +240,14 @@ const DashboardV2Inner: React.FC = () => {
     }));
   }, [btcConsensusFromSSE]);
 
-  // ── Retry butonu parent seviyesinde gercek refetch tetikler ──────────────
   const handleRefetch = React.useCallback(
     async (symbol: string) => {
-      const target = ASSETS.find((asset) => asset.symbol === symbol);
+      const target = ASSETS.find((a) => a.symbol === symbol);
       if (!target) return;
-
       setAssetConsensus((cur) => ({
         ...cur,
-        [target.key]: {
-          data: null,
-          loading: true,
-          error: null,
-          lastSuccessfulData: cur[target.key].lastSuccessfulData,
-        },
+        [target.key]: { data: null, loading: true, error: null, lastSuccessfulData: cur[target.key].lastSuccessfulData },
       }));
-
       try {
         const data = await fetchConsensus(symbol, timeframe, { signal: abortController.signal }, vade);
         setAssetConsensus((cur) => ({
@@ -260,28 +259,14 @@ const DashboardV2Inner: React.FC = () => {
         const msg = err instanceof Error ? err.message : "Veri alınamadı";
         setAssetConsensus((cur) => ({
           ...cur,
-          [target.key]: {
-            data: null,
-            loading: false,
-            error: msg,
-            lastSuccessfulData: cur[target.key].lastSuccessfulData,
-          },
+          [target.key]: { data: null, loading: false, error: msg, lastSuccessfulData: cur[target.key].lastSuccessfulData },
         }));
       }
     },
     [abortController, timeframe, vade]
   );
 
-  // ── aegis:horizon-changed event listener (debug / forced trigger) ───────────
-  React.useEffect(() => {
-    const handler = () =>
-      console.log(`[DashboardV2] Horizon event received: ${vade}`);
-    window.addEventListener("aegis:horizon-changed", handler);
-    return () => window.removeEventListener("aegis:horizon-changed", handler);
-  }, [vade]);
-
   // Derived values
-  // Prefer horizon-specific macro (re-fetched on vade change) over SSE macro
   const effectiveMacro = macroHorizon ?? macro;
   const macroTimestamp = effectiveMacro?.last_updated ?? effectiveMacro?.timestamp ?? null;
   const macroNeedsVisibilityWarning = Boolean(
@@ -293,13 +278,7 @@ const DashboardV2Inner: React.FC = () => {
   const effectiveLiveStatus = macroNeedsVisibilityWarning ? "fallback" : connectionStatus;
   const effectiveLiveMessage = macroNeedsVisibilityWarning
     ? effectiveMacro?.warning ?? "Macro data is not verified live data."
-    : connectionStatus === "live"
-      ? null
-      : connectionMessage ?? null;
-  const sseSelectionMismatch = Boolean(
-    btcConsensusFromSSE &&
-      (btcConsensusFromSSE.symbol !== "BTC/USDT" || btcConsensusFromSSE.timeframe !== timeframe)
-  );
+    : connectionStatus === "live" ? null : connectionMessage ?? null;
 
   const regime        = effectiveMacro?.regime ?? "WAITING";
   const derivedHealth = error
@@ -312,7 +291,6 @@ const DashboardV2Inner: React.FC = () => {
 
   const anyAssetReady = Object.values(assetConsensus).some((s) => !s.loading);
 
-  // Build alignment assets map
   const alignmentAssets = React.useMemo<Record<string, AssetResult>>(() => {
     const result: Record<string, AssetResult> = {};
     for (const { key, label } of ASSETS) {
@@ -321,6 +299,7 @@ const DashboardV2Inner: React.FC = () => {
     return result;
   }, [assetConsensus]);
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-slate-950 pb-6 text-slate-100">
       <Toast
@@ -330,7 +309,7 @@ const DashboardV2Inner: React.FC = () => {
 
       <div className="mx-auto max-w-screen-2xl space-y-4 px-4 py-4">
 
-        {/* ── GlobalHeader ─────────────────────────────────────────────────── */}
+        {/* GlobalHeader */}
         <ErrorBoundary fallback="Header">
           <GlobalHeader
             regime={regime}
@@ -343,156 +322,265 @@ const DashboardV2Inner: React.FC = () => {
           />
         </ErrorBoundary>
 
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                Data Source Binding
-              </p>
-              <p className="mt-1 text-xs text-slate-300">
-                V2 requests should use BTC/USDT with <span className="font-mono">{timeframe}</span> and horizon <span className="font-mono">{vade}</span>.
-              </p>
-            </div>
-            <DataStatusBadge
-              data={effectiveMacro}
-              timestamp={macroTimestamp}
-              showDetails
-              className="lg:items-end"
-            />
+        {/* ── Tab Bar ──────────────────────────────────────────────────────── */}
+        <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-2 py-1.5">
+          <div className="flex gap-1">
+            {TABS.map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveTab(id)}
+                aria-pressed={activeTab === id}
+                className={`flex-1 rounded-xl px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-all duration-200 ${
+                  activeTab === id
+                    ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/40"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
-          {macroNeedsVisibilityWarning && (
-            <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
-              <span className="font-semibold">
-                Macro data is not verified live data. Displayed values may be fallback, partial, or stale.
-              </span>
-              {effectiveMacro?.warning && (
-                <span className="block pt-1 text-amber-200/80">{effectiveMacro.warning}</span>
+        </div>
+
+        {/* ── PORTFÖY TAB ───────────────────────────────────────────────────── */}
+        {activeTab === "portfolio" && (
+          <>
+            {/* Data source binding info */}
+            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
+                    Data Source Binding
+                  </p>
+                  <p className="mt-1 text-xs text-slate-300">
+                    V2 requests use BTC/USDT with{" "}
+                    <span className="font-mono">{timeframe}</span> and horizon{" "}
+                    <span className="font-mono">{vade}</span>.
+                  </p>
+                </div>
+                <DataStatusBadge
+                  data={effectiveMacro}
+                  timestamp={macroTimestamp}
+                  showDetails
+                  className="lg:items-end"
+                />
+              </div>
+              {macroNeedsVisibilityWarning && (
+                <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
+                  <span className="font-semibold">
+                    Macro data is not verified live data.
+                  </span>
+                  {effectiveMacro?.warning && (
+                    <span className="block pt-1 text-amber-200/80">{effectiveMacro.warning}</span>
+                  )}
+                </div>
+              )}
+              {macroFetchError && (
+                <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
+                  Horizon macro refresh failed. Last successful data is displayed.
+                  <span className="block pt-1 text-amber-300/80">{macroFetchError}</span>
+                </div>
               )}
             </div>
-          )}
-          {sseSelectionMismatch && (
-            <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
-              SSE feed uses default symbol/timeframe; data may not match selected view.
-            </div>
-          )}
-          {macroFetchError && (
-            <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
-              Selected-horizon macro refresh failed. Last successful data keeps its original timestamp and source metadata.
-              <span className="block pt-1 text-amber-300/80">{macroFetchError}</span>
-            </div>
-          )}
-        </div>
 
-        {/* ── 1. VADE SEÇİMİ ───────────────────────────────────────────────── */}
-        <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                Yatırım Vadesi
-              </p>
-              {/* Dynamic label — updates instantly on horizon change */}
-              <p className="mt-0.5 text-[11px] font-mono text-emerald-400/80">
-                {tfLabel}&nbsp;·&nbsp;{windowLabel}&nbsp;·&nbsp;{kellyLabel}
-              </p>
+            {/* Vade seçimi */}
+            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
+                    Yatırım Vadesi
+                  </p>
+                  <p className="mt-0.5 text-[11px] font-mono text-emerald-400/80">
+                    {tfLabel}&nbsp;·&nbsp;{windowLabel}&nbsp;·&nbsp;{kellyLabel}
+                  </p>
+                </div>
+                <div className="flex gap-2" role="group" aria-label="Vade seçimi">
+                  {VADE_OPTIONS.map(({ value, label, sub }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setHorizon(value)}
+                      aria-pressed={vade === value}
+                      className={`flex flex-col items-center rounded-xl border px-4 py-2.5 text-xs
+                        font-semibold uppercase tracking-wider transition-all duration-200
+                        ${
+                          vade === value
+                            ? "border-emerald-400/60 bg-emerald-500/10 text-emerald-300 ring-2 ring-emerald-400/30"
+                            : "border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600 hover:text-white"
+                        }`}
+                    >
+                      <span>{label}</span>
+                      <span className="mt-0.5 text-[9px] font-normal normal-case tracking-normal text-slate-500">
+                        {sub}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
-            <div className="flex gap-2" role="group" aria-label="Vade seçimi">
-              {VADE_OPTIONS.map(({ value, label, sub }) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setHorizon(value)}
-                  aria-pressed={vade === value}
-                  className={`flex flex-col items-center rounded-xl border px-4 py-2.5 text-xs
-                    font-semibold uppercase tracking-wider transition-all duration-200
-                    ${
-                      vade === value
-                        ? "border-emerald-400/60 bg-emerald-500/10 text-emerald-300 ring-2 ring-emerald-400/30"
-                        : "border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600 hover:text-white"
-                    }`}
-                >
-                  <span>{label}</span>
-                  <span className="mt-0.5 text-[9px] font-normal normal-case tracking-normal text-slate-500">
-                    {sub}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
 
-        {/* ── 2. MAKRO REJİM + AI YORUMU ──────────────────────────────────── */}
-        <ErrorBoundary fallback="Makro Rejim">
-          {loading && !effectiveMacro ? (
-            <SkeletonLoader variant="card" lines={3} />
-          ) : effectiveMacro ? (
-            <MacroRegimeCommentary macro={effectiveMacro} />
-          ) : (
-            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-5 text-sm text-slate-500">
-              Makro veri bekleniyor…
-            </div>
-          )}
-        </ErrorBoundary>
+            {/* Makro Rejim */}
+            <ErrorBoundary fallback="Makro Rejim">
+              {loading && !effectiveMacro ? (
+                <SkeletonLoader variant="card" lines={3} />
+              ) : effectiveMacro ? (
+                <MacroRegimeCommentary macro={effectiveMacro} />
+              ) : (
+                <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-5 text-sm text-slate-500">
+                  Makro veri bekleniyor…
+                </div>
+              )}
+            </ErrorBoundary>
 
-        {/* ── 3. PORTFÖY DAĞILIMI + AI ÖNERİSİ ───────────────────────────── */}
-        <ErrorBoundary fallback="Portföy Dağılımı">
-          {loading && !effectiveMacro ? (
-            <SkeletonLoader variant="bar-chart" lines={5} />
-          ) : effectiveMacro ? (
-            <AllocationWithTip macro={effectiveMacro} vade={vade} />
-          ) : null}
-        </ErrorBoundary>
+            {/* Portföy Dağılımı */}
+            <ErrorBoundary fallback="Portföy Dağılımı">
+              {loading && !effectiveMacro ? (
+                <SkeletonLoader variant="bar-chart" lines={5} />
+              ) : effectiveMacro ? (
+                <AllocationWithTip macro={effectiveMacro} vade={vade} />
+              ) : null}
+            </ErrorBoundary>
 
-        {/* ── 4. VARLIK BAZLI KONSENSÜS KARTLARI ──────────────────────────── */}
-        <ErrorBoundary fallback="Varlık Kartları">
-          <div>
-            {/* Dynamic TF label from active horizon */}
-            <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
-              Varlık Bazlı Konsensüs&nbsp;·&nbsp;
-              <span className="font-mono text-emerald-500/80">{tfLabel}</span>
-            </p>
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
-              {ASSETS.map(({ key, label, symbol }) => (
-                <AssetConsensusCard
-                  key={key}
-                  assetKey={key}
-                  symbol={symbol}
-                  assetLabel={label}
-                  consensus={assetConsensus[key].data}
-                  lastSuccessfulData={assetConsensus[key].lastSuccessfulData}
-                  loading={assetConsensus[key].loading}
-                  error={assetConsensus[key].error}
-                  onRefetch={handleRefetch}
+            {/* Varlık Bazlı Konsensüs */}
+            <ErrorBoundary fallback="Varlık Kartları">
+              <div>
+                <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
+                  Varlık Bazlı Konsensüs&nbsp;·&nbsp;
+                  <span className="font-mono text-emerald-500/80">{tfLabel}</span>
+                </p>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
+                  {ASSETS.map(({ key, label, symbol }) => (
+                    <AssetConsensusCard
+                      key={key}
+                      assetKey={key}
+                      symbol={symbol}
+                      assetLabel={label}
+                      consensus={assetConsensus[key].data}
+                      lastSuccessfulData={assetConsensus[key].lastSuccessfulData}
+                      loading={assetConsensus[key].loading}
+                      error={assetConsensus[key].error}
+                      onRefetch={handleRefetch}
+                    />
+                  ))}
+                </div>
+              </div>
+            </ErrorBoundary>
+
+            {/* Cross-Validasyon */}
+            {effectiveMacro && anyAssetReady && (
+              <ErrorBoundary fallback="Cross-Validasyon">
+                <CrossAlignmentPanel
+                  macro={effectiveMacro}
+                  assets={alignmentAssets}
+                  vade={vade}
                 />
-              ))}
+              </ErrorBoundary>
+            )}
+
+            {error && (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs text-amber-200">
+                <span className="font-semibold">Canlı veri degraded:</span>{" "}
+                Son bilinen snapshot ile çalışılıyor.&nbsp;{error}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── METRİKLER TAB ─────────────────────────────────────────────────── */}
+        {activeTab === "metrics" && (
+          <div className="space-y-6">
+            {/* Symbol + Timeframe selectors */}
+            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
+              <div className="flex flex-wrap items-center gap-4">
+                <SymbolSelector
+                  currentSymbol={metricsSymbol}
+                  onSymbolChange={setMetricsSymbol}
+                />
+                <TimeframeSelector
+                  currentTimeframe={metricsTimeframe}
+                  onTimeframeChange={setMetricsTimeframe}
+                />
+                <span className="text-xs text-slate-500">
+                  Her {metricsRefreshMs / 1000}s güncellenir
+                </span>
+              </div>
             </div>
-          </div>
-        </ErrorBoundary>
 
-        {/* ── 5. UYUM & KROSS-VALIDASYON ──────────────────────────────────── */}
-        {effectiveMacro && anyAssetReady && (
-          <ErrorBoundary fallback="Cross-Validasyon">
-            <CrossAlignmentPanel
-              macro={effectiveMacro}
-              assets={alignmentAssets}
-              vade={vade}
-            />
-          </ErrorBoundary>
+            {metricsLoading && !metricsData ? (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <SkeletonLoader key={i} variant="stat" />
+                ))}
+              </div>
+            ) : metricsData ? (
+              <>
+                <AlertBanner data={metricsData} />
+
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+                  {Object.values(metricsData.metrics).map((metric) => (
+                    <MetricCard key={metric.name} metric={metric} />
+                  ))}
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-3">
+                  <ConsensusCard data={metricsData.consensus} />
+                  <SystemStatus health={metricsData.health} />
+                </div>
+
+                <p className="text-center text-xs text-slate-600">
+                  Son güncelleme:{" "}
+                  {metricsData.last_updated ?? metricsData.timestamp ?? "—"}
+                </p>
+              </>
+            ) : (
+              <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-10 text-center text-sm text-slate-500">
+                Backend bağlantısı bekleniyor — http://localhost:8502
+              </div>
+            )}
+          </div>
         )}
 
-        {/* ── Error banner ─────────────────────────────────────────────────── */}
-        {error && (
-          <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs text-amber-200">
-            <span className="font-semibold">Canlı veri degraded:</span>{" "}
-            Son bilinen snapshot ile çalışılıyor.&nbsp;Detay:&nbsp;{error}
+        {/* ── AI ANALİZ TAB ─────────────────────────────────────────────────── */}
+        {activeTab === "ai_analysis" && (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
+              <div className="flex flex-wrap items-center gap-4">
+                <SymbolSelector
+                  currentSymbol={metricsSymbol}
+                  onSymbolChange={setMetricsSymbol}
+                />
+                <TimeframeSelector
+                  currentTimeframe={metricsTimeframe}
+                  onTimeframeChange={setMetricsTimeframe}
+                />
+              </div>
+            </div>
+            <AIAnalysisCard symbol={metricsSymbol} timeframe={metricsTimeframe} />
           </div>
         )}
+
+        {/* ── BACKTEST TAB ──────────────────────────────────────────────────── */}
+        {activeTab === "backtest" && (
+          <Suspense fallback={<TabFallback />}>
+            <Backtest />
+          </Suspense>
+        )}
+
+        {/* ── PAPER TRADING TAB ─────────────────────────────────────────────── */}
+        {activeTab === "paper_trading" && (
+          <Suspense fallback={<TabFallback />}>
+            <PaperTrading />
+          </Suspense>
+        )}
+
       </div>
       <DataSyncMonitor />
     </div>
   );
 };
 
-// ── Outer wrapper — provides VadeContext ──────────────────────────────────────
+// Outer wrapper — provides VadeContext
 export const DashboardV2: React.FC = () => (
   <VadeProvider>
     <DashboardV2Inner />
