@@ -121,7 +121,7 @@ export const CrossAlignmentPanel: React.FC<Props> = ({ macro, assets, vade }) =>
 
   const eventRiskPct = macro.metrics.event_risk_score * 100;
   const eventRiskLevel =
-    eventRiskPct >= 60 ? "YUKSEK" : eventRiskPct >= 30 ? "NORMAL" : "DUSUK";
+    eventRiskPct >= 45 ? "YÜKSEK" : eventRiskPct >= 25 ? "ORTA" : "DÜŞÜK";
   const hedgeNote = !liveVerifiedMacro
     ? "(macro data not fully verified)"
     : hedgeUnverified
@@ -161,7 +161,7 @@ export const CrossAlignmentPanel: React.FC<Props> = ({ macro, assets, vade }) =>
     },
     {
       label: `EvRisk: ${eventRiskPct.toFixed(0)}% (${eventRiskLevel})`,
-      status: !liveVerifiedMacro ? "UNVERIFIED" : macro.metrics.event_risk_score < 0.5 ? "ONAY" : "RISK",
+      status: !liveVerifiedMacro ? "UNVERIFIED" : macro.metrics.event_risk_score < 0.45 ? "ONAY" : "RISK",
     },
     {
       label: "VIX normal bolge",

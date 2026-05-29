@@ -18,7 +18,6 @@ import { GlobalHeader } from "../components/layout/GlobalHeader";
 import { Toast } from "../components/layout/Toast";
 import type { ToastItem, ToastTone } from "../components/layout/Toast";
 import { ErrorBoundary } from "../components/ui/ErrorBoundary";
-import { DataStatusBadge } from "../components/ui/DataStatusBadge";
 import { SkeletonLoader } from "../components/ui/SkeletonLoader";
 import { DataSyncMonitor } from "../components/debug/DataSyncMonitor";
 
@@ -53,11 +52,11 @@ const TABS: { id: TabId; label: string }[] = [
 
 // ── Asset catalogue ───────────────────────────────────────────────────────────
 const ASSETS = [
-  { key: "gold",      symbol: "XAU/USDT",  label: "XAU — Altın" },
-  { key: "btc",       symbol: "BTC/USDT",  label: "BTC — Bitcoin" },
-  { key: "commodity", symbol: "XAG/USDT",  label: "XAG — Emtia" },
-  { key: "bond",      symbol: "BOND/USDT", label: "BOND — Tahvil" },
-  { key: "cash",      symbol: "CASH/USDT", label: "CASH — Nakit" },
+  { key: "gold",      symbol: "XAU/USDT",  label: "XAU — Altın",   tradeable: true  },
+  { key: "btc",       symbol: "BTC/USDT",  label: "BTC — Bitcoin", tradeable: true  },
+  { key: "commodity", symbol: "XAG/USDT",  label: "XAG — Emtia",  tradeable: true  },
+  { key: "bond",      symbol: "BOND/USDT", label: "BOND — Tahvil", tradeable: false },
+  { key: "cash",      symbol: "CASH/USDT", label: "CASH — Nakit",  tradeable: false },
 ] as const;
 
 type AssetKey = (typeof ASSETS)[number]["key"];
@@ -347,44 +346,6 @@ const DashboardV2Inner: React.FC = () => {
         {/* ── PORTFÖY TAB ───────────────────────────────────────────────────── */}
         {activeTab === "portfolio" && (
           <>
-            {/* Data source binding info */}
-            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
-                    Data Source Binding
-                  </p>
-                  <p className="mt-1 text-xs text-slate-300">
-                    V2 requests use BTC/USDT with{" "}
-                    <span className="font-mono">{timeframe}</span> and horizon{" "}
-                    <span className="font-mono">{vade}</span>.
-                  </p>
-                </div>
-                <DataStatusBadge
-                  data={effectiveMacro}
-                  timestamp={macroTimestamp}
-                  showDetails
-                  className="lg:items-end"
-                />
-              </div>
-              {macroNeedsVisibilityWarning && (
-                <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-100">
-                  <span className="font-semibold">
-                    Macro data is not verified live data.
-                  </span>
-                  {effectiveMacro?.warning && (
-                    <span className="block pt-1 text-amber-200/80">{effectiveMacro.warning}</span>
-                  )}
-                </div>
-              )}
-              {macroFetchError && (
-                <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200">
-                  Horizon macro refresh failed. Last successful data is displayed.
-                  <span className="block pt-1 text-amber-300/80">{macroFetchError}</span>
-                </div>
-              )}
-            </div>
-
             {/* Vade seçimi */}
             <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -443,13 +404,6 @@ const DashboardV2Inner: React.FC = () => {
               ) : null}
             </ErrorBoundary>
 
-            {/* Real Estate Decision Layer */}
-            <ErrorBoundary fallback="Gayrimenkul Karar Paneli">
-              <RealEstateDecisionPanel
-                decision={effectiveMacro?.real_estate_decision}
-              />
-            </ErrorBoundary>
-
             {/* Varlık Bazlı Konsensüs */}
             <ErrorBoundary fallback="Varlık Kartları">
               <div>
@@ -458,12 +412,13 @@ const DashboardV2Inner: React.FC = () => {
                   <span className="font-mono text-emerald-500/80">{tfLabel}</span>
                 </p>
                 <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
-                  {ASSETS.map(({ key, label, symbol }) => (
+                  {ASSETS.map(({ key, label, symbol, tradeable }) => (
                     <AssetConsensusCard
                       key={key}
                       assetKey={key}
                       symbol={symbol}
                       assetLabel={label}
+                      tradeable={tradeable}
                       consensus={assetConsensus[key].data}
                       lastSuccessfulData={assetConsensus[key].lastSuccessfulData}
                       loading={assetConsensus[key].loading}
@@ -485,6 +440,13 @@ const DashboardV2Inner: React.FC = () => {
                 />
               </ErrorBoundary>
             )}
+
+            {/* Real Estate Decision Layer — bottom of portfolio tab */}
+            <ErrorBoundary fallback="Gayrimenkul Karar Paneli">
+              <RealEstateDecisionPanel
+                decision={effectiveMacro?.real_estate_decision}
+              />
+            </ErrorBoundary>
 
             {error && (
               <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs text-amber-200">
