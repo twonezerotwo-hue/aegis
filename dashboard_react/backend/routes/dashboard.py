@@ -154,6 +154,113 @@ async def _fetch_module_details(symbol: str, timeframe: str) -> dict:
     return details
 
 
+async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, Optional[dict[str, Any]]]:
+    """Fetch raw live module payloads from each AI service."""
+    symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"
+    symbol_clean = symbol.replace("/USDT", "").replace("/", "")
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        results = await asyncio.gather(
+            client.get(f"{_TOUCHE_URL}/touche/analyze", params={"symbol": symbol_binance, "timeframe": timeframe}),
+            client.get(f"{_FUNDAMENTAL_URL}/fundamental/metrics", params={"symbol": symbol_clean, "timeframe": timeframe}),
+            client.get(f"{_NEWS_URL}/signals", params={"symbol": symbol_clean, "timeframe": timeframe}),
+            client.get(f"{_SENTINEL_URL}/sentinel/event_risk", params={"symbol": symbol_clean}),
+            client.get(f"{_QUANTUM_URL}/quantum/futures_data", params={"symbol": symbol_binance}),
+            return_exceptions=True,
+        )
+
+    payloads: dict[str, Optional[dict[str, Any]]] = {
+        "touche": None,
+        "fundamental": None,
+        "news": None,
+        "sentinel": None,
+        "quantum": None,
+    }
+    for key, result in zip(payloads.keys(), results):
+        try:
+            if not isinstance(result, Exception) and result.status_code == 200:
+                data = result.json()
+                payloads[key] = data if isinstance(data, dict) else None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("live payload %s error: %s", key, exc)
+    return payloads
+
+
+def _payload_verified(payload: Optional[dict[str, Any]]) -> bool:
+    if not payload:
+        return False
+    return (
+        bool(payload.get("verified"))
+        and str(payload.get("data_status", "UNKNOWN")).upper() in {"LIVE", "RECENT"}
+        and not bool(payload.get("fallback_used"))
+    )
+
+
+def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timeframe: str) -> dict[str, Optional[float]]:
+    scores: dict[str, Optional[float]] = {
+        "touche": None,
+        "fundamental": None,
+        "news": None,
+        "sentinel": None,
+        "quantum": None,
+    }
+    tf_signal_score: dict[str, float] = {"BUY": 0.74, "HOLD": 0.50, "NEUTRAL": 0.50, "SELL": 0.26}
+
+    touche = payloads.get("touche")
+    if _payload_verified(touche):
+        tf_signals = touche.get("tf_signals") or {}
+        tf_key = timeframe.lower()
+        if tf_key in tf_signals and str(tf_signals[tf_key]).upper() in tf_signal_score:
+            scores["touche"] = tf_signal_score[str(tf_signals[tf_key]).upper()]
+        else:
+            eqs = float(touche.get("eqs") or touche.get("eqs_score") or 50.0)
+            scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
+
+    fundamental = payloads.get("fundamental")
+    if _payload_verified(fundamental):
+        nupl = fundamental.get("nupl")
+        mvrv = fundamental.get("mvrv_z_score")
+        if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
+            nupl_norm = min(max((float(nupl) + 0.5) / 1.5, 0.0), 1.0)
+            mvrv_norm = min(max((4.0 - float(mvrv)) / 4.0, 0.0), 1.0)
+            scores["fundamental"] = round(nupl_norm * 0.6 + mvrv_norm * 0.4, 4)
+
+    news = payloads.get("news")
+    if _payload_verified(news):
+        signals = news.get("signals") or []
+        if signals:
+            impact = float(signals[0].get("crypto_impact_score") or 50.0)
+            scores["news"] = min(max(impact / 100.0, 0.0), 1.0)
+
+    sentinel = payloads.get("sentinel")
+    if _payload_verified(sentinel):
+        risk = float(sentinel.get("event_risk_score") or 0.5)
+        scores["sentinel"] = round(1.0 - min(max(risk, 0.0), 1.0), 4)
+
+    quantum = payloads.get("quantum")
+    if _payload_verified(quantum):
+        modifier = quantum.get("modifier")
+        if isinstance(modifier, (int, float)):
+            scores["quantum"] = min(max(float(modifier), 0.0), 1.0)
+
+    return scores
+
+
+async def _fetch_live_scores(symbol: str, timeframe: str) -> dict[str, Optional[float]]:
+    return _extract_live_scores(await _fetch_live_module_payloads(symbol, timeframe), timeframe)
+
+
+async def _fetch_module_details(symbol: str, timeframe: str) -> dict:
+    payloads = await _fetch_live_module_payloads(symbol, timeframe)
+    return {
+        "touche": payloads.get("touche"),
+        "fundamental": payloads.get("fundamental"),
+        "news": (payloads.get("news") or {}).get("signals", [None])[0] if payloads.get("news") else None,
+        "sentinel": payloads.get("sentinel"),
+        "quantum": payloads.get("quantum"),
+    }
+
+
 def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str:
     """Build a concise data-driven summary for a metric card."""
     if raw is None:
@@ -656,6 +763,7 @@ async def _fetch_macro_for_asset_scoring() -> dict:
     fallback_used = True
     source = "hardcoded_macro_defaults"
     warnings = ["Shared module score, not asset-specific."]
+    data_status = "FALLBACK"
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(f"{SENTINEL_URL}/sentinel/event_risk", params={"symbol": "BTC"})
@@ -668,17 +776,20 @@ async def _fetch_macro_for_asset_scoring() -> dict:
                 for key in ("dxy", "vix", "us10y", "brent", "xau", "hg"):
                     if key in snap:
                         defaults[key] = float(snap[key])
-                fallback_used = False
-                source = "sentinel_btc_macro_snapshot_shared"
+                fallback_used = bool(data.get("fallback_used", False))
+                source = str(data.get("source", "sentinel_btc_macro_snapshot_shared"))
+                data_status = str(data.get("data_status", "UNKNOWN"))
+                warnings = _merge_warnings(warnings, data.get("warnings", []))
     except Exception as e:
         logger.warning(f"Macro fetch failed, using defaults: {e}")
+        warnings = _merge_warnings(warnings, [f"Sentinel macro snapshot unavailable: {e}"])
     logger.info(f"Macro data for scoring: {defaults}")
     return {
         "metrics": defaults,
         "timestamp": timestamp if isinstance(timestamp, str) and timestamp.strip() else None,
         "source": source,
         "fallback_used": fallback_used,
-        "data_status": _status_from_timestamp(timestamp, fallback_used, timeframe="1h"),
+        "data_status": data_status if data_status != "UNKNOWN" else _status_from_timestamp(timestamp, fallback_used, timeframe="1h"),
         "warnings": warnings,
     }
 
@@ -778,55 +889,49 @@ async def get_consensus(
                 ),
             }
         else:
-            # Try live service calls first, fall back to Prometheus
-            live = await _fetch_live_scores(symbol, timeframe)
-            now_ts = datetime.now(timezone.utc).isoformat()
+            live_payloads = await _fetch_live_module_payloads(symbol, timeframe)
+            live = _extract_live_scores(live_payloads, timeframe)
 
-            def _live_or_prometheus_source(
+            def _module_payload_source(
+                payload_key: str,
                 module: str,
                 live_score: Optional[float],
-                prometheus_score: float,
-                prometheus_source_name: str,
             ) -> tuple[float, dict[str, Any]]:
-                if live_score is not None:
+                payload = live_payloads.get(payload_key)
+                if live_score is not None and payload:
+                    timestamp = payload.get("timestamp")
                     return live_score, _build_module_source(
                         module=module,
                         service=f"{module}-api",
-                        source="live_service_api",
+                        source=str(payload.get("source", "live_service_api")),
                         source_data=f"{module}_service_response",
-                        timestamp=now_ts,
-                        timestamp_source="service_response_time",
-                        data_status="LIVE",
-                        fallback_used=False,
+                        timestamp=timestamp,
+                        timestamp_source="service_payload" if timestamp else "none",
+                        data_status=str(payload.get("data_status", "UNKNOWN")),
+                        fallback_used=bool(payload.get("fallback_used", False)),
                         asset_specific=True,
                         shared_score=False,
-                        warnings=[],
+                        warnings=_merge_warnings(payload.get("warnings", [])),
                         value=live_score,
                     )
-                return prometheus_score, _build_module_source(
+                return 0.5, _build_module_source(
                     module=module,
-                    service="prometheus",
-                    source=prometheus_source_name,
-                    source_data=f"{module}_prometheus_metric",
+                    service=f"{module}-api",
+                    source="live_service_missing",
+                    source_data=f"{module}_service_response",
                     timestamp=None,
                     timestamp_source="none",
                     data_status="MISSING",
-                    fallback_used=True,
+                    fallback_used=False,
                     asset_specific=False,
                     shared_score=False,
-                    warnings=["Live service unavailable; using Prometheus fallback (may be neutral)."],
-                    value=prometheus_score,
+                    warnings=["No verified live module score available."],
+                    value=0.5,
                 )
 
-            touche_score, technical_source = _live_or_prometheus_source(
-                "technical", live["touche"], 0.5, "prometheus_missing_metric"
-            )
-            fundamental_score, fundamental_source = _live_or_prometheus_source(
-                "fundamental", live["fundamental"], 0.5, "prometheus_missing_metric"
-            )
-            news_score, news_source = _live_or_prometheus_source(
-                "news", live["news"], 0.5, "prometheus_missing_metric"
-            )
+            touche_score, technical_source = _module_payload_source("touche", "technical", live["touche"])
+            fundamental_score, fundamental_source = _module_payload_source("fundamental", "fundamental", live["fundamental"])
+            news_score, news_source = _module_payload_source("news", "news", live["news"])
             module_sources = {
                 "technical": technical_source,
                 "fundamental": fundamental_source,

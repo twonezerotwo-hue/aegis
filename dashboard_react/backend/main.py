@@ -356,10 +356,11 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
         logger.info(f"Dashboard query: symbol={symbol}, timeframe={timeframe}")
 
         # Try live AI service calls first (real-time), fall back to Prometheus
-        from routes.dashboard import _fetch_live_scores, _fetch_module_details, _build_metric_summary
-        live_scores, module_details = await asyncio.gather(
+        from routes.dashboard import _fetch_live_scores, _fetch_module_details, _build_metric_summary, _fetch_live_module_payloads
+        live_scores, module_details, live_payloads = await asyncio.gather(
             _fetch_live_scores(symbol, timeframe),
             _fetch_module_details(symbol, timeframe),
+            _fetch_live_module_payloads(symbol, timeframe),
         )
 
         # Prometheus as secondary source for anything the live call missed
@@ -387,13 +388,24 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             "news":        live_scores["news"] is None and prom_scores[4] is None,
         }
 
-        sources = {
-            "touche":      "live_service_api" if live_scores["touche"] is not None else "prometheus_fallback",
-            "fundamental": "live_service_api" if live_scores["fundamental"] is not None else "prometheus_fallback",
-            "quantum":     "live_service_api" if live_scores["quantum"] is not None else "prometheus_fallback",
-            "sentinel":    "live_service_api" if live_scores["sentinel"] is not None else "prometheus_fallback",
-            "news":        "live_service_api" if live_scores["news"] is not None else "prometheus_fallback",
-        }
+        def _payload_timestamp(module: str) -> Optional[str]:
+            payload = live_payloads.get(module) or {}
+            value = payload.get("timestamp")
+            return value if isinstance(value, str) and value.strip() else None
+
+        def _payload_source(module: str) -> str:
+            payload = live_payloads.get(module) or {}
+            if live_scores[module] is not None:
+                return str(payload.get("source", "live_service_api"))
+            return "prometheus_fallback" if not missing_metrics[module] else "live_service_missing"
+
+        def _payload_status(module: str) -> str:
+            payload = live_payloads.get(module) or {}
+            if live_scores[module] is not None:
+                return str(payload.get("data_status", "LIVE"))
+            return _data_status(None, fallback_used=False, missing_used=missing_metrics[module])
+
+        sources = {module: _payload_source(module) for module in ("touche", "fundamental", "quantum", "sentinel", "news")}
 
         logger.info(f"Scores for {symbol}/{timeframe}: T={touche_score:.3f}({sources['touche']}) F={fundamental_score:.3f} N={news_score:.3f} S={sentinel_score:.3f}")
 
@@ -430,10 +442,8 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             action = "HOLD"
             confidence = 0.5
 
-        now_ts = datetime.now(timezone.utc).isoformat()
-
-        def _metric_payload(name: str, score: float, color: str, missing: bool, src: str = "live_service_api", include_symbol: bool = True, include_macro: bool = False, summary: str = "") -> Dict[str, Any]:
-            is_live = src == "live_service_api" and not missing
+        def _metric_payload(name: str, module: str, score: float, color: str, missing: bool, include_symbol: bool = True, include_macro: bool = False, summary: str = "") -> Dict[str, Any]:
+            timestamp = _payload_timestamp(module)
             payload: Dict[str, Any] = {
                 "name": name,
                 "score": round(score, 4),
@@ -441,11 +451,11 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
                 "color": color,
                 "summary": summary,
                 "timeframe": timeframe,
-                "timestamp": now_ts if is_live else None,
-                "last_updated": now_ts if is_live else None,
-                "source": src,
+                "timestamp": timestamp,
+                "last_updated": timestamp,
+                "source": sources[module],
                 "fallback_used": missing,
-                "data_status": "LIVE" if is_live else _data_status(None, fallback_used=False, missing_used=missing),
+                "data_status": _payload_status(module),
             }
             if include_symbol:
                 payload["symbol"] = symbol
@@ -456,17 +466,24 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
         dashboard_fallback_used = any(missing_metrics.values())
         dashboard_status = _data_status(None, fallback_used=dashboard_fallback_used)
 
-        # Get system health (mock for now)
+        service_states = {
+            "touche": "UP" if live_scores["touche"] is not None or not missing_metrics["touche"] else "DOWN",
+            "fundamental": "UP" if live_scores["fundamental"] is not None or not missing_metrics["fundamental"] else "DOWN",
+            "quantum": "UP" if live_scores["quantum"] is not None or not missing_metrics["quantum"] else "DOWN",
+            "sentinel": "UP" if live_scores["sentinel"] is not None or macro_metrics.get("data_status") in {"LIVE", "RECENT"} else "DOWN",
+            "news": "UP" if live_scores["news"] is not None or not missing_metrics["news"] else "DOWN",
+            "analyzer": "UNKNOWN",
+        }
         system_health = {
-            "overall_status": "healthy",
-            "services": {"touche": "UP", "fundamental": "UP", "quantum": "UP", "sentinel": "UP", "news": "UP", "analyzer": "UP"},
-            "up_count": 6,
+            "overall_status": "healthy" if all(status == "UP" for status in service_states.values() if status != "UNKNOWN") else "degraded",
+            "services": service_states,
+            "up_count": sum(1 for status in service_states.values() if status == "UP"),
             "total_count": 6,
             "timestamp": None,
             "last_updated": None,
-            "source": "mock_system_health",
-            "fallback_used": True,
-            "data_status": _data_status(None, mock_used=True),
+            "source": "dashboard_live_service_probe",
+            "fallback_used": False,
+            "data_status": "LIVE" if any(status == "UP" for status in service_states.values()) else "MISSING",
         }
 
         return {
@@ -478,11 +495,11 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             "symbol": symbol,
             "timeframe": timeframe,
             "metrics": {
-                "touche": _metric_payload("Touche EQS", touche_score, "#3B82F6", missing_metrics["touche"], sources["touche"], summary=_build_metric_summary("touche", touche_score, module_details.get("touche"))),
-                "fundamental": _metric_payload("Fundamental Score", fundamental_score, "#10B981", missing_metrics["fundamental"], sources["fundamental"], summary=_build_metric_summary("fundamental", fundamental_score, module_details.get("fundamental"))),
-                "quantum": _metric_payload("Quantum Score", quantum_score, "#F59E0B", missing_metrics["quantum"], sources["quantum"], summary=_build_metric_summary("quantum", quantum_score, None)),
-                "sentinel": _metric_payload("Sentinel Score", sentinel_score, "#8B5CF6", missing_metrics["sentinel"], sources["sentinel"], include_macro=True, summary=_build_metric_summary("sentinel", sentinel_score, module_details.get("sentinel"))),
-                "news": _metric_payload("News Sentiment", news_score, "#EC4899", missing_metrics["news"], sources["news"], include_symbol=False, summary=_build_metric_summary("news", news_score, module_details.get("news"))),
+                "touche": _metric_payload("Touche EQS", "touche", touche_score, "#3B82F6", missing_metrics["touche"], summary=_build_metric_summary("touche", touche_score, module_details.get("touche"))),
+                "fundamental": _metric_payload("Fundamental Score", "fundamental", fundamental_score, "#10B981", missing_metrics["fundamental"], summary=_build_metric_summary("fundamental", fundamental_score, module_details.get("fundamental"))),
+                "quantum": _metric_payload("Quantum Score", "quantum", quantum_score, "#F59E0B", missing_metrics["quantum"], summary=_build_metric_summary("quantum", quantum_score, module_details.get("quantum"))),
+                "sentinel": _metric_payload("Sentinel Score", "sentinel", sentinel_score, "#8B5CF6", missing_metrics["sentinel"], include_macro=True, summary=_build_metric_summary("sentinel", sentinel_score, module_details.get("sentinel"))),
+                "news": _metric_payload("News Sentiment", "news", news_score, "#EC4899", missing_metrics["news"], include_symbol=False, summary=_build_metric_summary("news", news_score, module_details.get("news"))),
             },
             "consensus": {
                 "weighted_score": round(weighted_score, 4),

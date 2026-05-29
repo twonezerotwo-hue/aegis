@@ -2,7 +2,7 @@
 Touche AI Limited - Technical Analysis API
 LIVE_INTEGRATION: Binance async data fetcher with fallback.
 """
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, HTTPException
 from contextlib import asynccontextmanager
 import logging
 import random
@@ -10,7 +10,7 @@ import numpy as np
 import threading
 import time
 import os
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any, Optional
 from dotenv import load_dotenv
 try:
@@ -33,40 +33,130 @@ logger = logging.getLogger(__name__)
 # LIVE_INTEGRATION: Import config and data fetcher
 try:
     from strategies.touche_ai.config import config as touche_config
-    from strategies.touche_ai.services.data_fetcher import BinanceDataFetcher
+    from strategies.touche_ai.services.data_fetcher import BinanceDataFetcher, DataUnavailableError
 except ModuleNotFoundError:
     # Inside Docker: code is at /app/touche_ai/
     from config import config as touche_config  # type: ignore[no-redef]
-    from services.data_fetcher import BinanceDataFetcher  # type: ignore[no-redef]
+    from services.data_fetcher import BinanceDataFetcher, DataUnavailableError  # type: ignore[no-redef]
 
 # LIVE_INTEGRATION: Module-level fetcher instance
 _data_fetcher: Optional[BinanceDataFetcher] = None
 
 # Legacy compat: USE_REAL_API mirrors DATA_MODE for existing code paths
-USE_REAL_API = touche_config.data_mode.upper() == "LIVE"
+USE_REAL_API = touche_config.data_mode.upper() != "CACHE_ONLY"
 binance_client = None  # kept for backward compat, unused in LIVE mode
 
 if USE_REAL_API:
-    logger.info("[TOUCHE] LIVE MODE - Binance async fetcher active")
+    logger.info("[TOUCHE] LIVE-READY MODE - Binance async fetcher active")
 else:
-    logger.info("[TOUCHE] MOCK DATA MODE - Using random test values")
+    logger.info("[TOUCHE] CACHE-ONLY MODE - Binance async fetcher cache path active")
 
 # Store metric values in simple variables
 _metric_values = {
-    'touche_eqs_score': random.uniform(50, 85),
-    'touche_signal_quality': random.uniform(70, 95),
+    "touche_eqs_score": None,
+    "touche_signal_quality": None,
+    "timestamp": None,
+    "source": "uninitialized",
+    "verified": False,
+    "data_status": "UNKNOWN",
+    "warning": "No market data fetched yet.",
 }
 
+def _service_mode() -> str:
+    if _metric_values.get("data_status") == "LIVE":
+        return "REAL"
+    if _metric_values.get("data_status") == "RECENT":
+        return "CACHE_REAL"
+    if touche_config.fallback_to_mock:
+        return "MOCK_OPT_IN"
+    return "UNAVAILABLE"
+
+
+async def _refresh_metric_snapshot(symbol: str = "BTCUSDT", timeframe: str = "1h") -> None:
+    if _data_fetcher is None:
+        _metric_values.update(
+            {
+                "touche_eqs_score": None,
+                "touche_signal_quality": None,
+                "timestamp": None,
+                "source": "service_not_initialized",
+                "verified": False,
+                "data_status": "UNKNOWN",
+                "warning": "Binance data fetcher not initialized.",
+            }
+        )
+        return
+
+    try:
+        df = await _data_fetcher.fetch_ohlcv(symbol, timeframe, limit=120)
+        fetch_meta = _data_fetcher.get_last_fetch_meta()
+        closes = [float(v) for v in df["close"].tolist()] if "close" in df.columns else []
+        eqs = round(min(95.0, max(5.0, _compute_rsi(closes))), 2) if len(closes) >= 15 else None
+        signal_quality = round(min(100.0, max(0.0, len(closes) / 1.2)), 2) if closes else None
+        _metric_values.update(
+            {
+                "touche_eqs_score": eqs,
+                "touche_signal_quality": signal_quality,
+                "timestamp": fetch_meta.get("timestamp"),
+                "source": fetch_meta.get("source", "binance_public"),
+                "verified": bool(fetch_meta.get("verified")),
+                "data_status": fetch_meta.get("data_status", "UNKNOWN"),
+                "warning": fetch_meta.get("warning"),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TOUCHE] metrics refresh failed: %s", exc)
+        _metric_values.update(
+            {
+                "touche_eqs_score": None,
+                "touche_signal_quality": None,
+                "timestamp": None,
+                "source": "binance_unavailable",
+                "verified": False,
+                "data_status": "MISSING",
+                "warning": str(exc),
+            }
+        )
+
+
 def update_metrics_background():
-    """Background thread to update metrics every 10 seconds"""
+    """Background thread to refresh metric snapshot from real Binance data."""
     while True:
         try:
-            _metric_values['touche_eqs_score'] = random.uniform(50, 85)
-            _metric_values['touche_signal_quality'] = random.uniform(70, 95)
-            time.sleep(10)
-        except Exception as e:
-            logger.error(f"Error updating metrics: {e}")
-            time.sleep(10)
+            asyncio.run(_refresh_metric_snapshot())
+            time.sleep(30)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Error updating Touche metrics: %s", e)
+            time.sleep(30)
+
+
+def _emit_metric_lines() -> str:
+    mode = _service_mode()
+    lines = [
+        "# HELP touche_mode Operating mode (REAL, CACHE_REAL, UNAVAILABLE, MOCK_OPT_IN)",
+        "# TYPE touche_mode gauge",
+        f'touche_mode{{mode="{mode}"}} 1',
+        "# HELP touche_data_available Whether a real or cached Touche snapshot is available",
+        "# TYPE touche_data_available gauge",
+        f"touche_data_available {1 if _metric_values.get('touche_eqs_score') is not None else 0}",
+    ]
+    if _metric_values.get("touche_eqs_score") is not None:
+        lines.extend(
+            [
+                f"# HELP touche_eqs_score Touche EQS Score (0-100) - {mode} mode",
+                "# TYPE touche_eqs_score gauge",
+                f"touche_eqs_score {_metric_values['touche_eqs_score']}",
+            ]
+        )
+    if _metric_values.get("touche_signal_quality") is not None:
+        lines.extend(
+            [
+                f"# HELP touche_signal_quality Touche signal quality (0-100) - {mode} mode",
+                "# TYPE touche_signal_quality gauge",
+                f"touche_signal_quality {_metric_values['touche_signal_quality']}",
+            ]
+        )
+    return "\n".join(lines) + "\n"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -103,10 +193,8 @@ app = FastAPI(
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    # LIVE_INTEGRATION: report data_mode and binance connectivity
-    mode = touche_config.data_mode
     binance_connected = False
-    if mode == "LIVE" and _data_fetcher is not None:
+    if _data_fetcher is not None:
         try:
             import httpx
             async with httpx.AsyncClient(timeout=3.0) as c:
@@ -120,35 +208,21 @@ async def health_check():
         "status": "ok",
         "service": "touche-ai",
         "version": "1.0.0",
-        "data_mode": mode,
+        "data_mode": touche_config.data_mode,
         "binance_connected": binance_connected,
+        "metric_source": _metric_values.get("source"),
+        "metric_timestamp": _metric_values.get("timestamp"),
+        "verified": bool(_metric_values.get("verified")),
+        "data_status": _metric_values.get("data_status"),
     }
 
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint"""
-    # Update metric values
-    _metric_values['touche_eqs_score'] = random.uniform(50, 85)
-    _metric_values['touche_signal_quality'] = random.uniform(70, 95)
-
-    # Get standard metrics
     base_metrics = generate_latest(REGISTRY).decode()
-
-    # Add custom metrics + MODE info
-    mode = "REAL" if USE_REAL_API else "MOCK"
-    custom_metrics = (
-        f"# HELP touche_mode Operating mode (REAL API or MOCK data)\n"
-        f"# TYPE touche_mode gauge\n"
-        f"touche_mode{{mode=\"{mode}\"}} 1\n"
-        f"# HELP touche_eqs_score Touche EQS Score (0-100) - {mode} MODE\n"
-        f"# TYPE touche_eqs_score gauge\n"
-        f"touche_eqs_score {_metric_values['touche_eqs_score']}\n"
-        f"# HELP touche_signal_quality Touche Signal Quality - {mode} MODE\n"
-        f"# TYPE touche_signal_quality gauge\n"
-        f"touche_signal_quality {_metric_values['touche_signal_quality']}\n"
-    )
-
-    return Response(content=base_metrics + custom_metrics, media_type=CONTENT_TYPE_LATEST)
+    if _metric_values.get("timestamp") is None:
+        await _refresh_metric_snapshot()
+    return Response(content=base_metrics + _emit_metric_lines(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/")
 async def root():
@@ -269,6 +343,66 @@ def _compute_rsi(closes: list[float], period: int = 14) -> float:
     return round(100.0 - (100.0 / (1.0 + rs)), 2)
 
 
+def _binance_symbol(symbol: str) -> str:
+    normalized = symbol.upper().strip()
+    if normalized.endswith("USDT"):
+        return normalized
+    if "/" in normalized:
+        normalized = normalized.replace("/", "")
+    return f"{normalized}USDT"
+
+
+async def _analyze_timeframe(symbol: str, timeframe: str) -> dict[str, Any]:
+    if _data_fetcher is None:
+        raise RuntimeError("service_not_initialized")
+
+    binance_symbol = _binance_symbol(symbol)
+    df = await _data_fetcher.fetch_ohlcv(binance_symbol, timeframe, limit=120)
+    fetch_meta = _data_fetcher.get_last_fetch_meta()
+    closes = [float(v) for v in df["close"].tolist()] if "close" in df.columns else []
+    if len(closes) < 15:
+        raise RuntimeError(f"insufficient_ohlcv_rows:{timeframe}")
+
+    eqs = round(min(95.0, max(5.0, _compute_rsi(closes))), 2)
+    timestamp = fetch_meta.get("timestamp")
+    return {
+        "eqs": eqs,
+        "signal": _signal_from_eqs(eqs),
+        "timestamp": timestamp,
+        "source": fetch_meta.get("source", "binance_public"),
+        "verified": bool(fetch_meta.get("verified")),
+        "data_status": fetch_meta.get("data_status", "UNKNOWN"),
+        "cached": bool(fetch_meta.get("cached")),
+        "row_count": len(closes),
+        "range": {
+            "start": df.index[0].isoformat() if len(df.index) else None,
+            "end": df.index[-1].isoformat() if len(df.index) else None,
+        },
+    }
+
+
+def _unverified_touche_payload(
+    symbol: str,
+    requested_tfs: list[str],
+    tf_signals: dict[str, str],
+    warnings: list[str],
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "eqs": 50.0,
+        "eqs_score": 50.0,
+        "timeframes_requested": requested_tfs,
+        "tf_signals": tf_signals,
+        "source": "touche-ai",
+        "data_mode": touche_config.data_mode,
+        "fallback_used": False,
+        "verified": False,
+        "data_status": "MISSING",
+        "warnings": warnings,
+        "data_range": {"start": None, "end": None},
+    }
+
+
 def get_last_higher_low(df: Any) -> float:
     """Return last local low that is higher than the previous local low."""
     closes = _extract_series(df, "close")
@@ -354,63 +488,79 @@ async def touche_analyze(symbol: str = "BTC", timeframe: str = "1h,4h", horizon:
     requested_tfs = horizon_tfs
 
     standard_tfs = ["15m", "1h", "4h", "1d"]
-    # Extend with any horizon-specific TFs not already covered (e.g. "1w" for long)
     for _tf in requested_tfs:
         if _tf not in standard_tfs:
             standard_tfs.append(_tf)
-    mode = touche_config.data_mode
-    fallback_used = False
-    data_range: dict = {}
+    tf_results: dict[str, dict[str, Any]] = {}
+    unavailable_timeframes: list[str] = []
+    warnings: list[str] = []
+    tf_signals: dict[str, str] = {}
+    tf_eqs: dict[str, float] = {}
+    ranges: list[dict[str, str | None]] = []
 
-    # LIVE_INTEGRATION: attempt to derive EQS from live closes
-    if mode == "LIVE" and _data_fetcher is not None:
+    for tf in standard_tfs:
         try:
-            import pandas as pd
-            primary_tf = requested_tfs[0] if requested_tfs else "1h"
-            df = await _data_fetcher.fetch_ohlcv(sym, primary_tf, limit=100)
-            # Detect whether fetcher fell back internally
-            fallback_used = not (hasattr(df.index, "tzinfo") and len(df) > 10)
-            if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0:
-                data_range = {
-                    "start": df.index[0].isoformat(),
-                    "end": df.index[-1].isoformat(),
-                }
-            closes = df["close"].tolist() if "close" in df.columns else []
-            rsi_live = _compute_rsi([float(c) for c in closes]) if len(closes) > 14 else 50.0
-            # Map RSI to an EQS proxy for the primary timeframe
-            live_eqs_primary = round(min(95.0, max(5.0, rsi_live)), 2)
-            tf_eqs: dict = {tf: _eqs_for_timeframe(sym, tf) for tf in standard_tfs}
-            tf_eqs[primary_tf] = live_eqs_primary
-        except Exception as exc:
-            logger.warning("[DATA] Fallback activated for %s: %s", sym, exc)
-            fallback_used = True
-            tf_eqs = {tf: _eqs_for_timeframe(sym, tf) for tf in standard_tfs}
-    else:
-        tf_eqs = {tf: _eqs_for_timeframe(sym, tf) for tf in standard_tfs}
+            result = await _analyze_timeframe(sym, tf)
+            tf_results[tf] = result
+            tf_eqs[tf] = float(result["eqs"])
+            tf_signals[tf] = str(result["signal"])
+            if isinstance(result.get("range"), dict):
+                ranges.append(result["range"])
+        except DataUnavailableError as exc:
+            unavailable_timeframes.append(tf)
+            tf_signals[tf] = "UNAVAILABLE"
+            warnings.append(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            unavailable_timeframes.append(tf)
+            tf_signals[tf] = "UNAVAILABLE"
+            warnings.append(f"{tf}: {exc}")
 
-    tf_signals: dict = {tf: _signal_from_eqs(eqs) for tf, eqs in tf_eqs.items()}
-    agg_tfs = [tf for tf in requested_tfs if tf in tf_eqs] or standard_tfs
-    eqs = round(sum(tf_eqs[tf] for tf in agg_tfs) / len(agg_tfs), 2)
+    requested_scores = [tf_eqs[tf] for tf in requested_tfs if tf in tf_eqs]
+    if not requested_scores:
+        return _unverified_touche_payload(
+            sym,
+            requested_tfs,
+            tf_signals,
+            warnings or [f"No verified OHLCV data available for {sym}."],
+        )
 
-    logger.info(
-        "[DATA] Mode=%s, Source=Binance, Symbol=%s, EQS=%s, Fallback=%s",
-        mode, sym, eqs, fallback_used,
-    )
+    eqs = round(sum(requested_scores) / len(requested_scores), 2)
+    timestamps = [tf_results[tf].get("timestamp") for tf in requested_tfs if tf in tf_results]
+    valid_timestamps = [ts for ts in timestamps if isinstance(ts, str) and ts.strip()]
+    statuses = [str(tf_results[tf].get("data_status", "UNKNOWN")) for tf in requested_tfs if tf in tf_results]
+    data_status = "LIVE" if all(status == "LIVE" for status in statuses) else "RECENT" if statuses and all(
+        status in {"LIVE", "RECENT"} for status in statuses
+    ) else "PARTIAL_FALLBACK" if unavailable_timeframes else "UNKNOWN"
+    verified = data_status in {"LIVE", "RECENT"} and not unavailable_timeframes
+    data_range = {
+        "start": min(
+            (item.get("start") for item in ranges if isinstance(item.get("start"), str)),
+            default=None,
+        ),
+        "end": max(
+            (item.get("end") for item in ranges if isinstance(item.get("end"), str)),
+            default=None,
+        ),
+    }
 
-    response: dict = {
+    return {
         "symbol": sym,
         "eqs": eqs,
-        "eqs_score": eqs,  # LIVE_INTEGRATION: alias expected by tests
+        "eqs_score": eqs,
         "timeframes_requested": requested_tfs,
         "tf_signals": tf_signals,
+        "timeframe_details": tf_results,
         "source": "touche-ai",
-        "data_mode": mode,
-        "fallback_used": fallback_used,
+        "timestamp": max(valid_timestamps) if valid_timestamps else None,
+        "data_mode": touche_config.data_mode,
+        "fallback_used": False,
+        "verified": verified,
+        "data_status": data_status,
+        "warnings": warnings,
+        "unavailable_timeframes": unavailable_timeframes,
         "horizon_applied": horizon,
+        "data_range": data_range,
     }
-    # FIX: Always include data_range for schema consistency.
-    response["data_range"] = data_range if data_range else {"start": None, "end": None}
-    return response
 
 
 @app.get("/touche/exit_signal")
@@ -431,24 +581,32 @@ async def touche_exit_signal(
     sym = symbol.upper().strip()
     side = (position_side or "LONG").strip().upper()
 
-    # LIVE_INTEGRATION: Prefer async Binance fetcher in LIVE mode.
-    if touche_config.data_mode == "LIVE" and _data_fetcher is not None:
+    fetch_meta: dict[str, Any] = {
+        "source": "binance_unavailable",
+        "timestamp": None,
+        "verified": False,
+        "data_status": "MISSING",
+        "warning": "No verified 15m OHLCV data available.",
+    }
+    if _data_fetcher is not None:
         try:
             df = await _data_fetcher.fetch_ohlcv(sym, interval="15m", limit=120)
+            fetch_meta = _data_fetcher.get_last_fetch_meta()
             closes = [float(v) for v in df["close"].tolist()] if "close" in df.columns else []
             volumes = [float(v) for v in df["volume"].tolist()] if "volume" in df.columns else []
             ohlcv = {"close": closes, "volume": volumes}
-        except Exception as exc:
-            logger.warning("[DATA] exit_signal live fetch failed for %s: %s", sym, exc)
-            ohlcv = _get_recent_ohlcv(sym, limit=120)
-            closes = _extract_series(ohlcv, "close")
-            volumes = _extract_series(ohlcv, "volume")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DATA] exit_signal fetch failed for %s: %s", sym, exc)
+            closes = []
+            volumes = []
+            ohlcv = {"close": closes, "volume": volumes}
+            fetch_meta["warning"] = str(exc)
     else:
-        ohlcv = _get_recent_ohlcv(sym, limit=120)
-        closes = _extract_series(ohlcv, "close")
-        volumes = _extract_series(ohlcv, "volume")
+        closes = []
+        volumes = []
+        ohlcv = {"close": closes, "volume": volumes}
 
-    current_price = float(closes[-1]) if closes else _price_proxy_for_symbol(sym)
+    current_price = float(closes[-1]) if closes else float(entry_price)
     rsi_val = _compute_rsi(closes)
     volume_avg_20 = (sum(volumes[-20:]) / 20.0) if len(volumes) >= 20 else (sum(volumes) / len(volumes) if volumes else 0.0)
     current_volume = float(volumes[-1]) if volumes else 0.0
@@ -470,7 +628,11 @@ async def touche_exit_signal(
             "current_volume": current_volume,
             "avg_volume_20": round(volume_avg_20, 2),
             "source": "touche-ai",
-            "data_mode": "REAL" if USE_REAL_API else "MOCK",
+            "timestamp": fetch_meta.get("timestamp"),
+            "verified": bool(fetch_meta.get("verified")),
+            "data_status": fetch_meta.get("data_status", "UNKNOWN"),
+            "warning": fetch_meta.get("warning"),
+            "data_mode": _service_mode(),
         }
 
     if side == "SHORT" and is_broken(current_price, lh_level, "SHORT"):
@@ -487,7 +649,11 @@ async def touche_exit_signal(
             "current_volume": current_volume,
             "avg_volume_20": round(volume_avg_20, 2),
             "source": "touche-ai",
-            "data_mode": "REAL" if USE_REAL_API else "MOCK",
+            "timestamp": fetch_meta.get("timestamp"),
+            "verified": bool(fetch_meta.get("verified")),
+            "data_status": fetch_meta.get("data_status", "UNKNOWN"),
+            "warning": fetch_meta.get("warning"),
+            "data_mode": _service_mode(),
         }
 
     if rsi_val > 70.0 and current_volume < volume_avg_20:
@@ -503,7 +669,11 @@ async def touche_exit_signal(
             "current_volume": current_volume,
             "avg_volume_20": round(volume_avg_20, 2),
             "source": "touche-ai",
-            "data_mode": "REAL" if USE_REAL_API else "MOCK",
+            "timestamp": fetch_meta.get("timestamp"),
+            "verified": bool(fetch_meta.get("verified")),
+            "data_status": fetch_meta.get("data_status", "UNKNOWN"),
+            "warning": fetch_meta.get("warning"),
+            "data_mode": _service_mode(),
         }
 
     return {
@@ -517,7 +687,11 @@ async def touche_exit_signal(
         "current_volume": current_volume,
         "avg_volume_20": round(volume_avg_20, 2),
         "source": "touche-ai",
-        "data_mode": "REAL" if USE_REAL_API else "MOCK",
+        "timestamp": fetch_meta.get("timestamp"),
+        "verified": bool(fetch_meta.get("verified")),
+        "data_status": fetch_meta.get("data_status", "UNKNOWN"),
+        "warning": fetch_meta.get("warning"),
+        "data_mode": _service_mode(),
     }
 
 

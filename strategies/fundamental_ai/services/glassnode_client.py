@@ -2,7 +2,7 @@
 AEGIS v7.2 — Fundamental istemcisi (Glassnode + Twelve Data fallback).
 
 Fundamental AI - Glassnode Client (services layer)
-LIVE_INTEGRATION: httpx async client with Redis cache, Prometheus metrics, and mock fallback.
+LIVE_INTEGRATION: httpx async client with Redis cache, live proxy sources, and explicit unavailable states.
 """
 from __future__ import annotations
 
@@ -25,19 +25,31 @@ _FRESHNESS_GAUGE = Gauge(
     ["metric"],
 )
 
-# Cache TTL: 15 minutes
 _CACHE_TTL = 900
 
 
-def _mock_metric(name: str) -> Dict[str, Any]:
-    """Safe mock values when Glassnode is unavailable."""
-    _mocks = {
-        "mvrv": {"mvrv_z_score": 1.87, "quality": "mock"},
-        "nupl": {"nupl": 0.34, "quality": "mock"},
-        "transaction_volume": {"transaction_volume": 3_500_000_000.0, "quality": "mock"},
-        "active_addresses": {"active_addresses": 950_000, "quality": "mock"},
+def _metric_field(metric: str) -> str:
+    metric_map: Dict[str, str] = {
+        "mvrv": "mvrv_z_score",
+        "nupl": "nupl",
+        "transaction_volume": "transaction_volume",
+        "active_addresses": "active_addresses",
     }
-    return _mocks.get(name, {"value": None, "quality": "mock"})
+    return metric_map.get(metric, metric)
+
+
+def _unavailable_metric(metric: str, reason: str) -> Dict[str, Any]:
+    field = _metric_field(metric)
+    return {
+        field: None,
+        "quality": "unavailable",
+        "verified": False,
+        "fallback_used": False,
+        "data_status": "MISSING",
+        "warnings": [reason],
+        "timestamp": None,
+        "source": "unavailable",
+    }
 
 
 class GlassnodeServiceClient:
@@ -48,7 +60,7 @@ class GlassnodeServiceClient:
     - API key read exclusively from GLASSNODE_API_KEY env var.
     - Redis cache with 15-minute TTL per metric.
     - Prometheus gauge: fundamental_data_freshness_seconds.
-    - Falls back to last cache or mock on error.
+    - Falls back to last cache or live proxy on error.
     """
 
     _ENDPOINTS: Dict[str, str] = {
@@ -92,35 +104,33 @@ class GlassnodeServiceClient:
     ) -> Dict[str, Any]:
         """
         Fetch multiple on-chain metrics for a symbol.
-        Priority: Glassnode (paid) → Twelve Data → CoinGecko (free) → mock
+        Priority: Glassnode (paid) → Twelve Data → CoinGecko (free) → cache → unavailable
         """
-        if not self._api_key:
-            if self._twelve_key:
-                logger.info("[FUNDAMENTAL] Twelve Data fallback active (%s)", symbol)
-                result: Dict[str, Any] = {
-                    "source": "twelve_data",
-                    "cached": False,
-                    "symbol": symbol.upper(),
-                }
-                for metric in metrics:
-                    result.update(await self._twelve_metric(symbol.upper(), metric))
-                return result
-
-            # CoinGecko free tier as second fallback
-            cg_result = await self._coingecko_metrics(symbol.upper(), metrics)
-            if cg_result:
-                return cg_result
-
-            logger.info("[FUNDAMENTAL] No API keys – returning mock data for %s", symbol)
-            result = {"source": "mock", "cached": False, "symbol": symbol.upper()}
-            for metric in metrics:
-                result.update(_mock_metric(metric))
-            return result
-
-        combined: Dict[str, Any] = {"source": "glassnode", "cached": False, "symbol": symbol.upper()}
+        combined: Dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "source": "glassnode" if self._api_key else "unavailable",
+            "cached": False,
+            "verified": False,
+            "fallback_used": False,
+            "data_status": "MISSING",
+            "warnings": [],
+            "timestamp": None,
+        }
         for metric in metrics:
             data = await self._fetch_metric(symbol.upper(), metric)
             combined.update(data)
+            combined["warnings"] = list(dict.fromkeys(combined["warnings"] + data.get("warnings", [])))
+            if data.get("timestamp"):
+                combined["timestamp"] = data.get("timestamp")
+            if data.get("source") not in {"unavailable", None}:
+                combined["source"] = data.get("source")
+            combined["cached"] = bool(combined["cached"] or data.get("cached"))
+            combined["fallback_used"] = bool(combined["fallback_used"] or data.get("fallback_used"))
+            combined["verified"] = bool(combined["verified"] or data.get("verified"))
+            if combined["data_status"] == "MISSING" and data.get("data_status"):
+                combined["data_status"] = data["data_status"]
+        if not metrics:
+            combined["warnings"] = ["No metrics requested."]
         return combined
 
     async def fetch_mvrv(self, symbol: str = "BTC") -> Dict[str, Any]:
@@ -145,7 +155,10 @@ class GlassnodeServiceClient:
         endpoint = self._ENDPOINTS.get(metric)
         if endpoint is None:
             logger.warning("[FUNDAMENTAL] Unknown Glassnode metric: %s", metric)
-            return _mock_metric(metric)
+            return _unavailable_metric(metric, f"unknown_metric:{metric}")
+
+        if not self._api_key:
+            return await self._fallback(symbol, metric, cache_key, "glassnode_api_key_missing")
 
         url = f"{self._base_url}{endpoint}"
         params = {"a": symbol, "api_key": self._api_key}
@@ -169,24 +182,38 @@ class GlassnodeServiceClient:
             logger.warning(
                 "[FUNDAMENTAL] Glassnode %s fetch failed (status=%s) – trying cache", metric, status
             )
-            return await self._fallback(metric, cache_key)
+            return await self._fallback(symbol, metric, cache_key, f"glassnode_http_error:{status}")
 
         except Exception as exc:  # noqa: BLE001
             logger.warning("[FUNDAMENTAL] Glassnode unexpected error for %s: %s", metric, exc)
-            return await self._fallback(metric, cache_key)
+            return await self._fallback(symbol, metric, cache_key, f"glassnode_exception:{exc}")
 
-    async def _fallback(self, metric: str, cache_key: str) -> Dict[str, Any]:
-        """Return cached value or mock."""
+    async def _fallback(self, symbol: str, metric: str, cache_key: str, reason: str) -> Dict[str, Any]:
+        """Return cached or live-proxy value, else explicit unavailable."""
         cached = await self._cache_get(cache_key)
         if cached:
             _FRESHNESS_GAUGE.labels(metric=metric).set(time.time())
-            return {**cached, "cached": True}
+            warnings = list(dict.fromkeys((cached.get("warnings") or []) + [f"cached_real_data:{reason}"]))
+            return {
+                **cached,
+                "cached": True,
+                "verified": True,
+                "fallback_used": False,
+                "data_status": "RECENT",
+                "source": cached.get("source", "cache"),
+                "warnings": warnings,
+            }
 
         if self._twelve_key:
-            twelve = await self._twelve_metric("BTC", metric)
-            return {**twelve, "cached": False}
+            twelve = await self._twelve_metric(symbol, metric)
+            if twelve.get("verified"):
+                return {**twelve, "cached": False}
 
-        return {**_mock_metric(metric), "cached": True}
+        coingecko = await self._coingecko_metrics(symbol, [metric])
+        if coingecko:
+            return {**coingecko, "cached": False}
+
+        return _unavailable_metric(metric, reason)
 
     async def _coingecko_metrics(self, symbol: str, metrics: List[str]) -> Optional[Dict[str, Any]]:
         """CoinGecko free public API — no key required."""
@@ -217,6 +244,11 @@ class GlassnodeServiceClient:
                 "source": "coingecko",
                 "cached": False,
                 "symbol": symbol,
+                "verified": True,
+                "fallback_used": False,
+                "data_status": "LIVE",
+                "warnings": [],
+                "timestamp": None,
                 # Derived proxies — not true on-chain but live and free
                 "mvrv_z_score": round((price / 50000.0) * 2.0, 4) if price else None,
                 "nupl": round(max(-1.0, min(1.0, (change_7d) / 30.0)), 4),
@@ -253,16 +285,25 @@ class GlassnodeServiceClient:
                 "active_addresses": {"active_addresses": int(max(100000, min(2000000, price * 10))), "quality": "live_fallback"},
             }
             result = derived.get(metric, {"value": price, "quality": "live_fallback"})
-            result.update({"source": "twelve_data", "timestamp": ts})
+            result.update(
+                {
+                    "source": "twelve_data",
+                    "timestamp": ts,
+                    "verified": True,
+                    "fallback_used": False,
+                    "data_status": "LIVE",
+                    "warnings": [],
+                }
+            )
             return result
         except Exception as exc:  # noqa: BLE001
             logger.warning("[FUNDAMENTAL] Twelve Data fallback failed (%s): %s", metric, exc)
-            return _mock_metric(metric)
+            return _unavailable_metric(metric, f"twelve_data_exception:{exc}")
 
     def _parse_response(self, metric: str, raw: List[Dict]) -> Dict[str, Any]:
         """Parse Glassnode array JSON format [{t: unix, v: value}, ...]."""
         if not raw:
-            return _mock_metric(metric)
+            return _unavailable_metric(metric, "glassnode_empty_series")
         latest = raw[-1]
         value = latest.get("v")
         ts: Optional[pd.Timestamp] = None
@@ -273,17 +314,16 @@ class GlassnodeServiceClient:
                 ts = None
         quality = "high" if value is not None else "low"
 
-        metric_map: Dict[str, str] = {
-            "mvrv": "mvrv_z_score",
-            "nupl": "nupl",
-            "transaction_volume": "transaction_volume",
-            "active_addresses": "active_addresses",
-        }
-        field = metric_map.get(metric, metric)
+        field = _metric_field(metric)
         return {
             field: float(value) if value is not None else None,
             "timestamp": ts.isoformat() if ts else None,
             "quality": quality,
+            "verified": value is not None,
+            "fallback_used": False,
+            "data_status": "LIVE" if value is not None else "MISSING",
+            "warnings": [] if value is not None else ["glassnode_missing_value"],
+            "source": "glassnode",
         }
 
     # ------------------------------------------------------------------

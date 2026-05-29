@@ -31,7 +31,7 @@ class ToucheConfig(BaseSettings):
     binance_secret_key: str = Field(default="", validation_alias="BINANCE_API_SECRET")
 
     cache_ttl_seconds: int = 300
-    fallback_to_mock: bool = True
+    fallback_to_mock: bool = False
 
     log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
     redis_url: str = Field(

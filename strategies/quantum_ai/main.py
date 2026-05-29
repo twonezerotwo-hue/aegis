@@ -1,15 +1,17 @@
-# AEGIS v7.2 - Quantum API canli veri etkinlestirme ve futures entegrasyonu.
+# AEGIS v7.2 - Quantum API live-data hardening and futures integration.
 """
 Quantum AI Limited - Market-Making Engine API
 """
 from fastapi import FastAPI, Response
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import random
 import numpy as np
 import threading
 import time
 import os
+import httpx
 from dotenv import load_dotenv
 
 try:
@@ -17,17 +19,17 @@ try:
 except ModuleNotFoundError:
     from strategies.quantum_ai.services.futures_fetcher import FuturesFetcher
 
-# Determinism support
 try:
     import sys
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
     from determinism_control import DeterministicSeedManager, GLOBAL_SEED
+
     DeterministicSeedManager.initialize(GLOBAL_SEED, verbose=False)
-except:
+except Exception:
     random.seed(42)
     np.random.seed(42)
 
-# Load environment variables from .env
 load_dotenv()
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge, Histogram
@@ -35,208 +37,231 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Gau
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============ BINANCE CLIENT INITIALIZATION ============
-BINANCE_API_KEY = os.getenv('BINANCE_API_KEY', '').strip()
-BINANCE_API_SECRET = os.getenv('BINANCE_API_SECRET', os.getenv('BINANCE_SECRET_KEY', '')).strip()
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "").strip()
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", os.getenv("BINANCE_SECRET_KEY", "")).strip()
+USE_REAL_API = bool(BINANCE_API_KEY and BINANCE_API_SECRET and not BINANCE_API_KEY.startswith("your_"))
 
-# Determine if using real API or mock data
-USE_REAL_API = (
-    BINANCE_API_KEY
-    and BINANCE_API_SECRET
-    and not BINANCE_API_KEY.startswith('your_')
-    and not BINANCE_API_SECRET.startswith('your_')
-)
-
-binance_client = None
 if USE_REAL_API:
-    try:
-        from binance.client import Client as BinanceClient
-        binance_client = BinanceClient(BINANCE_API_KEY, BINANCE_API_SECRET)
-        logger.info("✅ [QUANTUM] REAL API MODE - Binance Market-Making enabled")
-    except Exception as e:
-        logger.error(f"❌ [QUANTUM] Failed to initialize Binance: {e}")
-        USE_REAL_API = False
+    logger.info("[QUANTUM] REAL API MODE - credentials configured")
 else:
-    logger.info("ℹ️  [QUANTUM] FALLBACK MODE - API key yok, deterministic test values kullaniliyor")
+    logger.info("[QUANTUM] PUBLIC DATA MODE - market data uses public Binance endpoints")
 
-# Prometheus metrics
-REQUEST_COUNT = Counter('quantum_requests_total', 'Total requests', ['method', 'endpoint'])
-REQUEST_LATENCY = Histogram('quantum_request_duration_seconds', 'Request latency (seconds)', ['endpoint'])
-ACTIVE_REQUESTS = Gauge('quantum_active_requests', 'Active requests')
-MM_SPREAD = Gauge('quantum_spread_bps', 'Market-making spread (bps)')
-MM_INVENTORY = Gauge('quantum_inventory', 'Current inventory')
-QUANTUM_PNL = Gauge('quantum_pnl', 'Market-making PnL')
-FUNDING_RATE_GAUGE = Gauge('quantum_funding_rate_pct', 'Binance Futures Funding Rate %')
-OI_GAUGE = Gauge('quantum_open_interest_usdt', 'Open Interest in USDT')
-LS_RATIO_GAUGE = Gauge('quantum_long_short_ratio', 'Global Long/Short Account Ratio')
+REQUEST_COUNT = Counter("quantum_requests_total", "Total requests", ["method", "endpoint"])
+REQUEST_LATENCY = Histogram("quantum_request_duration_seconds", "Request latency (seconds)", ["endpoint"])
+ACTIVE_REQUESTS = Gauge("quantum_active_requests", "Active requests")
+MM_SPREAD = Gauge("quantum_spread_bps", "Market-making spread (bps)")
+MM_INVENTORY = Gauge("quantum_inventory", "Current inventory")
+QUANTUM_PNL = Gauge("quantum_pnl", "Market-making PnL")
+FUNDING_RATE_GAUGE = Gauge("quantum_funding_rate_pct", "Binance Futures Funding Rate %")
+OI_GAUGE = Gauge("quantum_open_interest_usdt", "Open Interest in USDT")
+LS_RATIO_GAUGE = Gauge("quantum_long_short_ratio", "Global Long/Short Account Ratio")
 
-# Store metric values
 _metric_values = {
-    'quantum_pnl': random.uniform(-10000, 50000),
-    'quantum_spread_bps': random.uniform(0.5, 5),
+    "quantum_pnl": None,
+    "quantum_spread_bps": None,
+    "timestamp": None,
+    "source": "uninitialized",
+    "verified": False,
+    "data_status": "UNKNOWN",
+    "warning": "No futures snapshot fetched yet.",
 }
 
 futures_fetcher = FuturesFetcher()
 
 
-def _get_futures_metrics(symbol: str) -> dict:
-    """
-    Return deterministic futures risk metrics for the requested symbol.
+def _service_mode() -> str:
+    if _metric_values.get("data_status") == "LIVE":
+        return "REAL"
+    if _metric_values.get("data_status") == "RECENT":
+        return "CACHE_REAL"
+    return "UNAVAILABLE"
 
-    Rule support:
-    - funding_rate > 0.01 => BUY signal should be filtered.
-    """
-    sym = (symbol or "BTCUSDT").upper().strip()
-    rng = random.Random(abs(hash(sym)) + 1703)
 
-    funding_rate = round(rng.uniform(-0.005, 0.02), 6)
-    open_interest_change_24h = round(rng.uniform(-0.25, 0.35), 4)
+async def _fetch_depth_snapshot(symbol: str) -> tuple[float | None, float | None]:
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            response = await client.get(
+                "https://fapi.binance.com/fapi/v1/depth",
+                params={"symbol": symbol.upper().strip(), "limit": 20},
+            )
+            response.raise_for_status()
+            payload = response.json() if isinstance(response.json(), dict) else {}
+        bids = payload.get("bids") or []
+        asks = payload.get("asks") or []
+        if not bids or not asks:
+            return None, None
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
+        spread_pct = ((best_ask - best_bid) / max(best_ask, 1e-9)) * 100.0
+        depth_usd = 0.0
+        for side in (bids[:10], asks[:10]):
+            for level in side:
+                price = float(level[0])
+                quantity = float(level[1])
+                depth_usd += price * quantity
+        return round(depth_usd, 2), round(spread_pct, 4)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[QUANTUM] depth fetch failed for %s: %s", symbol, exc)
+        return None, None
 
-    if funding_rate > 0.01 or open_interest_change_24h > 0.2:
-        liquidation_heatmap = "high"
-    elif funding_rate > 0.004 or open_interest_change_24h > 0.08:
-        liquidation_heatmap = "medium"
-    else:
-        liquidation_heatmap = "low"
 
-    return {
-        "funding_rate": funding_rate,
-        "open_interest_change_24h": open_interest_change_24h,
-        "liquidation_heatmap": liquidation_heatmap,
-    }
+async def _refresh_metric_snapshot(symbol: str = "BTCUSDT") -> None:
+    result = await futures_fetcher.get_futures_data(symbol=symbol)
+    _metric_values.update(
+        {
+            "quantum_pnl": round((result.modifier - 0.5) * 100000.0, 2),
+            "quantum_spread_bps": round(max(0.1, abs(result.funding_rate_pct) * 100.0), 2),
+            "timestamp": result.timestamp,
+            "source": result.source,
+            "verified": result.verified,
+            "data_status": result.data_status,
+            "warning": " ".join(result.warnings) or None,
+        }
+    )
+    QUANTUM_PNL.set(float(_metric_values["quantum_pnl"]))
+    MM_SPREAD.set(float(_metric_values["quantum_spread_bps"]))
+    MM_INVENTORY.set(float(result.open_interest_usdt) / 100000.0 if result.open_interest_usdt else 0.0)
+    FUNDING_RATE_GAUGE.set(float(result.funding_rate_pct))
+    OI_GAUGE.set(float(result.open_interest_usdt))
+    LS_RATIO_GAUGE.set(float(result.long_short_ratio))
 
-# Initialize FastAPI app
+
 def update_metrics_thread():
-    """Background thread to update metrics every 10 seconds"""
-    logger.info("Background metrics thread started (threading)")
     while True:
         try:
-            pnl_val = random.uniform(-10000, 50000)
-            spread_val = random.uniform(0.5, 5)
-            inv_val = random.uniform(-1000, 1000)
-            QUANTUM_PNL.set(pnl_val)
-            MM_SPREAD.set(spread_val)
-            MM_INVENTORY.set(inv_val)
-            logger.info(f"Updated metrics: PnL={pnl_val:.0f}, Spread={spread_val:.2f}, Inv={inv_val:.0f}")
-            time.sleep(10)
-        except Exception as e:
-            logger.error(f"Error updating metrics: {e}", exc_info=True)
-            time.sleep(10)
+            asyncio.run(_refresh_metric_snapshot())
+            time.sleep(30)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Error updating Quantum metrics: %s", exc, exc_info=True)
+            time.sleep(30)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup/shutdown"""
     logger.info("Quantum AI Module starting up...")
-
-    # Start background thread for metrics (daemon thread dies with app)
     thread = threading.Thread(target=update_metrics_thread, daemon=True)
     thread.start()
-    logger.info("Background metrics thread started")
-
     yield
-
     logger.info("Quantum AI Module shutting down...")
+
 
 app = FastAPI(
     title="Quantum AI Limited",
     description="Market-Making Engine with Avellaneda-Stoikov Algorithm",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
+
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "service": "quantum-ai",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "data_mode": _service_mode(),
+        "metric_source": _metric_values.get("source"),
+        "metric_timestamp": _metric_values.get("timestamp"),
+        "verified": bool(_metric_values.get("verified")),
+        "data_status": _metric_values.get("data_status"),
     }
+
 
 @app.get("/metrics")
 async def metrics():
-    """Prometheus metrics endpoint"""
-    # Get standard metrics (registered Gauge/Counter/Histogram values)
     base_metrics = generate_latest().decode()
-
-    # Add only mode marker; avoid duplicating already-registered metric names.
-    mode = "REAL" if USE_REAL_API else "MOCK"
+    if _metric_values.get("timestamp") is None:
+        await _refresh_metric_snapshot()
     custom_metrics = (
-        f"# HELP quantum_mode Operating mode (REAL API or MOCK data)\n"
-        f"# TYPE quantum_mode gauge\n"
-        f"quantum_mode{{mode=\"{mode}\"}} 1\n"
+        "# HELP quantum_mode Operating mode (REAL, CACHE_REAL, UNAVAILABLE)\n"
+        "# TYPE quantum_mode gauge\n"
+        f'quantum_mode{{mode="{_service_mode()}"}} 1\n'
     )
-
     return Response(content=base_metrics + custom_metrics, media_type=CONTENT_TYPE_LATEST)
+
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "service": "Quantum AI Limited",
         "description": "Market-Making Engine",
         "endpoints": {
             "health": "/health",
             "metrics": "/metrics",
-            "docs": "/docs"
-        }
+            "docs": "/docs",
+        },
     }
 
 
 @app.post("/executor/liquidity_check")
 async def liquidity_check(payload: dict):
-    """Protocol endpoint: Quantum AI -> Executor liquidity sufficiency check."""
-    depth_usd = float(payload.get("depth_usd", random.uniform(200000, 1500000)))
-    spread_pct = float(payload.get("spread_pct", random.uniform(0.02, 0.25)))
-    is_sufficient = depth_usd >= 500000 and spread_pct <= 0.1
+    symbol = str(payload.get("symbol", "BTCUSDT")).upper().strip()
+    depth_usd = payload.get("depth_usd")
+    spread_pct = payload.get("spread_pct")
+    warnings: list[str] = []
 
-    symbol = str(payload.get("symbol", "BTCUSDT"))
-    metrics = _get_futures_metrics(symbol)
-    funding_rate = float(metrics["funding_rate"])
+    if depth_usd is None or spread_pct is None:
+        live_depth_usd, live_spread_pct = await _fetch_depth_snapshot(symbol)
+        if depth_usd is None:
+            depth_usd = live_depth_usd
+        if spread_pct is None:
+            spread_pct = live_spread_pct
 
+    if depth_usd is None or spread_pct is None:
+        warnings.append("Live order book depth unavailable.")
+
+    result = await futures_fetcher.get_futures_data(symbol=symbol)
+    funding_rate = float(result.funding_rate)
     requested_signal = str(payload.get("signal", "HOLD")).upper().strip()
     filtered_signal = "HOLD" if requested_signal == "BUY" and funding_rate > 0.01 else requested_signal
 
+    numeric_depth = float(depth_usd or 0.0)
+    numeric_spread = float(spread_pct or 999.0)
+
     return {
-        "depth_usd": depth_usd,
-        "spread_pct": spread_pct,
-        "is_sufficient": is_sufficient,
+        "depth_usd": numeric_depth,
+        "spread_pct": numeric_spread,
+        "is_sufficient": numeric_depth >= 500000 and numeric_spread <= 0.1,
         "min_depth_required": 500000.0,
         "max_spread_allowed": 0.1,
         "funding_rate": funding_rate,
-        "open_interest_change_24h": metrics["open_interest_change_24h"],
-        "liquidation_heatmap": metrics["liquidation_heatmap"],
+        "open_interest_change_24h": None,
+        "liquidation_heatmap": result.futures_signal,
         "requested_signal": requested_signal,
         "filtered_signal": filtered_signal,
         "buy_filtered": requested_signal == "BUY" and filtered_signal != requested_signal,
+        "source": result.source,
+        "timestamp": result.timestamp,
+        "verified": result.verified and not warnings,
+        "data_status": result.data_status if not warnings else "MISSING",
+        "warnings": result.warnings + warnings,
     }
 
 
 @app.get("/quantum/futures_metrics")
 async def get_futures_metrics(symbol: str = "BTCUSDT"):
-    """Return futures metrics for risk-aware signal filtering."""
-    metrics = _get_futures_metrics(symbol)
+    result = await futures_fetcher.get_futures_data(symbol)
     return {
-        "funding_rate": metrics["funding_rate"],
-        "open_interest_change_24h": metrics["open_interest_change_24h"],
-        "liquidation_heatmap": metrics["liquidation_heatmap"],
+        "funding_rate": result.funding_rate,
+        "open_interest_change_24h": None,
+        "liquidation_heatmap": result.futures_signal,
+        "source": result.source,
+        "timestamp": result.timestamp,
+        "verified": result.verified,
+        "data_status": result.data_status,
+        "warnings": result.warnings,
     }
 
 
 @app.get("/quantum/futures_data")
 async def get_futures_data(symbol: str = "BTCUSDT"):
-    """Fetch Binance futures metrics with cache and return consensus-ready modifier."""
     result = await futures_fetcher.get_futures_data(symbol=symbol)
-
-    FUNDING_RATE_GAUGE.set(float(result.funding_rate_pct))
-    OI_GAUGE.set(float(result.open_interest_usdt))
-    LS_RATIO_GAUGE.set(float(result.long_short_ratio))
-
     payload = result.model_dump()
-    # FIX: keep compatibility with consumers expecting generic "signal" field.
     payload["signal"] = payload.get("futures_signal", "CACHE_FALLBACK")
     return payload
 
+
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8003)

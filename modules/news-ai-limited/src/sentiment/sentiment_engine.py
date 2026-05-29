@@ -190,8 +190,8 @@ class SentimentEngine:
         """
         model_scores: Dict[str, float] = {}
 
-        # Prepare text (title + description)
-        text = f"{news_item.title} {news_item.description}".lower()
+        # Prepare text (title + content)
+        text = f"{news_item.title} {news_item.content}".lower()
 
         # 1. FinBERT analysis
         if self.finbert_pipeline:

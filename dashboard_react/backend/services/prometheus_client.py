@@ -4,6 +4,7 @@ Queries actual metrics from Prometheus and normalizes them
 """
 import logging
 import httpx
+import os
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class PrometheusClient:
     def __init__(self, url: str = "http://localhost:9090"):
         self.url = url
         self.timeout = 30.0  # Increased from 5.0s for slow Prometheus instances
+        self.allow_unlabelled_fallback = os.getenv("ALLOW_UNLABELLED_PROMETHEUS_FALLBACK", "false").lower() == "true"
 
     async def query(self, query_string: str) -> Optional[Dict[str, Any]]:
         """Execute PromQL query and return normalized results"""
@@ -83,11 +85,11 @@ class PrometheusClient:
                 if result and "value" in result:
                     return float(result["value"])
 
-            # Fallback: query without symbol label (metrics don't have it)
-            query = f'avg_over_time({metric_name}[{duration}])'
-            result = await self.query(query)
-            if result and "value" in result:
-                return float(result["value"])
+            if self.allow_unlabelled_fallback:
+                query = f'avg_over_time({metric_name}[{duration}])'
+                result = await self.query(query)
+                if result and "value" in result:
+                    return float(result["value"])
 
             logger.debug(f"No data for {metric_name} with timeframe {timeframe}")
             return None

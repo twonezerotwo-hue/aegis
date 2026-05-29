@@ -93,7 +93,7 @@ const renderModuleSourceMeta = (module: string, ms: ConsensusModuleSource) => {
         <p>Source: <span className="font-mono text-slate-300">{ms.source}</span></p>
         <p>Updated: <span className="font-mono text-slate-300">{formatDataAge(ms.timestamp)}</span></p>
         <p>Verified: <span className={`font-mono ${ms.verified ? "text-emerald-300" : "text-amber-300"}`}>{boolLabel(ms.verified)}</span></p>
-        <p>Fallback: <span className={`font-mono ${ms.fallback_used ? "text-amber-300" : "text-slate-300"}`}>{boolLabel(ms.fallback_used)}</span></p>
+        <p>Fallback used: <span className={`font-mono ${ms.fallback_used ? "text-amber-300" : "text-slate-300"}`}>{boolLabel(ms.fallback_used)}</span></p>
         {warnings.map((w) => <p key={w} className="text-amber-300">{w}</p>)}
       </div>
     </div>
@@ -235,6 +235,7 @@ export const AssetConsensusCard: React.FC<Props> = ({
       {/* ── Unverified notice — compact, not alarming ───────────────── */}
       {signalUnverified && (
         <p className="mb-2 text-[9px] text-amber-500/70">
+          Signal is not verified because source data is stale/fallback/mock.
           ⚠ Kaynak verisi eksik — sinyal doğrulanmamış
         </p>
       )}
@@ -266,7 +267,7 @@ export const AssetConsensusCard: React.FC<Props> = ({
             <p>Data Status: <span className="font-mono text-slate-200">{dataStatus}</span></p>
             <p>Verified: <span className={`font-mono ${consensus.verified ? "text-emerald-300" : "text-amber-300"}`}>{boolLabel(consensus.verified)}</span></p>
             <p>Source: <span className="font-mono text-slate-200">{getDataSource(consensus) ?? "—"}</span></p>
-            <p>Fallback: <span className={`font-mono ${consensus.fallback_used ? "text-amber-300" : "text-slate-200"}`}>{boolLabel(consensus.fallback_used)}</span></p>
+            <p>Fallback used: <span className={`font-mono ${consensus.fallback_used ? "text-amber-300" : "text-slate-200"}`}>{boolLabel(consensus.fallback_used)}</span></p>
             <p className="col-span-2">Symbol: <span className="font-mono text-slate-200">{consensus.symbol} / {consensus.timeframe}</span></p>
           </div>
 

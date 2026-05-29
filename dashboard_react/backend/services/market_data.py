@@ -10,6 +10,7 @@ Each field returns a dict:
   {value, source, timestamp, verified, fallback_used}
 
 Results are cached for CACHE_TTL_SECONDS to avoid hammering external APIs.
+Source timestamps are preserved only when the upstream provides them.
 """
 from __future__ import annotations
 
@@ -52,10 +53,6 @@ _FALLBACK_VALUES: dict[str, float] = {
 }
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _is_cache_valid(key: str) -> bool:
     if key not in _CACHE:
         return False
@@ -63,7 +60,7 @@ def _is_cache_valid(key: str) -> bool:
     return age < CACHE_TTL_SECONDS
 
 
-def _live_result(value: float, source: str, timestamp: str) -> dict:
+def _live_result(value: float, source: str, timestamp: str | None) -> dict:
     return {
         "value": round(float(value), 6),
         "source": source,
@@ -90,7 +87,6 @@ async def _fetch_yfinance_prices() -> dict[str, dict]:
         import yfinance as yf  # noqa: PLC0415
 
         symbols = list(_YFINANCE_SYMBOLS.values())
-        ts = _now_iso()
 
         def _sync_download() -> dict:
             # Download last 5 days of daily data to get the most recent close
@@ -112,8 +108,11 @@ async def _fetch_yfinance_prices() -> dict[str, dict]:
                         col = raw["Close"] if len(symbols) == 1 else None
 
                     if col is not None and not col.dropna().empty:
-                        val = float(col.dropna().iloc[-1])
-                        out[field] = _live_result(val, f"yfinance:{sym}", ts)
+                        series = col.dropna()
+                        val = float(series.iloc[-1])
+                        idx = series.index[-1]
+                        timestamp = idx.isoformat() if hasattr(idx, "isoformat") else None
+                        out[field] = _live_result(val, f"yfinance:{sym}", timestamp)
                     else:
                         out[field] = _fallback_result(field, "yfinance_empty_series")
                 except Exception as e:
@@ -140,8 +139,14 @@ async def _fetch_coingecko_dominance() -> dict[str, dict]:
                 headers={"Accept": "application/json"},
             )
             resp.raise_for_status()
-            pct: dict = resp.json().get("data", {}).get("market_cap_percentage", {})
-            ts = _now_iso()
+            payload = resp.json().get("data", {})
+            pct: dict = payload.get("market_cap_percentage", {})
+            updated_at = payload.get("updated_at")
+            ts = (
+                datetime.fromtimestamp(float(updated_at), timezone.utc).isoformat()
+                if isinstance(updated_at, (int, float))
+                else None
+            )
 
             btc_d = pct.get("btc")
             usdt_d = pct.get("usdt")

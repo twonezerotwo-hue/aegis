@@ -12,7 +12,17 @@ class QuantumFuturesData(BaseModel):
     futures_signal: str = Field(default="NEUTRAL")
     modifier: float = Field(default=1.0)
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    source: str = Field(default="binance_futures_public")
+    verified: bool = Field(default=True)
+    fallback_used: bool = Field(default=False)
+    data_status: str = Field(default="LIVE")
+    cached: bool = Field(default=False)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class QuantumFuturesFallback(QuantumFuturesData):
     futures_signal: str = Field(default="CACHE_FALLBACK")
+    source: str = Field(default="cache_or_unavailable")
+    verified: bool = Field(default=False)
+    fallback_used: bool = Field(default=False)
+    data_status: str = Field(default="MISSING")

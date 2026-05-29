@@ -13,7 +13,6 @@ Every response includes:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import logging
 import os
 
@@ -53,13 +52,15 @@ _MARKET_FIELDS: tuple[str, ...] = ("dxy", "vix", "us10y", "brent", "xau", "hg", 
 _SENTINEL_FIELDS: tuple[str, ...] = ("event_risk_score", "hours_to_event", "regime")
 _ALL_FIELDS: tuple[str, ...] = _MARKET_FIELDS + _SENTINEL_FIELDS
 
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _clean_timestamp(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _latest_timestamp(*timestamps: str | None) -> str | None:
+    valid = [ts for ts in timestamps if isinstance(ts, str) and ts.strip()]
+    if not valid:
+        return None
+    return max(valid)
 
 
 def _build_data_status(fallback_fields: list[str]) -> str:
@@ -232,6 +233,11 @@ async def get_macro_metrics(
     else:
         aggregate_warning = None
 
+    effective_timestamp = _latest_timestamp(
+        sentinel_timestamp,
+        *[field_sources[field].get("timestamp") for field in _ALL_FIELDS],
+    )
+
     return {
         # Status block
         "status": "ok" if data_status == "LIVE" else "degraded",
@@ -244,8 +250,8 @@ async def get_macro_metrics(
         "verified_fields": sorted(verified_fields),
         "sentinel_available": sentinel_ok,
         # Timestamps
-        "timestamp": _now_iso(),
-        "last_updated": _now_iso(),
+        "timestamp": effective_timestamp,
+        "last_updated": effective_timestamp,
         # Source
         "source": (
             "market_data_live" if data_status == "LIVE"
