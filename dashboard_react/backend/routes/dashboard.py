@@ -51,12 +51,28 @@ async def _fetch_live_scores(symbol: str, timeframe: str) -> dict[str, Optional[
 
     scores: dict[str, Optional[float]] = {"touche": None, "fundamental": None, "news": None, "sentinel": None, "quantum": 0.5}
 
-    # Touche: eqs is 0-100
+    # Touche: prefer the per-timeframe signal score; fall back to global EQS.
+    # The Touche service returns a single aggregated EQS plus per-TF signal labels.
+    # To make the Metrikler tab respond to timeframe changes, we map the selected
+    # TF's BUY/SELL/NEUTRAL label to a calibrated 0-1 score when available.
+    _TF_SIGNAL_SCORE: dict[str, float] = {
+        "BUY": 0.74,
+        "HOLD": 0.50,
+        "NEUTRAL": 0.50,
+        "SELL": 0.26,
+    }
     try:
         if not isinstance(results[0], Exception) and results[0].status_code == 200:
             d = results[0].json()
-            eqs = float(d.get("eqs") or d.get("eqs_score") or 50.0)
-            scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
+            tf_signals: dict = d.get("tf_signals") or {}
+            tf_key = timeframe.lower()
+            if tf_key in tf_signals:
+                # Timeframe-specific signal available — use it as the primary score
+                scores["touche"] = _TF_SIGNAL_SCORE.get(str(tf_signals[tf_key]).upper(), 0.50)
+            else:
+                # No per-TF signal for this timeframe — use global EQS aggregate
+                eqs = float(d.get("eqs") or d.get("eqs_score") or 50.0)
+                scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
     except Exception as exc:
         logger.debug("live_score touche error: %s", exc)
 
@@ -146,17 +162,17 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
     if module == "touche":
         eqs = raw.get("eqs") or raw.get("eqs_score") or round(score * 100, 1)
         tf = raw.get("tf_signals") or {}
-        parts = [f"{k}: {v}" for k, v in tf.items() if k in ("1h", "4h", "1d")]
+        parts = [f"{k}: {v}" for k, v in tf.items() if k in ("15m", "1h", "4h", "1d")]
         signals = " · ".join(parts) if parts else "sinyal yok"
-        buy_count = sum(1 for v in tf.values() if v == "BUY")
-        sell_count = sum(1 for v in tf.values() if v == "SELL")
+        buy_count = sum(1 for v in tf.values() if str(v).upper() == "BUY")
+        sell_count = sum(1 for v in tf.values() if str(v).upper() == "SELL")
         if buy_count > sell_count:
-            bias = "Kısa vadeli alım baskısı baskın"
+            bias = "Çoğunluk AL"
         elif sell_count > buy_count:
-            bias = "Satış baskısı baskın"
+            bias = "Çoğunluk SAT"
         else:
-            bias = "Zaman dilimleri arasında çelişki var"
-        return f"EQS {eqs:.1f} · {signals} · {bias}."
+            bias = "Karışık sinyal"
+        return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}."
 
     if module == "fundamental":
         mvrv = raw.get("mvrv_z_score")
@@ -181,6 +197,8 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
                 parts.append("(ılımlı kâr)")
         if quality == "mock":
             parts.append("⚠ Veri kaynağı: simüle")
+        # On-chain metrics are inherently timeframe-independent
+        parts.append("📊 TF bağımsız")
         return " · ".join(parts) + "." if parts else "On-chain veri bekleniyor."
 
     if module == "news":
@@ -195,7 +213,7 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
         return (
             f"{count} haber analizi · Etki: {impact:.0f} · "
             f"Güven: {conf:.0f}% · Regulatory: {reg:.0f} · "
-            f"Genel duygu: {sent_str}{country_str}."
+            f"Genel duygu: {sent_str}{country_str} · 📊 TF bağımsız."
         )
 
     if module == "sentinel":
@@ -211,11 +229,11 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
         hours_str = f" · {hours:.0f}s içinde kritik olay" if hours and hours < 72 else ""
         return (
             f"Olay riski: {risk*100:.0f}%{hours_str} · "
-            f"Likidite: {liq:.0f}/100 · Oynaklık: {vol:.0f}/100{regime_str}."
+            f"Likidite: {liq:.0f}/100 · Oynaklık: {vol:.0f}/100{regime_str} · 📊 TF bağımsız."
         )
 
     if module == "quantum":
-        return f"Likidite & tahmin skoru: {score*100:.0f}% — gerçek zamanlı piyasa derinliği verisi."
+        return f"Likidite & tahmin skoru: {score*100:.0f}% — piyasa derinliği verisi henüz bağlanmadı, nötr varsayılan. 📊 TF bağımsız."
 
     return ""
 
