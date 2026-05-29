@@ -168,6 +168,23 @@ const DashboardV2Inner: React.FC = () => {
     });
   }, [connectionStatus, connectionMessage, pushToast]);
 
+  // ── Sentinel high-risk toast (fires once per threshold crossing) ───────────
+  const sentinelWarnedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!metricsData) return;
+    const score = metricsData.metrics.sentinel.score;
+    if (score < 0.45 && !sentinelWarnedRef.current) {
+      sentinelWarnedRef.current = true;
+      pushToast({
+        title:   "Sentinel — Yüksek Olay Riski",
+        message: `Makro risk skoru kritik eşiği aştı (${Math.round((1 - score) * 100)}%). Pozisyon boyutlandırmasına dikkat.`,
+        tone:    "warning",
+      });
+    } else if (score >= 0.45) {
+      sentinelWarnedRef.current = false; // reset so next crossing fires again
+    }
+  }, [metricsData, pushToast]);
+
   // ── Horizon-driven batch fetch ─────────────────────────────────────────────
   React.useEffect(() => {
     const signal = abortController.signal;
@@ -478,8 +495,8 @@ const DashboardV2Inner: React.FC = () => {
             </div>
 
             {metricsLoading && !metricsData ? (
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-                {Array.from({ length: 5 }).map((_, i) => (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {Array.from({ length: 3 }).map((_, i) => (
                   <SkeletonLoader key={i} variant="stat" />
                 ))}
               </div>
@@ -487,15 +504,34 @@ const DashboardV2Inner: React.FC = () => {
               <>
                 <AlertBanner data={metricsData} />
 
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-                  {Object.values(metricsData.metrics).map((metric) => (
-                    <MetricCard key={metric.name} metric={metric} />
+                {/* Only Touche / Fundamental / News enter the consensus —
+                    Sentinel and Quantum are background-only risk filters. */}
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {(["touche", "fundamental", "news"] as const).map((key) => (
+                    <MetricCard key={key} metric={metricsData.metrics[key]} />
                   ))}
                 </div>
 
+                {/* Sentinel high-risk inline notice (non-alarming) */}
+                {metricsData.metrics.sentinel.score < 0.45 && (
+                  <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3">
+                    <span className="mt-0.5 shrink-0 text-amber-400 text-sm">⚠</span>
+                    <div>
+                      <p className="text-[11px] font-semibold text-amber-300">Sentinel — Yüksek Olay Riski</p>
+                      <p className="text-[10px] text-amber-200/70 mt-0.5">
+                        {metricsData.metrics.sentinel.summary ?? "Makro olay riski eşiğin üzerinde — pozisyon boyutlandırmasına dikkat."}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid gap-4 lg:grid-cols-3">
                   <ConsensusCard data={metricsData.consensus} />
-                  <SystemStatus health={metricsData.health} />
+                  <SystemStatus
+                    health={metricsData.health}
+                    sentinelScore={metricsData.metrics.sentinel.score}
+                    quantumScore={metricsData.metrics.quantum.score}
+                  />
                 </div>
 
                 <p className="text-center text-xs text-slate-600">
