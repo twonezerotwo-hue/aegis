@@ -57,70 +57,66 @@ class EntryTimingPhase(BasePhase):
         if total < 1e-10:
             return self._neutral_result("Geçersiz bar (sıfır aralık)")
 
-        pattern = None
-        base_score = 0.0
-        signal = "NEUTRAL"
+        # DÜZELTME #5: Eski kod ilk eşleşmede return yapıyordu (elif zinciri).
+        # Hammer (70p) ve BullishEngulfing (80p) aynı anda oluşabilir —
+        # hangisinin önce tanımlandığına göre 10 puan fark yaratıyordu.
+        # Yeni: TÜM formasyonları değerlendir, en yüksek skoru seç.
 
-        # ── Bullish Formasyonlar ───────────────────────────────────────────────
+        candidates: list[tuple[str, float, str]] = []  # (pattern, score, signal)
 
         # 1. Hammer / Bullish Pin Bar
         if (
             lower_wick / (total + 1e-10) >= pin_ratio
             and body / (total + 1e-10) <= (1 - pin_ratio)
-            and c > o  # Bullish kapanış
+            and c > o
         ):
-            pattern = "Hammer/BullishPinBar"
-            base_score = 70.0
-            signal = "BULLISH"
+            candidates.append(("Hammer/BullishPinBar", 70.0, "BULLISH"))
 
         # 2. Bullish Engulfing
-        elif (
-            c > o                   # Mevcut bar bullish
-            and pc < po             # Önceki bar bearish
-            and c > po              # Kapanış önceki açılışı geçiyor
-            and o < pc              # Açılış önceki kapanışın altında
+        if (
+            c > o
+            and pc < po
+            and c > po
+            and o < pc
             and body >= prev_body * engulf_ratio
         ):
-            pattern = "BullishEngulfing"
-            base_score = 80.0
-            signal = "BULLISH"
-
-        # ── Bearish Formasyonlar ───────────────────────────────────────────────
+            candidates.append(("BullishEngulfing", 80.0, "BULLISH"))
 
         # 3. Shooting Star / Bearish Pin Bar
-        elif (
+        if (
             upper_wick / (total + 1e-10) >= pin_ratio
             and body / (total + 1e-10) <= (1 - pin_ratio)
-            and c < o  # Bearish kapanış
+            and c < o
         ):
-            pattern = "ShootingStar/BearishPinBar"
-            base_score = 70.0
-            signal = "BEARISH"
+            candidates.append(("ShootingStar/BearishPinBar", 70.0, "BEARISH"))
 
         # 4. Bearish Engulfing
-        elif (
-            c < o                   # Mevcut bar bearish
-            and pc > po             # Önceki bar bullish
-            and c < po              # Kapanış önceki açılışın altında
-            and o > pc              # Açılış önceki kapanışın üstünde
+        if (
+            c < o
+            and pc > po
+            and c < po
+            and o > pc
             and body >= prev_body * engulf_ratio
         ):
-            pattern = "BearishEngulfing"
-            base_score = 80.0
-            signal = "BEARISH"
+            candidates.append(("BearishEngulfing", 80.0, "BEARISH"))
 
-        # 5. Doji — nötr / belirsizlik (pipelines'ı yavaşlatır ama bloke etmez)
-        elif body / (total + 1e-10) <= doji_ratio:
-            pattern = "Doji"
-            base_score = 35.0
-            signal = "NEUTRAL"
+        # 5. Doji
+        if body / (total + 1e-10) <= doji_ratio:
+            candidates.append(("Doji", 35.0, "NEUTRAL"))
 
-        if pattern is None:
-            # Standart formasyon yok
-            base_score = 30.0
-            reason = "Bilinen formasyon tespit edilmedi"
-        else:
+        # En yüksek skorlu formasyonu seç (overlap varsa güçlü olan kazanır)
+        if candidates:
+            best = max(candidates, key=lambda x: x[1])
+            pattern, base_score, signal = best
             reason = f"Formasyon: {pattern}"
+            if len(candidates) > 1:
+                others = ", ".join(c[0] for c in candidates if c[0] != pattern)
+                reason += f" (diğer eşleşmeler: {others})"
+        else:
+            pattern = None
+            base_score = 30.0
+            signal = "NEUTRAL"
+            reason = "Bilinen formasyon tespit edilmedi"
 
         # ── Teyit Bonusları ───────────────────────────────────────────────────
         bonus = 0.0

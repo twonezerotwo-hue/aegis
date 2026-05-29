@@ -62,24 +62,51 @@ class ZoneConfluencePhase(BasePhase):
             confluences += 1
             confluence_details.append("supply_zone")
 
-        # RSI Confluence
+        # RSI + Bollinger Band Confluence — korelasyonlu göstergeler
+        # DÜZELTME #3: 35/65 → 30/70 (standart TA eşikleri)
+        # DÜZELTME #4: RSI oversold + BB lower touch çoğu zaman aynı anda oluşur
+        # (aynı piyasa koşulunu iki göstergeyle iki kez saymak skoru şişirir).
+        # Çözüm: Her iki koşul aynı anda gerçekleşirse tek "teknik aşırılık" sayılır
+        # (1.5 puan), sadece biri tetiklenirse 1 puan.
+        rsi_oversold = False
+        rsi_overbought = False
+        bb_lower_touch = False
+        bb_upper_touch = False
+
         if "rsi_14" in df.columns:
             rsi = self._safe_float(df["rsi_14"])
-            if rsi < 35:
-                confluences += 1
-                confluence_details.append(f"rsi_oversold({rsi:.1f})")
-            elif rsi > 65:
-                confluences += 1
-                confluence_details.append(f"rsi_overbought({rsi:.1f})")
+            if rsi < 30:       # Standart TA oversold (eskiden 35 — çok erken tetikleniyordu)
+                rsi_oversold = True
+            elif rsi > 70:     # Standart TA overbought (eskiden 65 — çok erken tetikleniyordu)
+                rsi_overbought = True
 
-        # Bollinger Band Confluence
         if "bb_lower" in df.columns and "bb_upper" in df.columns:
             bb_low = self._safe_float(df["bb_lower"])
-            bb_up = self._safe_float(df["bb_upper"])
+            bb_up  = self._safe_float(df["bb_upper"])
             if current_price <= bb_low * (1 + tol_atr * 0.1):
+                bb_lower_touch = True
+            elif current_price >= bb_up * (1 - tol_atr * 0.1):
+                bb_upper_touch = True
+
+        # Korelasyon farkındalıklı sayım
+        if rsi_oversold and bb_lower_touch:
+            # İkisi aynı koşulu yansıtıyor → 1.5 puan (2 değil)
+            confluences += 1.5
+            confluence_details.append(f"rsi_oversold+bb_lower(corr,+1.5)")
+        elif rsi_overbought and bb_upper_touch:
+            confluences += 1.5
+            confluence_details.append(f"rsi_overbought+bb_upper(corr,+1.5)")
+        else:
+            if rsi_oversold:
+                confluences += 1
+                confluence_details.append(f"rsi_oversold({rsi:.1f})")
+            elif rsi_overbought:
+                confluences += 1
+                confluence_details.append(f"rsi_overbought({rsi:.1f})")
+            if bb_lower_touch:
                 confluences += 1
                 confluence_details.append("bb_lower_touch")
-            elif current_price >= bb_up * (1 - tol_atr * 0.1):
+            elif bb_upper_touch:
                 confluences += 1
                 confluence_details.append("bb_upper_touch")
 

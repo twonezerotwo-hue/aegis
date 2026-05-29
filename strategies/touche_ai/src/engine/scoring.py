@@ -166,9 +166,30 @@ class EQSScorer:
 
         dominant_signal = max(signal_votes, key=signal_votes.get)
 
-        # Baskın sinyal yeterince güçlü değilse NEUTRAL'a çek
-        if signal_votes[dominant_signal] < 0.4:
+        # DÜZELTME #7: Split vote durumunu logla (sessizce gizleniyordu).
+        # 3 BULLISH / 3 BEARISH gibi gerçek çelişki durumları downstream'e iletilmiyor.
+        best_vote   = signal_votes[dominant_signal]
+        second_best = sorted(signal_votes.values(), reverse=True)[1]
+        split_margin = best_vote - second_best
+
+        if best_vote < 0.4:
+            logger.warning(
+                "eqs_split_vote_forced_neutral",
+                votes=signal_votes,
+                dominant=dominant_signal,
+                dominant_weight=round(best_vote, 3),
+                threshold=0.4,
+                message="Baskın sinyal eşiğin altında — NEUTRAL'a çekildi",
+            )
             dominant_signal = "NEUTRAL"
+        elif split_margin < 0.1:
+            logger.warning(
+                "eqs_split_vote_close_call",
+                votes=signal_votes,
+                dominant=dominant_signal,
+                split_margin=round(split_margin, 3),
+                message="Fazlar yakın ikiye bölünmüş — sinyale düşük güven",
+            )
 
         # ── Sinyal Gücü (Volatilite rejimi tabanlı) ───────────────────────────
         # Yüksek volatilite = daha yüksek eşik (daha dikkatli)

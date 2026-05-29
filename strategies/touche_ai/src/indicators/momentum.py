@@ -138,7 +138,11 @@ class MACDIndicator(BaseIndicator):
 
     NAME = "MACD"
     REQUIRED_COLUMNS = ["close"]
-    MIN_ROWS = 35
+    # DÜZELTME #6: 35 → 70 bar minimum.
+    # Yavaş EMA(26) için ~52 bar + signal EMA(9) için ~18 bar daha = 70+ bar
+    # güvenilir MACD değerleri için gereklidir. 35 bar matematiksel olarak
+    # hesaplanıyor ama başlangıç değerleri yüksek gürültü içeriyor.
+    MIN_ROWS = 70
 
     def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
         self.fast = fast

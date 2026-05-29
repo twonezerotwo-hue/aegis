@@ -13,6 +13,7 @@ Diverjans Tespiti:
 """
 from typing import List, Tuple
 
+import polars as pl
 from .base import BasePhase, PhaseContext, PhaseResult
 import structlog
 
@@ -117,34 +118,73 @@ class MarketStructurePhase(BasePhase):
     def _detect_divergence(
         self, df, sl_prices: List[float], sh_prices: List[float]
     ) -> Tuple[str, float]:
-        """RSI ve MACD Histogram üzerinde Regular Divergence tespiti."""
+        """RSI Regular Divergence tespiti — swing barlarındaki RSI kullanır.
+
+        KRİTİK DÜZELTME: Eski kod rsi_vals[-1] (MEVCUT bar'ın RSI'ı) ve
+        min(rsi_vals[-10:-1]) (pencere minimumu) kullanıyordu. Bu yanlıştı —
+        fiyat swing low yaptıktan sonra RSI toparlamaya başladığında her zaman
+        "bullish diverjans" görüyordu. Gerçek diverjans tespiti swing low
+        BAR'larındaki RSI değerlerini karşılaştırmalıdır.
+
+        Düzeltme: swing_low_price/swing_high_price NULL olan satırları filtrele
+        ve RSI değerlerini SADECE o swing barlarından al.
+        """
         rsi_col = "rsi_14"
-        macd_col = "macd_hist"
 
         if rsi_col not in df.columns:
             return "NEUTRAL", 40.0
 
-        rsi_vals = self._last_n_non_null(df, rsi_col, 20)
-        if len(rsi_vals) < 4:
+        if "swing_low_price" not in df.columns or "swing_high_price" not in df.columns:
             return "NEUTRAL", 40.0
 
-        # Bullish Regular Divergence:
-        # Fiyat LL (sl_prices[-1] < sl_prices[-2]) ama RSI HL yapıyor
-        if len(sl_prices) >= 2 and sl_prices[-1] < sl_prices[-2]:
-            # RSI'nın ilgili dip noktaları
-            rsi_recent = rsi_vals[-1]
-            rsi_prev = min(rsi_vals[-10:-1]) if len(rsi_vals) > 10 else rsi_vals[-2]
-            if rsi_recent > rsi_prev:
-                score = 70.0 + (rsi_recent - rsi_prev) * 0.5
+        # RSI at swing LOW bars (not current bar, not window minimum)
+        sl_rsi: List[float] = (
+            df.filter(pl.col("swing_low_price").is_not_null())
+            .select(rsi_col)
+            [rsi_col]
+            .drop_nulls()
+            .tail(4)
+            .to_list()
+        )
+
+        # RSI at swing HIGH bars
+        sh_rsi: List[float] = (
+            df.filter(pl.col("swing_high_price").is_not_null())
+            .select(rsi_col)
+            [rsi_col]
+            .drop_nulls()
+            .tail(4)
+            .to_list()
+        )
+
+        # ── Bullish Regular Divergence ────────────────────────────────────────
+        # Fiyat LL: sl_prices[-1] < sl_prices[-2]  (daha düşük dip)
+        # RSI  HL: sl_rsi[-1]    > sl_rsi[-2]      (o barlarda daha yüksek RSI)
+        if len(sl_prices) >= 2 and len(sl_rsi) >= 2:
+            price_ll = sl_prices[-1] < sl_prices[-2]
+            rsi_hl   = sl_rsi[-1]    > sl_rsi[-2]
+            if price_ll and rsi_hl:
+                div_strength = sl_rsi[-1] - sl_rsi[-2]
+                score = 70.0 + div_strength * 0.5
+                logger.info("divergence_bullish",
+                            price_prev=round(sl_prices[-2], 4), price_curr=round(sl_prices[-1], 4),
+                            rsi_prev=round(sl_rsi[-2], 2), rsi_curr=round(sl_rsi[-1], 2),
+                            strength=round(div_strength, 2))
                 return "BULLISH", min(90.0, score)
 
-        # Bearish Regular Divergence:
-        # Fiyat HH (sh_prices[-1] > sh_prices[-2]) ama RSI LH yapıyor
-        if len(sh_prices) >= 2 and sh_prices[-1] > sh_prices[-2]:
-            rsi_recent = rsi_vals[-1]
-            rsi_prev = max(rsi_vals[-10:-1]) if len(rsi_vals) > 10 else rsi_vals[-2]
-            if rsi_recent < rsi_prev:
-                score = 70.0 + (rsi_prev - rsi_recent) * 0.5
+        # ── Bearish Regular Divergence ────────────────────────────────────────
+        # Fiyat HH: sh_prices[-1] > sh_prices[-2]  (daha yüksek tepe)
+        # RSI  LH: sh_rsi[-1]    < sh_rsi[-2]      (o barlarda daha düşük RSI)
+        if len(sh_prices) >= 2 and len(sh_rsi) >= 2:
+            price_hh = sh_prices[-1] > sh_prices[-2]
+            rsi_lh   = sh_rsi[-1]    < sh_rsi[-2]
+            if price_hh and rsi_lh:
+                div_strength = sh_rsi[-2] - sh_rsi[-1]
+                score = 70.0 + div_strength * 0.5
+                logger.info("divergence_bearish",
+                            price_prev=round(sh_prices[-2], 4), price_curr=round(sh_prices[-1], 4),
+                            rsi_prev=round(sh_rsi[-2], 2), rsi_curr=round(sh_rsi[-1], 2),
+                            strength=round(div_strength, 2))
                 return "BEARISH", min(90.0, score)
 
         return "NEUTRAL", 40.0
