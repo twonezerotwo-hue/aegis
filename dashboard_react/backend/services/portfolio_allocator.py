@@ -220,6 +220,62 @@ def _rebalance_to_total(
     return {asset: round(rebalanced[asset], 6) for asset in _ASSETS}
 
 
+def _apply_ai_signal_overlay(
+    weights: dict[str, float],
+    module_scores: dict[str, float],
+    horizon: str,
+    basis: list[str],
+    warnings: list[str],
+) -> None:
+    """
+    Adjust allocation weights based on live AI module scores.
+    All scores are 0-1. Neutral = 0.5. Scale = ±deviation from 0.5.
+    Max single move: BTC ±6pp, gold ±3pp, commodity ±2pp, cash ±5pp.
+    """
+    touche    = float(module_scores.get("touche", 0.5))
+    fundamental = float(module_scores.get("fundamental", 0.5))
+    news      = float(module_scores.get("news", 0.5))
+    sentinel  = float(module_scores.get("sentinel", 0.5))  # high = low risk
+
+    # ── BTC signal: Touche 50%, Fundamental 30%, Sentinel risk 20% ────────────
+    btc_signal = touche * 0.50 + fundamental * 0.30 + sentinel * 0.20
+    btc_dev = btc_signal - 0.5          # −0.5 to +0.5
+    # Scale: ±0.5 deviation → ±6pp for long, ±4pp for short
+    btc_scale = {"short": 0.08, "medium": 0.10, "long": 0.12}.get(horizon, 0.10)
+    btc_delta = round(btc_dev * btc_scale, 4)
+
+    # ── Risk/defensive signal: Sentinel 50%, News 30%, Fundamental 20% ───────
+    risk_signal = sentinel * 0.50 + news * 0.30 + fundamental * 0.20
+    risk_dev = risk_signal - 0.5        # positive = safer environment
+    gold_delta = round(-risk_dev * 0.06, 4)   # safer → less gold buffer needed
+    cash_delta = round(-btc_delta * 0.60 + -risk_dev * 0.05, 4)
+    commodity_delta = round(btc_dev * 0.04, 4)  # follows BTC risk-on/off
+
+    overlay = {
+        "btc":       btc_delta,
+        "gold":      gold_delta,
+        "cash":      cash_delta,
+        "commodity": commodity_delta,
+        "bond":      round(-(btc_delta + gold_delta + cash_delta + commodity_delta), 4),
+    }
+
+    _apply_overlay(weights, overlay, basis,
+                   f"ai_signal:T={touche:.2f},F={fundamental:.2f},N={news:.2f},S={sentinel:.2f}")
+
+    if abs(btc_delta) >= 0.02:
+        direction = "artırıldı" if btc_delta > 0 else "azaltıldı"
+        warnings.append(
+            f"AI sinyali BTC ağırlığını {direction} "
+            f"(Touche {touche*100:.0f}%, Fundamental {fundamental*100:.0f}%)."
+        )
+    if abs(gold_delta) >= 0.015:
+        direction = "artırıldı" if gold_delta > 0 else "azaltıldı"
+        warnings.append(
+            f"Risk ortamına göre altın ağırlığı {direction} "
+            f"(Sentinel {sentinel*100:.0f}%, Haberler {news*100:.0f}%)."
+        )
+
+
 def build_allocation_plan(
     horizon: str = "medium",
     regime: str = "NORMALIZATION",
@@ -227,6 +283,7 @@ def build_allocation_plan(
     data_status: str | None = None,
     verified: bool = True,
     hedge_on: bool | None = None,
+    module_scores: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     horizon = _normalize_horizon(horizon)
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -284,6 +341,10 @@ def build_allocation_plan(
         }
         _apply_overlay(weights, overlay, basis, "volatility_overlay:low_vix")
 
+    # ── AI signal overlay (live module scores) ────────────────────────────────
+    if module_scores and not illustrative:
+        _apply_ai_signal_overlay(weights, module_scores, horizon, basis, warnings)
+
     if illustrative:
         overlay = {
             "gold": 0.02,
@@ -333,7 +394,6 @@ def calculate_dynamic_allocation(
     """
     Calculate allocation percentages plus rationale text for UI or reporting surfaces.
     """
-    del module_scores  # reserved for future scoring overlays
     plan = build_allocation_plan(
         horizon=horizon,
         regime=regime,
@@ -341,6 +401,7 @@ def calculate_dynamic_allocation(
         data_status=data_status,
         verified=verified,
         hedge_on=hedge_on,
+        module_scores=module_scores,
     )
     rationale_map = _RATIONALE.get(plan["matched_regime"], _RATIONALE["NORMALIZATION"])
 

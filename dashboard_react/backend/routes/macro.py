@@ -20,8 +20,10 @@ import os
 import httpx
 from fastapi import APIRouter, Query
 
+import asyncio
 from services.market_data import fetch_market_data
 from services.portfolio_allocator import build_allocation_plan
+from routes.dashboard import _fetch_live_scores
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +79,11 @@ async def get_macro_metrics(
         horizon = "medium"
     commentary_window_days = _HORIZON_WINDOWS[horizon]
 
-    # ── 1. Real market data (yfinance + CoinGecko, cached 60s) ───────────────
-    market_results = await fetch_market_data()
+    # ── 1. Real market data + live AI scores (parallel) ─────────────────────
+    market_results, live_scores = await asyncio.gather(
+        fetch_market_data(),
+        _fetch_live_scores("BTC/USDT", "1h"),
+    )
 
     # ── 2. Sentinel for event risk + regime ──────────────────────────────────
     sentinel_data: dict = {}
@@ -185,13 +190,23 @@ async def get_macro_metrics(
 
     regime = str(metrics.get("regime", "NORMALIZATION")).upper()
 
-    # ── 5. Allocation plan ────────────────────────────────────────────────────
+    # ── 5. Allocation plan (with live AI signal overlay) ─────────────────────
+    # Only pass AI scores when they're all live (don't distort with partial fallbacks)
+    ai_scores = None
+    if any(v is not None for v in (live_scores.get("touche"), live_scores.get("fundamental"), live_scores.get("news"), live_scores.get("sentinel"))):
+        ai_scores = {
+            "touche":      live_scores.get("touche")      or 0.5,
+            "fundamental": live_scores.get("fundamental") or 0.5,
+            "news":        live_scores.get("news")        or 0.5,
+            "sentinel":    live_scores.get("sentinel")    or 0.5,
+        }
     allocation_plan = build_allocation_plan(
         horizon=horizon,
         regime=regime,
         metrics={k: v for k, v in metrics.items()},
         data_status=data_status,
         verified=verified,
+        module_scores=ai_scores,
     )
 
     # ── 6. Aggregate warning ──────────────────────────────────────────────────
