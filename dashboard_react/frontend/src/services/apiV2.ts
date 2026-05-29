@@ -1,6 +1,7 @@
 import axios from "axios";
 import {
   AllocationWeights,
+  AssetMetadataItem,
   AttributionModule,
   AttributionResponse,
   CBRMatch,
@@ -17,6 +18,7 @@ import {
   ModuleWeights,
   MultiTfSummary,
   RebalanceAction,
+  RealEstateDecision,
   SentinelSummary,
   TradeAttributionResult,
   WeightsResponse,
@@ -85,6 +87,8 @@ interface RawMacroResponse {
     actions?: RawMacroAction[];
   };
   metrics?: RawMacroMetrics;
+  asset_metadata?: Record<string, AssetMetadataItem>;
+  real_estate_decision?: RealEstateDecision;
 }
 
 interface RawConsensusGatewayResponse {
@@ -713,6 +717,8 @@ export const normalizeMacroViewModel = (
     rebalance_actions: unverifiedMacro ? [] : rebalanceActions,
     metrics,
     error: response.error,
+    asset_metadata: response.asset_metadata,
+    real_estate_decision: response.real_estate_decision,
   };
 };
 

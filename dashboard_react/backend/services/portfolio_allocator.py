@@ -60,6 +60,102 @@ _ILLUSTRATIVE_CASH_FLOOR = {
     "long": 0.18,
 }
 
+ASSET_METADATA: dict[str, dict] = {
+    "gold": {
+        "display_label": "ALTIN / GOLD",
+        "subtitle": "XAU · Gold futures / physical gold proxy",
+        "definition": "Kriz güvenli limanı, jeopolitik risk hedge'i, dolar zayıflığı ve reel faiz düşüşü senaryosunda koruma.",
+        "portfolio_role": "Safe-haven ballast; hedge against USD weakness, geopolitical crisis, and falling real yields.",
+        "increase_conditions": [
+            "Risk-off or crisis regime",
+            "DXY weak or declining",
+            "Real yields falling",
+            "Geopolitics / war risk elevated",
+            "VIX high with gold trend confirmed",
+        ],
+        "reduce_conditions": [
+            "Strong risk-on or liquidity expansion regime",
+            "Real yields rising sharply",
+            "Dollar strengthening (DXY > 104)",
+            "Gold trend broken",
+        ],
+    },
+    "btc": {
+        "display_label": "BITCOIN / BTC",
+        "subtitle": "Crypto core risk asset",
+        "definition": "Likidite genişlemesi, risk-on beta, dijital varlık maruziyeti. Yüksek volatilite, yüksek büyüme potansiyeli.",
+        "portfolio_role": "Liquidity expansion beta; risk-on exposure; digital scarcity and decentralization hedge.",
+        "increase_conditions": [
+            "Liquidity expansion regime confirmed",
+            "BTC trend and momentum confirmed",
+            "Stablecoin dominance declining (USDT.D down)",
+            "DXY weak, VIX low or declining",
+        ],
+        "reduce_conditions": [
+            "Risk-off or crisis regime",
+            "Credit stress or systemic risk elevated",
+            "BTC key support breakdown",
+            "Funding rates overheated",
+            "Data quality failure or kill switch",
+        ],
+    },
+    "bond": {
+        "display_label": "TAHVİL / BONDS",
+        "subtitle": "Short-to-medium duration bonds · defensive ballast",
+        "definition": "Sermaye koruma, gelir üretimi, defansif denge. Faiz indirim senaryolarında değer kazanır.",
+        "portfolio_role": "Capital preservation, income, defensive ballast; benefits from rate cuts and flight-to-safety bids.",
+        "increase_conditions": [
+            "Risk-off regime",
+            "Yields stabilizing or falling",
+            "Credit stress with sovereign safety bid",
+            "Recession risk rising",
+        ],
+        "reduce_conditions": [
+            "Yields rising sharply",
+            "Inflation acceleration",
+            "Risk-on or liquidity expansion regime",
+            "Duration drawdown risk elevated",
+        ],
+    },
+    "commodity": {
+        "display_label": "EMTİA / COMMODITIES",
+        "subtitle": "Energy + industrial metals basket · Brent/WTI energy proxy · Copper/HG industrial proxy",
+        "definition": "Enerji şoku koruması, enflasyon hedge'i, sanayi döngüsü maruziyeti. Brent/WTI (enerji) ve bakır/HG (sanayi metali) sepetini temsil eder.",
+        "portfolio_role": "Inflation hedge; energy shock signal; industrial cycle and commodity risk diversification.",
+        "increase_conditions": [
+            "Brent / WTI uptrend confirmed",
+            "Copper (HG) strength, industrial demand rising",
+            "Inflation or supply shock regime",
+            "War / energy risk confirmed",
+        ],
+        "reduce_conditions": [
+            "Demand slowdown or recession risk",
+            "DXY strong (commodity headwind)",
+            "Energy shock fading",
+            "Commodity trend weak or broken",
+        ],
+    },
+    "cash": {
+        "display_label": "NAKİT / CASH",
+        "subtitle": "Liquidity reserve · opportunity capital · error margin",
+        "definition": "Nakit aylak para değildir. Opsiyonellik, hata marjı, psikolojik istikrar ve gelecekteki fırsat sermayesidir.",
+        "portfolio_role": "Liquidity reserve; optionality; error margin; psychological buffer; dry powder for future entries.",
+        "increase_conditions": [
+            "Neutral, risk-off, or crisis regime",
+            "Data quality weak or unverified",
+            "Event risk high",
+            "Conflicting signals across modules",
+            "Waiting for verified entry opportunity",
+        ],
+        "reduce_conditions": [
+            "Verified risk-on with strong cross-validation",
+            "Low event risk confirmed",
+            "Attractive setup confirmed by multiple modules",
+            "Liquidity expansion regime with live data",
+        ],
+    },
+}
+
 _RATIONALE = {
     "RISK_OFF": {
         "cash": "Higher liquidity buffer for shorter-dated uncertainty",
@@ -276,6 +372,164 @@ def _apply_ai_signal_overlay(
         )
 
 
+def build_real_estate_decision(
+    horizon: str = "medium",
+    regime: str = "NORMALIZATION",
+    metrics: dict[str, Any] | None = None,
+    data_status: str | None = None,
+    verified: bool = True,
+    cash_weight: float = 0.20,
+) -> dict:
+    """
+    Real estate / property decision support signal.
+    NOT financial advice — macro context for illiquid capital allocation.
+    Signal: WAIT | RESEARCH | BUY_ZONE | BUILD_ZONE | AVOID
+    """
+    metrics = metrics if isinstance(metrics, dict) else {}
+    horizon = _normalize_horizon(horizon)
+    matched_regime = _match_regime(regime)
+    normalized_status = _normalize_data_status(data_status, verified)
+    unverified = normalized_status in _UNVERIFIED_STATUSES or not verified
+
+    vix = _get_float(metrics.get("vix"), 22.0) or 22.0
+    us10y = _get_float(metrics.get("us10y"), 4.25) or 4.25
+    event_risk = _get_float(metrics.get("event_risk_score"), 0.25) or 0.25
+    brent = _get_float(metrics.get("brent"), 92.0) or 92.0
+
+    required_checks = [
+        "Local property prices and market conditions (not in this system)",
+        "Personal cash buffer: min 12 months living expenses + 20% purchase buffer",
+        "Mortgage / financing rate: current vs historical trend",
+        "Legal due diligence: title deed, permits, zoning",
+        "Construction cost inflation: materials + labor trend",
+        "Personal income stability over the investment horizon",
+        "Local vacancy rates and rental demand / supply balance",
+    ]
+
+    rationale: list[str] = []
+    buy_conditions: list[str] = []
+    avoid_conditions: list[str] = []
+    construction_conditions: list[str] = []
+    score = 50
+
+    if matched_regime == "RISK_OFF":
+        avoid_conditions.append("Risk-off macro regime — capital preservation preferred over illiquid commitments")
+        score -= 35
+    elif matched_regime == "ACCUMULATION":
+        rationale.append("Accumulation regime: base-building phase, limited liquidity flexibility")
+        score -= 5
+    elif matched_regime == "LIQUIDITY_EXPANSION":
+        rationale.append("Liquidity expansion: illiquid allocation competes with liquid risk-on opportunities")
+        score += 5
+    else:
+        rationale.append("Neutral macro regime: no strong buy or avoid signal from macro conditions")
+
+    if event_risk >= 0.65:
+        avoid_conditions.append(f"High event risk ({event_risk:.0%}) — wait for macro resolution")
+        score -= 25
+    elif event_risk >= 0.45:
+        rationale.append(f"Elevated event risk ({event_risk:.0%}) — caution warranted")
+        score -= 10
+
+    if us10y >= 5.0:
+        avoid_conditions.append(f"Very high rates (US10Y {us10y:.2f}%) — financing cost significantly elevated")
+        score -= 20
+    elif us10y >= 4.5:
+        avoid_conditions.append(f"High rates (US10Y {us10y:.2f}%) — wait for rate stabilization or decline")
+        score -= 10
+    elif us10y <= 3.5:
+        buy_conditions.append(f"Rates supportive (US10Y {us10y:.2f}%) — favorable financing environment")
+        construction_conditions.append(f"Financing cost attractive for construction (US10Y {us10y:.2f}%)")
+        score += 15
+    else:
+        rationale.append(f"Rates neutral (US10Y {us10y:.2f}%)")
+
+    if vix >= 30:
+        avoid_conditions.append(f"High market stress (VIX {vix:.1f}) — illiquid commitment not recommended")
+        score -= 15
+    elif vix >= 25:
+        rationale.append(f"Elevated volatility (VIX {vix:.1f}) — cautious stance preferred")
+        score -= 5
+    elif vix <= 15:
+        buy_conditions.append(f"Calm market environment (VIX {vix:.1f}) — lower systemic risk")
+        score += 5
+
+    if brent >= 100:
+        construction_conditions.append(f"High energy costs (Brent ${brent:.0f}) elevate construction expenses")
+        score -= 5
+    elif brent <= 75:
+        construction_conditions.append(f"Lower energy costs (Brent ${brent:.0f}) reduce construction inputs")
+        score += 5
+
+    if cash_weight >= 0.35:
+        buy_conditions.append("Strong portfolio liquidity reserve — sufficient buffer for illiquid commitment")
+        construction_conditions.append("Strong cash allocation supports construction financing")
+        score += 10
+    elif cash_weight >= 0.25:
+        rationale.append("Adequate cash buffer — manageable, monitor liquidity needs")
+        score += 3
+    elif cash_weight <= 0.15:
+        avoid_conditions.append("Insufficient portfolio cash reserve — improve liquidity first")
+        score -= 20
+
+    if horizon == "short":
+        avoid_conditions.append("Short horizon selected — real estate requires long-term commitment (5+ years minimum)")
+        score -= 25
+    elif horizon == "long":
+        buy_conditions.append("Long investment horizon aligns with real estate illiquidity profile")
+        construction_conditions.append("Long horizon suitable for full construction and development cycles")
+        score += 15
+    else:
+        rationale.append("Medium horizon: real estate possible but long-term local conditions must be verified")
+        score -= 5
+
+    if unverified:
+        rationale.append("Macro data not fully verified — local due diligence is even more critical")
+        score -= 15
+
+    score = max(0, min(100, score))
+    confidence = score
+
+    if matched_regime == "RISK_OFF" or (event_risk >= 0.65 and vix >= 28):
+        signal = "AVOID"
+    elif score >= 65 and horizon == "long" and not unverified and cash_weight >= 0.25:
+        signal = "BUY_ZONE"
+    elif score >= 55 and horizon in ("medium", "long") and us10y <= 4.0 and not unverified:
+        signal = "BUILD_ZONE"
+    elif score >= 38:
+        signal = "RESEARCH"
+    elif score >= 20:
+        signal = "WAIT"
+    else:
+        signal = "AVOID"
+
+    if unverified and signal in ("BUY_ZONE", "BUILD_ZONE"):
+        signal = "RESEARCH"
+        rationale.append("Signal downgraded: macro data not fully verified — local data required")
+
+    warning = (
+        "Bu panel likit portföy yüzdesi değildir. Yatırım tavsiyesi değildir — "
+        "makro koşul bazlı karar destek sinyalidir. Yerel piyasa koşulları, "
+        "hukuki due diligence ve kişisel finansal durum değerlendirmesi zorunludur."
+        if signal in ("BUY_ZONE", "BUILD_ZONE", "RESEARCH")
+        else None
+    )
+
+    return {
+        "signal": signal,
+        "confidence": round(confidence),
+        "data_status": normalized_status,
+        "verified": bool(verified and not unverified),
+        "rationale": rationale,
+        "buy_conditions": buy_conditions,
+        "avoid_conditions": avoid_conditions,
+        "construction_conditions": construction_conditions,
+        "required_checks": required_checks,
+        "warning": warning,
+        "disclaimer": "Decision support / due diligence signal only. Not financial advice.",
+    }
+
+
 def build_allocation_plan(
     horizon: str = "medium",
     regime: str = "NORMALIZATION",
@@ -379,6 +633,7 @@ def build_allocation_plan(
         "horizon_adjustments": adjustments,
         "matched_regime": matched_regime,
         "hedge_on": derived_hedge,
+        "asset_metadata": ASSET_METADATA,
     }
 
 

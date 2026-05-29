@@ -3,6 +3,31 @@ import type { DataStatus } from "../utils/dataFreshness";
 export type TradingAction = "BUY" | "SELL" | "HOLD";
 export type RebalanceActionType = "BUY" | "SELL";
 
+export interface AssetMetadataItem {
+  display_label: string;
+  subtitle: string;
+  definition: string;
+  portfolio_role: string;
+  increase_conditions: string[];
+  reduce_conditions: string[];
+}
+
+export type RealEstateSignal = "WAIT" | "RESEARCH" | "BUY_ZONE" | "BUILD_ZONE" | "AVOID";
+
+export interface RealEstateDecision {
+  signal: RealEstateSignal;
+  confidence: number;
+  data_status: string;
+  verified: boolean;
+  rationale: string[];
+  buy_conditions: string[];
+  avoid_conditions: string[];
+  construction_conditions: string[];
+  required_checks: string[];
+  warning: string | null;
+  disclaimer: string;
+}
+
 export interface AllocationWeights {
   gold: number;
   btc: number;
@@ -64,6 +89,8 @@ export interface MacroViewModel {
   rebalance_actions: RebalanceAction[];
   metrics: MacroMetrics;
   error?: string;
+  asset_metadata?: Record<string, AssetMetadataItem>;
+  real_estate_decision?: RealEstateDecision;
 }
 
 export type MacroResponse = MacroViewModel;

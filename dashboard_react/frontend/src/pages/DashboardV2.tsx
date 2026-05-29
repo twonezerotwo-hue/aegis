@@ -10,6 +10,7 @@ import type { Vade } from "../context/VadeContext";
 
 import { MacroRegimeCommentary } from "../components/macro/MacroRegimeCommentary";
 import { AllocationWithTip } from "../components/portfolio/AllocationWithTip";
+import { RealEstateDecisionPanel } from "../components/portfolio/RealEstateDecisionPanel";
 import { AssetConsensusCard } from "../components/assets/AssetConsensusCard";
 import { CrossAlignmentPanel } from "../components/validation/CrossAlignmentPanel";
 import type { AssetResult } from "../components/validation/CrossAlignmentPanel";
@@ -440,6 +441,13 @@ const DashboardV2Inner: React.FC = () => {
               ) : effectiveMacro ? (
                 <AllocationWithTip macro={effectiveMacro} vade={vade} />
               ) : null}
+            </ErrorBoundary>
+
+            {/* Real Estate Decision Layer */}
+            <ErrorBoundary fallback="Gayrimenkul Karar Paneli">
+              <RealEstateDecisionPanel
+                decision={effectiveMacro?.real_estate_decision}
+              />
             </ErrorBoundary>
 
             {/* Varlık Bazlı Konsensüs */}

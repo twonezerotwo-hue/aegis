@@ -22,7 +22,7 @@ from fastapi import APIRouter, Query
 
 import asyncio
 from services.market_data import fetch_market_data
-from services.portfolio_allocator import build_allocation_plan
+from services.portfolio_allocator import ASSET_METADATA, build_allocation_plan, build_real_estate_decision
 from routes.dashboard import _fetch_live_scores
 
 logger = logging.getLogger(__name__)
@@ -209,7 +209,17 @@ async def get_macro_metrics(
         module_scores=ai_scores,
     )
 
-    # ── 6. Aggregate warning ──────────────────────────────────────────────────
+    # ── 6. Real estate decision signal ───────────────────────────────────────
+    real_estate_decision = build_real_estate_decision(
+        horizon=horizon,
+        regime=regime,
+        metrics={k: v for k, v in metrics.items()},
+        data_status=data_status,
+        verified=verified,
+        cash_weight=allocation_plan["weights"].get("cash", 0.20),
+    )
+
+    # ── 7. Aggregate warning ─────────────────────────────────────────────────
     if data_status == "FALLBACK":
         aggregate_warning: str | None = (
             "All macro data is hardcoded fallback — no live market sources available."
@@ -266,6 +276,9 @@ async def get_macro_metrics(
         "regime_probability_distribution": sentinel_data.get("regime_probability_distribution", {}),
         "liquidity_composite": sentinel_data.get("liquidity_composite"),
         "volatility_composite": sentinel_data.get("volatility_composite"),
+        # Asset metadata and real estate decision layer
+        "asset_metadata": ASSET_METADATA,
+        "real_estate_decision": real_estate_decision,
     }
 
 

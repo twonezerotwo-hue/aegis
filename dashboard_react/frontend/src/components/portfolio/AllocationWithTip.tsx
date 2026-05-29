@@ -12,12 +12,12 @@ interface Props {
   vade: Vade;
 }
 
-const ASSET_META: Record<string, { label: string; icon: string; bar: string }> = {
-  gold: { label: "XAU - Altin", icon: "Au", bar: "bg-amber-400" },
-  btc: { label: "BTC - Bitcoin", icon: "B", bar: "bg-orange-400" },
-  bond: { label: "BOND - Tahvil", icon: "T", bar: "bg-sky-400" },
-  commodity: { label: "EMTIA", icon: "C", bar: "bg-emerald-400" },
-  cash: { label: "CASH - Nakit", icon: "$", bar: "bg-slate-400" },
+const ASSET_META: Record<string, { label: string; subtitle: string; icon: string; bar: string }> = {
+  gold:      { label: "ALTIN / GOLD",           subtitle: "XAU · Gold futures / physical gold proxy",                        icon: "Au", bar: "bg-amber-400" },
+  btc:       { label: "BITCOIN / BTC",           subtitle: "Crypto core risk asset",                                          icon: "₿",  bar: "bg-orange-400" },
+  bond:      { label: "TAHVİL / BONDS",          subtitle: "Short-to-medium duration bonds · defensive ballast",              icon: "T",  bar: "bg-sky-400" },
+  commodity: { label: "EMTİA / COMMODITIES",     subtitle: "Energy + industrial metals · Brent/WTI · Copper/HG",             icon: "C",  bar: "bg-emerald-400" },
+  cash:      { label: "NAKİT / CASH",            subtitle: "Liquidity reserve · opportunity capital · error margin",          icon: "$",  bar: "bg-slate-400" },
 };
 
 const ASSETS = ["gold", "btc", "bond", "commodity", "cash"] as const;
@@ -142,11 +142,14 @@ export const AllocationWithTip: React.FC<Props> = ({ macro, vade }) => {
 
           return (
             <div key={asset}>
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-[11px] font-medium text-slate-300">
-                  <span className="mr-1.5 text-slate-500">{meta.icon}</span>
-                  {meta.label}
-                </span>
+              <div className="mb-1 flex items-start justify-between gap-2">
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-200">
+                    <span className="mr-1.5 font-mono text-slate-500">{meta.icon}</span>
+                    {meta.label}
+                  </span>
+                  <p className="text-[9px] text-slate-500 leading-tight mt-0.5">{meta.subtitle}</p>
+                </div>
                 <div className="flex items-center gap-2 font-mono text-[11px]">
                   <span className="text-slate-500">{(current * 100).toFixed(0)}%</span>
                   <span className="text-slate-700">-&gt;</span>
