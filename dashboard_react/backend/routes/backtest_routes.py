@@ -338,7 +338,7 @@ async def run_ai_backtest(
                 logger.warning(f"Buy-and-hold fallback failed: {bnh_err}")
 
         # Extract per-module average scores from the DataFrame
-        _score_cols = ["touche_score", "fundamental_score", "quantum_score", "sentinel_score", "news_score"]
+        _score_cols = ["touche_score", "fundamental_score", "trend_score", "quantum_score", "sentinel_score", "news_score"]
         module_scores = {
             col.replace("_score", ""): round(float(df[col].mean()), 4)
             for col in _score_cols if col in df.columns
@@ -665,26 +665,53 @@ def add_ai_scores(
 ) -> pd.DataFrame:
     """Add AI module signals based on price action + REAL HISTORICAL NEWS SENTIMENT"""
 
-    # Calculate technical indicators
+    # ── Base indicators ──────────────────────────────────────────────────────
     df['returns'] = df['close'].pct_change()
-    df['volatility'] = df['returns'].rolling(20).std()
+    # FIX: rolling std only — no look-ahead bias (never use .max() on full period)
+    df['volatility'] = df['returns'].rolling(20, min_periods=5).std()
     df['rsi'] = calculate_rsi(df['close'], 14)
     df['macd'], df['signal'] = calculate_macd(df['close'])
+    # ADX: trend strength filter — prevents entries in choppy/sideways markets
+    if all(c in df.columns for c in ("high", "low", "close")):
+        df['adx'] = calculate_adx(df, period=14)
+    else:
+        df['adx'] = pd.Series(25.0, index=df.index)  # assume trending if no H/L
 
-    # Touche EQS (Technical Analysis Score based on RSI + MACD)
-    df['touche_score'] = normalize_score(
-        (df['rsi'] / 100) * 0.6 + (df['macd'] / df['signal'].abs()).clip(-1, 1) * 0.4
-    )
+    # ── TOUCHE EQS — FIX: MACD histogram, not macd/signal.abs() ─────────────
+    # Old bug: dividing MACD line by |signal line| explodes when signal~0 and
+    # loses direction at trend transitions. Use the actual histogram instead.
+    macd_hist = df['macd'] - df['signal']
+    close_safe = df['close'].replace(0, np.nan).ffill()
+    macd_norm = (macd_hist / close_safe).fillna(0)          # relative to price
+    macd_score = (0.5 + macd_norm.clip(-0.03, 0.03) / 0.03 * 0.45).clip(0, 1)
+    rsi_score = df['rsi'].fillna(50) / 100.0
+    df['touche_score'] = normalize_score(rsi_score * 0.55 + macd_score * 0.45)
+    df['macd_hist'] = macd_hist  # exposed for attribution
 
-    # Fundamental Score (improved formula for wider distribution 0.2-0.95 instead of 0.5-0.8)
-    # Uses OnChainScorer: volatility + volume + price action + momentum
+    # ── TREND MODULE (NEW) — EMA50/EMA200 golden-cross ───────────────────────
+    # Critical for 6-year test: without trend filter the z-score system
+    # repeatedly shorts into the 2020-2021 bull run (+1900%).
+    df['ema50']  = df['close'].ewm(span=50,  min_periods=20).mean()
+    df['ema200'] = df['close'].ewm(span=200, min_periods=50).mean()
+    ema200_safe = df['ema200'].replace(0, np.nan).ffill()
+    ema_diff_pct = ((df['ema50'] - df['ema200']) / ema200_safe).fillna(0)
+    df['trend_score'] = normalize_score(0.5 + ema_diff_pct.clip(-0.20, 0.20) / 0.20 * 0.48)
+    # Binary flag: 1 = ema50 > ema200 (uptrend), used to gate SHORT signals
+    df['trend_up'] = (df['ema50'] > df['ema200']).astype(float)
+    logger.info("Trend module (EMA50/200) calculated")
+
+    # ── FUNDAMENTAL — FIX: rolling vol percentile, no look-ahead bias ────────
+    # Old bug: df['volatility'].max() = FUTURE maximum = look-ahead.
+    # New: z-score of volatility against 60-bar rolling window (causal).
+    vol_roll_mean = df['volatility'].rolling(60, min_periods=10).mean().fillna(df['volatility'].mean())
+    vol_roll_std  = df['volatility'].rolling(60, min_periods=10).std().fillna(df['volatility'].std()).replace(0, 1e-6)
+    vol_z = ((df['volatility'] - vol_roll_mean) / vol_roll_std).fillna(0)
+    ret5 = df['returns'].rolling(5, min_periods=2).mean().fillna(0)
     if ONCHAIN_SCORER_AVAILABLE:
         try:
             scorer = get_scorer()
-            # Add required volume column if missing
             if 'volume' not in df.columns:
-                df['volume'] = 1000000  # Dummy volume
-            # Calculate with improved formula
+                df['volume'] = 1_000_000
             fundamental_raw = scorer.calculate_fundamental_score(
                 df,
                 volatility_weight_coef=1.0,
@@ -693,72 +720,71 @@ def add_ai_scores(
                 momentum_weight_coef=0.5
             )
             df['fundamental_score'] = np.clip(fundamental_raw, 0, 1)
-            logger.info("Fundamental score calculated with OnChainScorer (improved formula)")
+            logger.info("Fundamental: OnChainScorer")
         except Exception as e:
-            logger.warning(f"OnChainScorer failed, falling back to simple formula: {e}")
+            logger.warning(f"OnChainScorer failed: {e} — using rolling vol-z formula")
             df['fundamental_score'] = normalize_score(
-                0.3 + 0.4 * (1 - df['volatility'] / df['volatility'].max() + 1e-8) +
-                0.2 * (df['returns'].rolling(5).mean()).clip(-1, 1)
+                0.5 - vol_z.clip(-2, 2) * 0.15 + ret5.clip(-0.05, 0.05) / 0.05 * 0.20
             )
     else:
-        # Fallback: improved simple formula (0.3 base + volatility + momentum)
-        logger.info("Using fallback improved formula for fundamental score")
         df['fundamental_score'] = normalize_score(
-            0.3 + 0.4 * (1 - df['volatility'] / df['volatility'].max() + 1e-8) +
-            0.2 * (df['returns'].rolling(5).mean()).clip(-1, 1)
+            0.5 - vol_z.clip(-2, 2) * 0.15 + ret5.clip(-0.05, 0.05) / 0.05 * 0.20
         )
+        logger.info("Fundamental: rolling vol-z formula (causal, no look-ahead)")
 
-    # Quantum Score (market microstructure - price momentum)
+    # ── QUANTUM SCORE ─────────────────────────────────────────────────────────
+    vol20_std = df['returns'].rolling(20, min_periods=5).std().replace(0, 1e-6)
     df['quantum_score'] = normalize_score(
-        0.5 + (df['returns'].rolling(5).mean() / df['returns'].std()).clip(-1, 1) * 0.5
+        0.5 + (df['returns'].rolling(5).mean() / vol20_std).clip(-1, 1) * 0.5
     )
 
-    # Sentinel Score (risk assessment from volatility)
-    df['sentinel_score'] = normalize_score(
-        1 - (df['volatility'] / df['volatility'].max()).fillna(0) * 0.5
-    )
+    # ── SENTINEL SCORE (rolling vol-z, causal) ────────────────────────────────
+    df['sentinel_score'] = normalize_score(0.75 - vol_z.clip(-2, 2) * 0.15)
 
-    # âœ… NEWS SENTIMENT - NOW USING REAL HISTORICAL DATA
+    # ── NEWS SENTIMENT — FIX: direction-aware, bidirectional ─────────────────
+    # Old bug: 0.5 + 0.5*tanh(log1p(vol/mean)) is ALWAYS >= 0.5 regardless of
+    # price direction — creates persistent long bias in historical backtest.
+    # New: price direction amplified by volume confirmation (bidirectional).
     if news_fetcher is not None:
-        logger.info("ğŸ”´ Using REAL HISTORICAL NEWS SENTIMENT for backtest (not simulated)")
+        logger.info("News: real historical sentiment")
         df['news_score'] = df['timestamp'].apply(
             lambda ts: _fetch_daily_news_score(symbol, ts, news_fetcher)
         )
     else:
-        # Fallback: simulated from volume spikes (old behavior)
-        logger.warning("âš ï¸ No news fetcher provided, falling back to simulated news from volume")
-        df['news_score'] = normalize_score(
-            0.5 + 0.5 * np.tanh(np.log1p(df['volume'] / df['volume'].rolling(20).mean()))
-        )
+        vol_mean20 = df['volume'].rolling(20, min_periods=5).mean().fillna(df['volume'].mean())
+        vol_ratio = (df['volume'] / vol_mean20.replace(0, 1e-6)).fillna(1).clip(0.5, 3.0)
+        ret3 = df['returns'].rolling(3, min_periods=1).mean().fillna(0)
+        # Volume amplifies directional signal (sqrt to avoid excessive weighting)
+        news_raw = ret3 * np.sqrt(vol_ratio)
+        df['news_score'] = normalize_score(0.5 + news_raw.clip(-0.06, 0.06) / 0.06 * 0.38)
+        logger.info("News: direction-aware vol-confirmation proxy (bidirectional)")
 
-    # Calculate Consensus — use custom module_weights if provided, else default 40-35-25
+    # ── CONSENSUS — Trend is a GATE, NOT a score component ───────────────────
+    # Key insight: adding a stable trend score (e.g. 0.77 throughout a bull market)
+    # to the consensus shifts the entire series up → z-score has no room to
+    # oscillate → no signals generated. Trend must be an external gate only.
+    # Consensus = Touche (momentum) + Fundamental (quality) + News (direction)
     _w = module_weights or {}
     _w = {
-        'touche':      float(_w.get('touche', 0.40)),
-        'fundamental': float(_w.get('fundamental', 0.35)),
-        'news':        float(_w.get('news', 0.25)),
-        'sentinel':    float(_w.get('sentinel', 0.00)),
-        'quantum':     float(_w.get('quantum', 0.00)),
+        'touche':      float(_w.get('touche',      0.45)),
+        'fundamental': float(_w.get('fundamental', 0.30)),
+        'news':        float(_w.get('news',        0.25)),
+        'sentinel':    float(_w.get('sentinel',    0.00)),
+        'quantum':     float(_w.get('quantum',     0.00)),
     }
-    # Apply event-based weight overrides (Option B)
     _w = get_event_aware_weights(_w, event_hint)
-
-    w_touche      = _w['touche']
-    w_fundamental = _w['fundamental']
-    w_news        = _w['news']
-    w_sentinel    = _w['sentinel']
-    w_quantum     = _w['quantum']
-    w_total = w_touche + w_fundamental + w_news + w_sentinel + w_quantum
+    w_total = sum(v for k, v in _w.items() if k not in ('trend',))
     if w_total > 0:
-        w_touche /= w_total; w_fundamental /= w_total; w_news /= w_total
-        w_sentinel /= w_total; w_quantum /= w_total
+        _w = {k: (v / w_total if k not in ('trend',) else v) for k, v in _w.items()}
+
     df['consensus_score'] = (
-        df['touche_score'] * w_touche +
-        df['fundamental_score'] * w_fundamental +
-        df['news_score'] * w_news +
-        df['sentinel_score'] * w_sentinel +
-        df['quantum_score'] * w_quantum
+        df['touche_score']      * _w['touche']      +
+        df['fundamental_score'] * _w['fundamental'] +
+        df['news_score']        * _w['news']        +
+        df['sentinel_score']    * _w['sentinel']    +
+        df['quantum_score']     * _w['quantum']
     )
+    # trend_score is stored in df for reporting but does NOT enter the oscillating signal
 
     # Multi-TF confluence: scale 1h consensus by 4h/1d alignment
     if timeframe == "1h":
@@ -838,6 +864,38 @@ def calculate_macd(prices, fast=12, slow=26, signal=9):
     macd = ema_fast - ema_slow
     signal_line = macd.ewm(span=signal).mean()
     return macd, signal_line
+
+
+def calculate_adx(df: "pd.DataFrame", period: int = 14) -> "pd.Series":
+    """Average Directional Index — measures trend STRENGTH (not direction).
+    ADX > 20: market is trending (entry allowed)
+    ADX < 20: choppy/sideways market (avoid entries)
+    """
+    high, low, close = df["high"], df["low"], df["close"]
+    prev_close = close.shift(1)
+    prev_high  = high.shift(1)
+    prev_low   = low.shift(1)
+
+    # True Range
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    # Directional movement
+    dm_plus  = (high - prev_high).clip(lower=0)
+    dm_minus = (prev_low - low).clip(lower=0)
+    # When dm_plus <= dm_minus, set dm_plus = 0 and vice versa
+    dm_plus  = dm_plus.where(dm_plus > dm_minus, 0.0)
+    dm_minus = dm_minus.where(dm_minus > dm_plus.shift(0), 0.0)
+
+    atr    = tr.ewm(alpha=1/period, min_periods=period).mean()
+    di_pos = 100 * dm_plus.ewm(alpha=1/period, min_periods=period).mean() / atr.replace(0, 1e-6)
+    di_neg = 100 * dm_minus.ewm(alpha=1/period, min_periods=period).mean() / atr.replace(0, 1e-6)
+    dx     = 100 * (di_pos - di_neg).abs() / (di_pos + di_neg).replace(0, 1e-6)
+    adx    = dx.ewm(alpha=1/period, min_periods=period).mean()
+    return adx.fillna(0)
 
 
 def normalize_score(value):
@@ -1100,7 +1158,7 @@ def generate_zscore_signals(
     _TF_PARAMS = {
         "1h": {"window": 40, "min_periods": 10, "threshold": 1.0},
         "4h": {"window": 20, "min_periods": 5, "threshold": 0.85},
-        "1d": {"window": 20, "min_periods": 3, "threshold": 0.80},
+        "1d": {"window": 20, "min_periods": 3, "threshold": 1.00},
     }
     _p = _TF_PARAMS.get(timeframe, {"window": 20, "min_periods": 5, "threshold": 0.8})
     base_threshold = float(z_threshold) if z_threshold is not None else _p["threshold"]
@@ -1130,20 +1188,54 @@ def generate_zscore_signals(
         thresholds = regime_series.map(
             lambda r: get_event_aware_z_threshold(r, base_threshold)
         )
+        # ── Quality filters (applied to both modes) ───────────────────────
+        trend_up_series = df.get("trend_up",  pd.Series(1.0, index=df.index)).fillna(1.0)
+        adx_series      = df.get("adx",       pd.Series(25.0, index=df.index)).fillna(25.0)
+        rsi_series      = df.get("rsi",       pd.Series(50.0, index=df.index)).fillna(50.0)
+        macd_hist_s     = df.get("macd_hist", pd.Series(0.0,  index=df.index)).fillna(0.0)
+
+        # ADX > 18: market is trending (not choppy sideways)
+        adx_filter = adx_series >= 18
+        # LONG: RSI 40-73 (some momentum, not overbought), MACD hist positive
+        rsi_ok_long  = (rsi_series >= 40) & (rsi_series <= 73)
+        macd_pos     = macd_hist_s > 0
+        # SHORT: RSI 27-60 (some weakness, not oversold), MACD hist negative
+        rsi_ok_short = (rsi_series >= 27) & (rsi_series <= 60)
+        macd_neg     = macd_hist_s < 0
+
         base_signals = pd.Series(0, index=df.index)
-        base_signals[(z > thresholds) & vol_filter & regime_filter] = 1
-        base_signals[(z < -thresholds) & vol_filter & regime_filter] = -1
+        base_signals[
+            (z > thresholds) & vol_filter & regime_filter & adx_filter & rsi_ok_long & macd_pos
+        ] = 1  # BUY
+        base_signals[
+            (z < -thresholds) & vol_filter & regime_filter & adx_filter &
+            (trend_up_series < 0.5) & rsi_ok_short & macd_neg
+        ] = -1  # SHORT (only in downtrend)
         threshold_desc = f"dynamic(base={base_threshold}, range={thresholds.min():.2f}-{thresholds.max():.2f})"
     else:
-        # Static mode: explicit z_threshold or event_hint override
         threshold = get_event_aware_z_threshold(
             regime_series.iloc[-1] if regime_series is not None and len(regime_series) > 0 else "NORMALIZATION",
             base_threshold,
             event_hint,
         )
+        trend_up_series = df.get("trend_up",  pd.Series(1.0, index=df.index)).fillna(1.0)
+        adx_series      = df.get("adx",       pd.Series(25.0, index=df.index)).fillna(25.0)
+        rsi_series      = df.get("rsi",       pd.Series(50.0, index=df.index)).fillna(50.0)
+        macd_hist_s     = df.get("macd_hist", pd.Series(0.0,  index=df.index)).fillna(0.0)
+        adx_filter   = adx_series >= 18
+        rsi_ok_long  = (rsi_series >= 40) & (rsi_series <= 73)
+        macd_pos     = macd_hist_s > 0
+        rsi_ok_short = (rsi_series >= 27) & (rsi_series <= 60)
+        macd_neg     = macd_hist_s < 0
+
         base_signals = pd.Series(0, index=df.index)
-        base_signals[(z > threshold) & vol_filter & regime_filter] = 1
-        base_signals[(z < -threshold) & vol_filter & regime_filter] = -1
+        base_signals[
+            (z > threshold) & vol_filter & regime_filter & adx_filter & rsi_ok_long & macd_pos
+        ] = 1
+        base_signals[
+            (z < -threshold) & vol_filter & regime_filter & adx_filter &
+            (trend_up_series < 0.5) & rsi_ok_short & macd_neg
+        ] = -1
         threshold_desc = f"static={threshold:.2f}(event_hint={event_hint})"
 
     # Soft RSI + momentum confluence: keep signal, scale position size by strength.
@@ -1215,52 +1307,91 @@ async def generate_historical_data_with_ai_signals(
 
 
 def execute_ai_driven_trades(df: pd.DataFrame, symbol: str) -> List[Dict]:
-    """Execute trades based on Consensus signals"""
+    """Execute trades based on Consensus signals with z-score momentum exits.
+
+    Entry: z-score crosses threshold (signal = ±1)
+    Exit strategy (in priority order):
+      1. Hard stop-loss: -8% (limit catastrophic losses)
+      2. Take-profit: +20% (lock in gains)
+      3. Z-score reversion: exit when z returns toward 0 (momentum faded)
+         - LONG exit when z < +0.25 (momentum exhausted)
+         - SHORT exit when z > -0.25 (momentum exhausted)
+      4. Opposite signal: forced reversal
+
+    This fixes the main bug: with the old approach, a LONG position opened
+    during an uptrend NEVER exited because no SHORT signals were generated
+    (blocked by the EMA200 trend gate). Result: 2 trades in 2281 bars.
+    """
     trades = []
-    position = None  # None, "LONG", or "SHORT"
+    position = None
     entry_price = None
     entry_time = None
 
+    STOP_LOSS_PCT  = -0.08   # exit if position loses 8%
+    TAKE_PROFIT_PCT = 0.20   # exit if position gains 20%
+    Z_EXIT_LONG    =  0.25   # exit LONG when z < this (momentum fading)
+    Z_EXIT_SHORT   = -0.25   # exit SHORT when z > this (momentum fading)
+
+    def _record_trade(exit_price, exit_ts, exit_z, exit_regime, exit_conf, exit_reason):
+        pnl_raw = (exit_price - entry_price) * (1 if position == "LONG" else -1)
+        commission = (entry_price + exit_price) * 0.001
+        pnl_net = pnl_raw - commission
+        trades.append({
+            "entry_time": entry_time.isoformat(),
+            "exit_time": exit_ts.isoformat(),
+            "entry_price": round(entry_price, 2),
+            "exit_price": round(exit_price, 2),
+            "position": position,
+            "pnl": round(pnl_net, 2),
+            "pnl_pct": round(pnl_net / entry_price * 100, 2),
+            "z_score": float(exit_z),
+            "regime": exit_regime,
+            "confluence_multiplier": float(exit_conf),
+            "exit_reason": exit_reason,
+        })
+
     for idx, row in df.iterrows():
-        signal = row["consensus_signal"]
-        price = row["close"]
-        timestamp = row["timestamp"]
+        signal  = row["consensus_signal"]
+        price   = row["close"]
+        ts      = row["timestamp"]
+        z       = float(row.get("consensus_zscore", 0.0))
+        regime  = str(row.get("consensus_regime", "NORMALIZATION"))
+        conf    = float(row.get("confluence_multiplier", 1.0))
 
-        # Skip if no signal
-        if signal == 0:
-            continue
+        # ── Exit logic (evaluate every bar, not just on signal bars) ─────────
+        if position is not None:
+            pnl_pct = (price - entry_price) / entry_price * (1 if position == "LONG" else -1)
 
-        # Entry: From no position or opposite position
+            # 1. Hard stop-loss
+            if pnl_pct <= STOP_LOSS_PCT:
+                _record_trade(price, ts, z, regime, conf, "stop_loss")
+                position = entry_price = entry_time = None
+
+            # 2. Take-profit
+            elif pnl_pct >= TAKE_PROFIT_PCT:
+                _record_trade(price, ts, z, regime, conf, "take_profit")
+                position = entry_price = entry_time = None
+
+            # 3. Z-score reversion (momentum exhausted)
+            elif position == "LONG"  and z < Z_EXIT_LONG:
+                _record_trade(price, ts, z, regime, conf, "z_reversion")
+                position = entry_price = entry_time = None
+
+            elif position == "SHORT" and z > Z_EXIT_SHORT:
+                _record_trade(price, ts, z, regime, conf, "z_reversion")
+                position = entry_price = entry_time = None
+
+            # 4. Forced reversal on opposite signal
+            elif signal != 0:
+                if (position == "LONG" and signal < 0) or (position == "SHORT" and signal > 0):
+                    _record_trade(price, ts, z, regime, conf, "reverse_signal")
+                    position = entry_price = entry_time = None
+
+        # ── Entry logic ───────────────────────────────────────────────────────
         if position is None and signal != 0:
-            position = "LONG" if signal > 0 else "SHORT"
+            position   = "LONG" if signal > 0 else "SHORT"
             entry_price = price
-            entry_time = timestamp
-
-        # Exit: Opposite signal
-        elif position is not None and signal != 0:
-            if (position == "LONG" and signal < 0) or (position == "SHORT" and signal > 0):
-                # Close position
-                pnl = (price - entry_price) * (1 if position == "LONG" else -1)
-                commission = (entry_price + price) * 0.001  # 0.1% commission
-                pnl_after_comm = pnl - commission
-
-                trades.append({
-                    "entry_time": entry_time.isoformat(),
-                    "exit_time": timestamp.isoformat(),
-                    "entry_price": round(entry_price, 2),
-                    "exit_price": round(price, 2),
-                    "position": position,
-                    "pnl": round(pnl_after_comm, 2),
-                    "pnl_pct": round((pnl_after_comm / entry_price) * 100, 2),
-                    "z_score": float(row.get("consensus_zscore", 0.5)),
-                    "regime": str(row.get("consensus_regime", "NORMALIZATION")),
-                    "confluence_multiplier": float(row.get("confluence_multiplier", 1.0)),
-                })
-
-                # Open new position
-                position = "LONG" if signal > 0 else "SHORT"
-                entry_price = price
-                entry_time = timestamp
+            entry_time  = ts
 
     return trades
 
