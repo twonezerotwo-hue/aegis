@@ -553,10 +553,26 @@ async def fetch_real_historical_data(
             # Convert symbol format (BTC/USDT -> BTCUSDT for ccxt)
             symbol_ccxt = symbol.replace("/", "")
 
-            # Fetch OHLCV data
+            # Fetch OHLCV data — paginate to cover full date range.
+            # ccxt default is 500 bars; for 1h that is only 21 days.
+            # We paginate in chunks of 500 until we reach end_date or no new data.
             logger.info(f"Fetching real data from Binance: {symbol} {ccxt_timeframe}")
-            ohlcv = exchange.fetch_ohlcv(symbol, ccxt_timeframe,
-                                         int(start_date.timestamp() * 1000))
+            all_ohlcv = []
+            since_ms = int(start_date.timestamp() * 1000)
+            end_ms   = int(end_date.timestamp()   * 1000)
+            _PAGE_LIMIT = 500
+            _MAX_PAGES  = 200  # safety cap (200 × 500 = 100,000 bars)
+            for _page in range(_MAX_PAGES):
+                chunk = exchange.fetch_ohlcv(symbol, ccxt_timeframe, since_ms, limit=_PAGE_LIMIT)
+                if not chunk:
+                    break
+                all_ohlcv.extend(chunk)
+                last_ts = chunk[-1][0]
+                if last_ts >= end_ms or len(chunk) < _PAGE_LIMIT:
+                    break
+                since_ms = last_ts + 1  # next page starts 1 ms after last bar
+            ohlcv = all_ohlcv
+            logger.info(f"Paginated fetch complete: {len(ohlcv)} bars ({symbol} {ccxt_timeframe})")
 
             # Convert to DataFrame
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -723,14 +739,29 @@ def add_ai_scores(
             logger.info("Fundamental: OnChainScorer")
         except Exception as e:
             logger.warning(f"OnChainScorer failed: {e} — using rolling vol-z formula")
+            # Fast (20-bar) component + slow (60-bar) component — responds faster to bear markets
+            vol_z_fast = ((df['volatility'] - df['volatility'].rolling(20, min_periods=5).mean().fillna(df['volatility'].mean()))
+                          / df['volatility'].rolling(20, min_periods=5).std().fillna(df['volatility'].std()).replace(0, 1e-6)).fillna(0)
+            ret20 = df['returns'].rolling(20, min_periods=5).mean().fillna(0)
             df['fundamental_score'] = normalize_score(
-                0.5 - vol_z.clip(-2, 2) * 0.15 + ret5.clip(-0.05, 0.05) / 0.05 * 0.20
+                0.5
+                - vol_z.clip(-2, 2) * 0.10      # slow 60-bar regime signal
+                - vol_z_fast.clip(-2, 2) * 0.10  # fast 20-bar stress signal
+                + ret5.clip(-0.05, 0.05)   / 0.05  * 0.15  # 5-day momentum
+                + ret20.clip(-0.05, 0.05)  / 0.05  * 0.10  # 20-day trend confirmation
             )
     else:
+        vol_z_fast = ((df['volatility'] - df['volatility'].rolling(20, min_periods=5).mean().fillna(df['volatility'].mean()))
+                      / df['volatility'].rolling(20, min_periods=5).std().fillna(df['volatility'].std()).replace(0, 1e-6)).fillna(0)
+        ret20 = df['returns'].rolling(20, min_periods=5).mean().fillna(0)
         df['fundamental_score'] = normalize_score(
-            0.5 - vol_z.clip(-2, 2) * 0.15 + ret5.clip(-0.05, 0.05) / 0.05 * 0.20
+            0.5
+            - vol_z.clip(-2, 2) * 0.10
+            - vol_z_fast.clip(-2, 2) * 0.10
+            + ret5.clip(-0.05, 0.05)  / 0.05 * 0.15
+            + ret20.clip(-0.05, 0.05) / 0.05 * 0.10
         )
-        logger.info("Fundamental: rolling vol-z formula (causal, no look-ahead)")
+        logger.info("Fundamental: dual-window vol-z (fast 20 + slow 60, causal)")
 
     # ── QUANTUM SCORE ─────────────────────────────────────────────────────────
     vol20_std = df['returns'].rolling(20, min_periods=5).std().replace(0, 1e-6)
@@ -738,26 +769,33 @@ def add_ai_scores(
         0.5 + (df['returns'].rolling(5).mean() / vol20_std).clip(-1, 1) * 0.5
     )
 
-    # ── SENTINEL SCORE (rolling vol-z, causal) ────────────────────────────────
-    df['sentinel_score'] = normalize_score(0.75 - vol_z.clip(-2, 2) * 0.15)
+    # ── SENTINEL SCORE — FIX: base was 0.75 → always showed ~0.75 ───────────
+    # Old: normalize_score(0.75 - vol_z*0.15) → average always ≈ 0.75 (bias)
+    # New: base 0.50 with wider ±0.25 range → actually reflects risk state
+    df['sentinel_score'] = normalize_score(0.50 - vol_z.clip(-2, 2) * 0.25)
+    # Result: calm (vol_z=-2) → 1.0, normal (vol_z=0) → 0.50, crash (vol_z=+2) → 0.0
 
-    # ── NEWS SENTIMENT — FIX: direction-aware, bidirectional ─────────────────
-    # Old bug: 0.5 + 0.5*tanh(log1p(vol/mean)) is ALWAYS >= 0.5 regardless of
-    # price direction — creates persistent long bias in historical backtest.
-    # New: price direction amplified by volume confirmation (bidirectional).
+    # ── NEWS SENTIMENT — FIX: 3-day return averaged to ~0 → always 0.500 ────
+    # Bug: ret3 * sqrt(vol_ratio) averages to ~0 over any long period because
+    # BTC has roughly equal up/down days. Module contributed zero information.
+    # Fix: use 30-day cumulative price momentum as sentiment proxy.
+    # 30-day return is a real medium-term sentiment driver (separate from RSI/MACD).
     if news_fetcher is not None:
         logger.info("News: real historical sentiment")
         df['news_score'] = df['timestamp'].apply(
             lambda ts: _fetch_daily_news_score(symbol, ts, news_fetcher)
         )
     else:
-        vol_mean20 = df['volume'].rolling(20, min_periods=5).mean().fillna(df['volume'].mean())
-        vol_ratio = (df['volume'] / vol_mean20.replace(0, 1e-6)).fillna(1).clip(0.5, 3.0)
-        ret3 = df['returns'].rolling(3, min_periods=1).mean().fillna(0)
-        # Volume amplifies directional signal (sqrt to avoid excessive weighting)
-        news_raw = ret3 * np.sqrt(vol_ratio)
-        df['news_score'] = normalize_score(0.5 + news_raw.clip(-0.06, 0.06) / 0.06 * 0.38)
-        logger.info("News: direction-aware vol-confirmation proxy (bidirectional)")
+        # 30-day cumulative return: strongly directional, captures medium-term mood
+        close_30 = df['close'].shift(30).fillna(df['close'].iloc[0])
+        ret30 = ((df['close'] / close_30.replace(0, 1e-6)) - 1).fillna(0)
+        # Also add 7-day momentum for responsiveness
+        close_7 = df['close'].shift(7).fillna(df['close'].iloc[0])
+        ret7 = ((df['close'] / close_7.replace(0, 1e-6)) - 1).fillna(0)
+        # Blend: 60% 30-day sentiment + 40% 7-day momentum
+        news_raw = ret30.clip(-0.40, 0.40) / 0.40 * 0.60 + ret7.clip(-0.20, 0.20) / 0.20 * 0.40
+        df['news_score'] = normalize_score(0.5 + news_raw.clip(-1.0, 1.0) * 0.42)
+        logger.info("News: 30d+7d cumulative return proxy (medium-term sentiment)")
 
     # ── CONSENSUS — Trend is a GATE, NOT a score component ───────────────────
     # Key insight: adding a stable trend score (e.g. 0.77 throughout a bull market)
@@ -1155,10 +1193,14 @@ def generate_zscore_signals(
     event_hint: str = None,
 ) -> pd.Series:
     """Rolling z-score with regime filtering and event-aware dynamic thresholds."""
+    # Window calibrated to ~10 trading days worth of bars per timeframe:
+    # 1h  →  120 bars = 5 days   (was 40 = 1.67 days — too noisy)
+    # 4h  →   60 bars = 10 days  (was 20 = 3.3  days — too noisy, caused 22% win rate)
+    # 1d  →   20 bars = 20 days  (unchanged — 1 month, already appropriate)
     _TF_PARAMS = {
-        "1h": {"window": 40, "min_periods": 10, "threshold": 1.0},
-        "4h": {"window": 20, "min_periods": 5, "threshold": 0.85},
-        "1d": {"window": 20, "min_periods": 3, "threshold": 1.00},
+        "1h": {"window": 120, "min_periods": 24, "threshold": 1.3},  # higher = fewer trades = less commission drag
+        "4h": {"window":  60, "min_periods": 12, "threshold": 1.0},
+        "1d": {"window":  20, "min_periods":  3, "threshold": 1.0},
     }
     _p = _TF_PARAMS.get(timeframe, {"window": 20, "min_periods": 5, "threshold": 0.8})
     base_threshold = float(z_threshold) if z_threshold is not None else _p["threshold"]
@@ -1169,6 +1211,13 @@ def generate_zscore_signals(
     _roll_std = df["consensus_score"].rolling(_p["window"], min_periods=_p["min_periods"]).std().fillna(df["consensus_score"].std()).replace(0, 1e-6)
     z = (df["consensus_score"] - _roll_mean) / _roll_std
     df["consensus_zscore"] = z
+
+    # Warmup filter: EMA200 needs 200 bars to stabilize; signals generated before
+    # that use an undercooked trend direction and cause wrong LONG/SHORT entries.
+    # Block all signals for the first 200 bars (capped at 1/5 of total data).
+    warmup_bars = min(200, max(50, len(df) // 5))
+    past_warmup = pd.Series(False, index=df.index)
+    past_warmup.iloc[warmup_bars:] = True
 
     if "volume" in df.columns:
         vol_mean = df["volume"].rolling(_p["window"], min_periods=_p["min_periods"]).mean()
@@ -1205,12 +1254,13 @@ def generate_zscore_signals(
 
         base_signals = pd.Series(0, index=df.index)
         base_signals[
-            (z > thresholds) & vol_filter & regime_filter & adx_filter & rsi_ok_long & macd_pos
-        ] = 1  # BUY
+            (z > thresholds) & vol_filter & regime_filter & adx_filter &
+            rsi_ok_long & macd_pos & past_warmup
+        ] = 1  # BUY — no signals during EMA200 warmup
         base_signals[
             (z < -thresholds) & vol_filter & regime_filter & adx_filter &
-            (trend_up_series < 0.5) & rsi_ok_short & macd_neg
-        ] = -1  # SHORT (only in downtrend)
+            (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
+        ] = -1  # SHORT — only in downtrend, past warmup
         threshold_desc = f"dynamic(base={base_threshold}, range={thresholds.min():.2f}-{thresholds.max():.2f})"
     else:
         threshold = get_event_aware_z_threshold(
@@ -1230,11 +1280,12 @@ def generate_zscore_signals(
 
         base_signals = pd.Series(0, index=df.index)
         base_signals[
-            (z > threshold) & vol_filter & regime_filter & adx_filter & rsi_ok_long & macd_pos
+            (z > threshold) & vol_filter & regime_filter & adx_filter &
+            rsi_ok_long & macd_pos & past_warmup
         ] = 1
         base_signals[
             (z < -threshold) & vol_filter & regime_filter & adx_filter &
-            (trend_up_series < 0.5) & rsi_ok_short & macd_neg
+            (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
         ] = -1
         threshold_desc = f"static={threshold:.2f}(event_hint={event_hint})"
 
@@ -1325,28 +1376,35 @@ def execute_ai_driven_trades(df: pd.DataFrame, symbol: str) -> List[Dict]:
     trades = []
     position = None
     entry_price = None
-    entry_time = None
+    entry_time  = None
+    entry_z     = None   # FIX: store entry z-score for correct position sizing
+    entry_conf  = None   # FIX: store entry confluence for correct position sizing
+    entry_regime = None
 
-    STOP_LOSS_PCT  = -0.08   # exit if position loses 8%
-    TAKE_PROFIT_PCT = 0.20   # exit if position gains 20%
-    Z_EXIT_LONG    =  0.25   # exit LONG when z < this (momentum fading)
-    Z_EXIT_SHORT   = -0.25   # exit SHORT when z > this (momentum fading)
+    STOP_LOSS_PCT   = -0.08   # hard floor
+    TAKE_PROFIT_PCT =  0.20   # lock-in target
+    Z_EXIT_LONG     =  0.20   # exit LONG when momentum fades (z < 0.20)
+    Z_EXIT_SHORT    = -0.20   # exit SHORT when momentum fades
 
-    def _record_trade(exit_price, exit_ts, exit_z, exit_regime, exit_conf, exit_reason):
+    def _record_trade(exit_price, exit_ts, exit_z, exit_regime, exit_reason):
         pnl_raw = (exit_price - entry_price) * (1 if position == "LONG" else -1)
         commission = (entry_price + exit_price) * 0.001
         pnl_net = pnl_raw - commission
         trades.append({
             "entry_time": entry_time.isoformat(),
-            "exit_time": exit_ts.isoformat(),
+            "exit_time":  exit_ts.isoformat(),
             "entry_price": round(entry_price, 2),
-            "exit_price": round(exit_price, 2),
+            "exit_price":  round(exit_price, 2),
             "position": position,
-            "pnl": round(pnl_net, 2),
+            "pnl":     round(pnl_net, 2),
             "pnl_pct": round(pnl_net / entry_price * 100, 2),
-            "z_score": float(exit_z),
-            "regime": exit_regime,
-            "confluence_multiplier": float(exit_conf),
+            # FIX: use ENTRY z-score and ENTRY confluence for sizing — not exit bar values.
+            # Using exit bar's z/conf caused position sizes of ~2% on z-reversion exits
+            # (exit z≈0.25 → base_kelly=0.2, confluence=0.1 default → effective=2%).
+            # Entry z is always >threshold (e.g. 1.0+) → proper sizing (15-25%).
+            "z_score": float(entry_z),
+            "regime":  entry_regime,
+            "confluence_multiplier": float(entry_conf),
             "exit_reason": exit_reason,
         })
 
@@ -1356,42 +1414,41 @@ def execute_ai_driven_trades(df: pd.DataFrame, symbol: str) -> List[Dict]:
         ts      = row["timestamp"]
         z       = float(row.get("consensus_zscore", 0.0))
         regime  = str(row.get("consensus_regime", "NORMALIZATION"))
-        conf    = float(row.get("confluence_multiplier", 1.0))
+        conf    = float(row.get("confluence_multiplier", 0.1))
 
-        # ── Exit logic (evaluate every bar, not just on signal bars) ─────────
+        # ── Exit (check every bar) ────────────────────────────────────────────
         if position is not None:
             pnl_pct = (price - entry_price) / entry_price * (1 if position == "LONG" else -1)
 
-            # 1. Hard stop-loss
             if pnl_pct <= STOP_LOSS_PCT:
-                _record_trade(price, ts, z, regime, conf, "stop_loss")
-                position = entry_price = entry_time = None
+                _record_trade(price, ts, z, regime, "stop_loss")
+                position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
-            # 2. Take-profit
             elif pnl_pct >= TAKE_PROFIT_PCT:
-                _record_trade(price, ts, z, regime, conf, "take_profit")
-                position = entry_price = entry_time = None
+                _record_trade(price, ts, z, regime, "take_profit")
+                position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
-            # 3. Z-score reversion (momentum exhausted)
-            elif position == "LONG"  and z < Z_EXIT_LONG:
-                _record_trade(price, ts, z, regime, conf, "z_reversion")
-                position = entry_price = entry_time = None
+            elif position == "LONG" and z < Z_EXIT_LONG:
+                _record_trade(price, ts, z, regime, "z_reversion")
+                position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
             elif position == "SHORT" and z > Z_EXIT_SHORT:
-                _record_trade(price, ts, z, regime, conf, "z_reversion")
-                position = entry_price = entry_time = None
+                _record_trade(price, ts, z, regime, "z_reversion")
+                position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
-            # 4. Forced reversal on opposite signal
             elif signal != 0:
                 if (position == "LONG" and signal < 0) or (position == "SHORT" and signal > 0):
-                    _record_trade(price, ts, z, regime, conf, "reverse_signal")
-                    position = entry_price = entry_time = None
+                    _record_trade(price, ts, z, regime, "reverse_signal")
+                    position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
-        # ── Entry logic ───────────────────────────────────────────────────────
+        # ── Entry ─────────────────────────────────────────────────────────────
         if position is None and signal != 0:
-            position   = "LONG" if signal > 0 else "SHORT"
-            entry_price = price
-            entry_time  = ts
+            position      = "LONG" if signal > 0 else "SHORT"
+            entry_price   = price
+            entry_time    = ts
+            entry_z       = z      # store for sizing
+            entry_conf    = conf   # store for sizing
+            entry_regime  = regime
 
     return trades
 

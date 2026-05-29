@@ -488,9 +488,17 @@ const DashboardV2Inner: React.FC = () => {
                   currentTimeframe={metricsTimeframe}
                   onTimeframeChange={setMetricsTimeframe}
                 />
-                <span className="text-xs text-slate-500">
-                  Her {metricsRefreshMs / 1000}s güncellenir
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500">
+                    Her {metricsRefreshMs / 1000}s güncellenir
+                  </span>
+                  {metricsLoading && metricsData && (
+                    <span className="flex items-center gap-1 text-[10px] text-slate-500">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      yenileniyor
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -506,7 +514,7 @@ const DashboardV2Inner: React.FC = () => {
 
                 {/* Only Touche / Fundamental / News enter the consensus —
                     Sentinel and Quantum are background-only risk filters. */}
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <div className={`grid gap-4 md:grid-cols-2 lg:grid-cols-3 transition-opacity duration-200 ${metricsLoading ? "opacity-50" : "opacity-100"}`}>
                   {(["touche", "fundamental", "news"] as const).map((key) => (
                     <MetricCard key={key} metric={metricsData.metrics[key]} />
                   ))}
