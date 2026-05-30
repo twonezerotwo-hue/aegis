@@ -12,7 +12,7 @@ Confluence (Çakışma) Sayımı:
   - Bollinger alt/üst bandındaysa +1
   Confluences ne kadar çoksa sinyal o kadar güçlü.
 """
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from .base import BasePhase, PhaseContext, PhaseResult
 import structlog
@@ -39,17 +39,34 @@ class ZoneConfluencePhase(BasePhase):
         atr = ctx.atr
         tol_atr = cfg.get("zone_tolerance_atr", 0.3)
         confluence_min = cfg.get("confluence_min", 2)
+        zone_max_age = cfg.get("zone_max_age_bars", 50)  # Zone expiry
+
+        # NaN KORUMASI: current_price sıfır ise anlamlı hesap yapılamaz
+        current_price = self._safe_float(df["close"])
+        if current_price <= 0:
+            return self._neutral_result("Geçersiz fiyat (0 veya negatif)")
 
         tolerance = atr * tol_atr
-        last = df[-1]
-        current_price = self._safe_float(df["close"])
 
-        # ── Bölge Tespiti ─────────────────────────────────────────────────────
-        demand_zone = self._find_demand_zone(df)
-        supply_zone = self._find_supply_zone(df)
+        # ── Bölge Tespiti (expiry + FVG dahil) ───────────────────────────────
+        demand_zone = self._find_demand_zone(df, max_age=zone_max_age)
+        supply_zone = self._find_supply_zone(df, max_age=zone_max_age)
+
+        # Fair Value Gap tespiti (SMC — kurumsal boşluklar)
+        bullish_fvgs, bearish_fvgs = self._find_fair_value_gaps(df, max_age=zone_max_age)
 
         in_demand = demand_zone and (demand_zone[0] - tolerance <= current_price <= demand_zone[1] + tolerance)
         in_supply = supply_zone and (supply_zone[0] - tolerance <= current_price <= supply_zone[1] + tolerance)
+
+        # FVG kontrolü
+        in_bullish_fvg = any(
+            fvg[0] - tolerance <= current_price <= fvg[1] + tolerance
+            for fvg in bullish_fvgs
+        )
+        in_bearish_fvg = any(
+            fvg[0] - tolerance <= current_price <= fvg[1] + tolerance
+            for fvg in bearish_fvgs
+        )
 
         # ── Confluence Sayımı ─────────────────────────────────────────────────
         confluences = 0
@@ -61,6 +78,14 @@ class ZoneConfluencePhase(BasePhase):
         if in_supply:
             confluences += 1
             confluence_details.append("supply_zone")
+
+        # FVG confluences (SMC teyidi — daha güçlü bölgeler)
+        if in_bullish_fvg:
+            confluences += 1.5   # FVG > klasik zone (kurumsal imbalance)
+            confluence_details.append("bullish_FVG(+1.5)")
+        if in_bearish_fvg:
+            confluences += 1.5
+            confluence_details.append("bearish_FVG(+1.5)")
 
         # RSI + Bollinger Band Confluence — korelasyonlu göstergeler
         # DÜZELTME #3: 35/65 → 30/70 (standart TA eşikleri)
@@ -123,23 +148,28 @@ class ZoneConfluencePhase(BasePhase):
                 confluence_details.append(f"pivot_r1({r1:.4f})")
 
         # ── Sinyal ve Skor ────────────────────────────────────────────────────
-        if in_demand and confluences >= confluence_min:
+        # FVG bullish + demand zone = güçlü kurumsal destek
+        in_bullish_zone = in_demand or in_bullish_fvg
+        in_bearish_zone = in_supply or in_bearish_fvg
+
+        if in_bullish_zone and confluences >= confluence_min:
             score = min(100.0, 50.0 + confluences * 12.0)
             signal = "BULLISH"
-            reason = f"Talep bölgesinde {confluences} confluence: {', '.join(confluence_details)}"
-        elif in_supply and confluences >= confluence_min:
+            zone_type = "FVG+Demand" if (in_demand and in_bullish_fvg) else ("FVG" if in_bullish_fvg else "Demand")
+            reason = f"{zone_type} bölgesinde {confluences:.1f} confluence: {', '.join(confluence_details)}"
+        elif in_bearish_zone and confluences >= confluence_min:
             score = min(100.0, 50.0 + confluences * 12.0)
             signal = "BEARISH"
-            reason = f"Arz bölgesinde {confluences} confluence: {', '.join(confluence_details)}"
+            zone_type = "FVG+Supply" if (in_supply and in_bearish_fvg) else ("FVG" if in_bearish_fvg else "Supply")
+            reason = f"{zone_type} bölgesinde {confluences:.1f} confluence: {', '.join(confluence_details)}"
         elif confluences >= confluence_min:
-            # Bölge yok ama diğer confluences var
             score = 45.0 + confluences * 5.0
-            signal = "BULLISH" if in_demand else ("BEARISH" if in_supply else "NEUTRAL")
-            reason = f"Bölge dışı {confluences} confluence"
+            signal = "NEUTRAL"
+            reason = f"Bölge dışı {confluences:.1f} confluence"
         else:
             score = 20.0
             signal = "NEUTRAL"
-            reason = f"Yetersiz confluence ({confluences}/{confluence_min})"
+            reason = f"Yetersiz confluence ({confluences:.1f}/{confluence_min})"
 
         metadata = {
             "current_price": round(current_price, 4),
@@ -147,10 +177,15 @@ class ZoneConfluencePhase(BasePhase):
             "supply_zone": [round(x, 4) for x in supply_zone] if supply_zone else None,
             "in_demand": in_demand,
             "in_supply": in_supply,
-            "confluences": confluences,
+            "bullish_fvgs": [[round(f[0], 4), round(f[1], 4)] for f in bullish_fvgs[:3]],
+            "bearish_fvgs": [[round(f[0], 4), round(f[1], 4)] for f in bearish_fvgs[:3]],
+            "in_bullish_fvg": in_bullish_fvg,
+            "in_bearish_fvg": in_bearish_fvg,
+            "confluences": round(confluences, 2),
             "confluence_details": confluence_details,
             "tolerance": round(tolerance, 4),
             "atr": round(atr, 4),
+            "zone_max_age": zone_max_age,
         }
 
         logger.info("phase3_result", symbol=ctx.symbol, signal=signal,
@@ -165,55 +200,112 @@ class ZoneConfluencePhase(BasePhase):
             metadata=metadata,
         )
 
-    def _find_demand_zone(self, df) -> Optional[Tuple[float, float]]:
-        """Son 'impulsif yukarı hamle'nin başındaki konsolidasyon bölgesi = Talep."""
+    def _find_demand_zone(
+        self, df, max_age: int = 50
+    ) -> Optional[Tuple[float, float]]:
+        """Son 'impulsif yukarı hamle'nin başındaki order block = Talep Bölgesi.
+
+        Zone expiry: Son `max_age` bar dışındaki bölgeler geçersiz sayılır.
+        """
         closes = df["close"].to_list()
-        opens = df["open"].to_list()
-        lows = df["low"].to_list()
+        opens  = df["open"].to_list()
+        lows   = df["low"].to_list()
+        highs  = df["high"].to_list()
         n = len(closes)
 
-        # Son 50 bar içinde en güçlü yukarı mum'u bul (order block)
-        best_idx = None
+        best_idx  = None
         best_move = 0.0
-        for i in range(max(0, n - 50), n - 3):
-            # Yukarı mum mu?
-            if closes[i] > opens[i]:
-                # Sonraki 2 barda ne kadar ilerledi?
+        search_start = max(0, n - max_age)  # Zone expiry: sadece son max_age bar
+
+        for i in range(search_start, n - 3):
+            if closes[i] > opens[i]:  # Yukarı mum (order block adayı)
                 move = closes[i + 2] - closes[i] if i + 2 < n else 0
                 if move > best_move:
                     best_move = move
-                    best_idx = i
+                    best_idx  = i
 
         if best_idx is None:
             return None
 
-        # O mum + önceki mum → Talep bölgesi (lower: min low, upper: max high of those bars)
-        zone_low = min(lows[max(0, best_idx - 1): best_idx + 1])
-        zone_high = max(
-            df["high"].to_list()[max(0, best_idx - 1): best_idx + 1]
-        )
+        zone_low  = min(lows [max(0, best_idx - 1): best_idx + 1])
+        zone_high = max(highs[max(0, best_idx - 1): best_idx + 1])
         return (zone_low, zone_high)
 
-    def _find_supply_zone(self, df) -> Optional[Tuple[float, float]]:
-        """Son 'impulsif aşağı hamle'nin başındaki konsolidasyon bölgesi = Arz."""
+    def _find_supply_zone(
+        self, df, max_age: int = 50
+    ) -> Optional[Tuple[float, float]]:
+        """Son 'impulsif aşağı hamle'nin başındaki order block = Arz Bölgesi.
+
+        Zone expiry: Son `max_age` bar dışındaki bölgeler geçersiz sayılır.
+        """
         closes = df["close"].to_list()
-        opens = df["open"].to_list()
-        highs = df["high"].to_list()
-        lows = df["low"].to_list()
+        opens  = df["open"].to_list()
+        highs  = df["high"].to_list()
+        lows   = df["low"].to_list()
         n = len(closes)
 
-        best_idx = None
+        best_idx  = None
         best_move = 0.0
-        for i in range(max(0, n - 50), n - 3):
+        search_start = max(0, n - max_age)
+
+        for i in range(search_start, n - 3):
             if closes[i] < opens[i]:  # Aşağı mum
                 move = closes[i] - closes[i + 2] if i + 2 < n else 0
                 if move > best_move:
                     best_move = move
-                    best_idx = i
+                    best_idx  = i
 
         if best_idx is None:
             return None
 
-        zone_low = min(lows[max(0, best_idx - 1): best_idx + 1])
+        zone_low  = min(lows [max(0, best_idx - 1): best_idx + 1])
         zone_high = max(highs[max(0, best_idx - 1): best_idx + 1])
         return (zone_low, zone_high)
+
+    def _find_fair_value_gaps(
+        self, df, max_age: int = 30
+    ) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
+        """
+        Fair Value Gap (FVG / Imbalance) tespiti — SMC konsepti.
+
+        3 ardışık mum:
+          Bullish FVG: mum[i-2].high < mum[i].low  → fiyat boşluk bıraktı yukarı
+          Bearish FVG: mum[i-2].low  > mum[i].high → fiyat boşluk bıraktı aşağı
+
+        Fiyat bu boşluğa döndüğünde güçlü tepki beklenir (kurumsal sipariş dolumu).
+        """
+        highs  = df["high"].to_list()
+        lows   = df["low"].to_list()
+        closes = df["close"].to_list()
+        n = len(highs)
+
+        bullish_fvgs: List[Tuple[float, float]] = []
+        bearish_fvgs: List[Tuple[float, float]] = []
+
+        search_start = max(2, n - max_age)
+        current_price = closes[-1] if closes else 0.0
+
+        for i in range(search_start, n):
+            if i < 2:
+                continue
+            h0 = highs[i - 2];  l0 = lows[i - 2]  # Bar[i-2]
+            # Bar[i-1] = orta/impulse bar
+            h2 = highs[i];      l2 = lows[i]       # Bar[i]
+
+            # Bullish FVG: gap between bar[i-2].high and bar[i].low
+            if h0 < l2 and l2 > h0:
+                fvg_low  = h0
+                fvg_high = l2
+                # Sadece fiyat henüz doldurulmamış FVG'leri dahil et
+                if current_price <= fvg_high * 1.05:  # Yakın veya içinde
+                    bullish_fvgs.append((fvg_low, fvg_high))
+
+            # Bearish FVG: gap between bar[i-2].low and bar[i].high
+            elif l0 > h2 and h2 < l0:
+                fvg_low  = h2
+                fvg_high = l0
+                if current_price >= fvg_low * 0.95:
+                    bearish_fvgs.append((fvg_low, fvg_high))
+
+        # En yakın FVG'leri önce döndür (son X bar)
+        return bullish_fvgs[-3:], bearish_fvgs[-3:]

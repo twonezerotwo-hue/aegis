@@ -158,11 +158,39 @@ class EQSScorer:
         # Toplam ağırlık 1.0 değilse normalleştir
         eqs_score = round(total_score / total_weight, 2)
 
+        # ── Ardışık Faz Uyumu Bonusu ──────────────────────────────────────────
+        # Fazların art arda aynı yönde oy vermesi güven artırır (1+1+1 > 3 etkisi).
+        # Sadece erken fazlar (1-5) sayılır; risk fazları (6-7) hariç.
+        consecutive_bullish = sum(
+            1 for r in phase_results
+            if r.phase_id <= 5 and r.signal == "BULLISH"
+        )
+        consecutive_bearish = sum(
+            1 for r in phase_results
+            if r.phase_id <= 5 and r.signal == "BEARISH"
+        )
+        alignment_count = max(consecutive_bullish, consecutive_bearish)
+        if alignment_count >= 4:
+            alignment_bonus = 0.08   # 4+ faz uyumlu → %8 boost
+        elif alignment_count == 3:
+            alignment_bonus = 0.04   # 3 faz uyumlu → %4 boost
+        else:
+            alignment_bonus = 0.0
+
+        if alignment_bonus > 0:
+            eqs_score = round(min(100.0, eqs_score * (1.0 + alignment_bonus)), 2)
+            logger.info(
+                "eqs_sequential_bonus",
+                alignment_count=alignment_count,
+                bonus_pct=round(alignment_bonus * 100, 1),
+                eqs_after_bonus=eqs_score,
+            )
+
         # ── Dominant Sinyal (Çoğunluk Oyu) ───────────────────────────────────
-        signal_votes = {"BULLISH": 0, "BEARISH": 0, "NEUTRAL": 0}
+        signal_votes = {"BULLISH": 0.0, "BEARISH": 0.0, "NEUTRAL": 0.0}
         for r in phase_results:
             w = active_weights.get(r.phase_id, 0.0)
-            signal_votes[r.signal] = signal_votes.get(r.signal, 0) + w
+            signal_votes[r.signal] = signal_votes.get(r.signal, 0.0) + w
 
         dominant_signal = max(signal_votes, key=signal_votes.get)
 
@@ -175,17 +203,28 @@ class EQSScorer:
         if best_vote < 0.4:
             logger.warning(
                 "eqs_split_vote_forced_neutral",
-                votes=signal_votes,
+                votes={k: round(v, 3) for k, v in signal_votes.items()},
                 dominant=dominant_signal,
                 dominant_weight=round(best_vote, 3),
                 threshold=0.4,
                 message="Baskın sinyal eşiğin altında — NEUTRAL'a çekildi",
             )
             dominant_signal = "NEUTRAL"
+        elif split_margin < 0.05:
+            # Gerçek çelişki: fazlar neredeyse eşit bölünmüş
+            # CONFLICTED = "sistem iki yön gösteriyor, bekle" sinyali
+            logger.warning(
+                "eqs_split_vote_conflicted",
+                votes={k: round(v, 3) for k, v in signal_votes.items()},
+                dominant=dominant_signal,
+                split_margin=round(split_margin, 4),
+                message="Fazlar çelişkili yönde — CONFLICTED sinyali",
+            )
+            dominant_signal = "CONFLICTED"
         elif split_margin < 0.1:
             logger.warning(
                 "eqs_split_vote_close_call",
-                votes=signal_votes,
+                votes={k: round(v, 3) for k, v in signal_votes.items()},
                 dominant=dominant_signal,
                 split_margin=round(split_margin, 3),
                 message="Fazlar yakın ikiye bölünmüş — sinyale düşük güven",

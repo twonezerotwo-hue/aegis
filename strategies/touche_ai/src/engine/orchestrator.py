@@ -26,8 +26,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 from ..indicators.momentum import RSIIndicator, StochRSIIndicator, MACDIndicator
 from ..indicators.trend import ADXIndicator, EMAIndicator
 from ..indicators.volatility import ATRIndicator, BollingerIndicator
-from ..indicators.volume import OBVIndicator, VolumeRatioIndicator
+from ..indicators.volume import OBVIndicator, VolumeRatioIndicator, CMFIndicator
 from ..indicators.structure import SwingPointsIndicator, PivotsIndicator
+from ..validators.data_quality import DataQualityValidator
 from ..phases.base import PhaseContext, PhaseResult
 from ..phases.phase1_liquidity import LiquiditySweepPhase
 from ..phases.phase2_structure import MarketStructurePhase
@@ -122,9 +123,19 @@ class ToucheOrchestrator:
             ),
             OBVIndicator(),
             VolumeRatioIndicator(period=ind_cfg.get("volume_ratio", {}).get("period", 20)),
-            SwingPointsIndicator(lookback=ind_cfg.get("swing_points", {}).get("lookback", 5)),
+            CMFIndicator(period=ind_cfg.get("cmf", {}).get("period", 20)),
+            # Swing lookback timeframe'e göre dinamik ayarlanır — sabit 5 değil.
+            # Daha uzun TF → daha az bar gerekir; 1h'de 5 bar = 5 saat çok dar.
+            SwingPointsIndicator(
+                lookback=ind_cfg.get("swing_points", {}).get(
+                    "lookback",
+                    self._get_swing_lookback(timeframe),
+                )
+            ),
             PivotsIndicator(),
         ]
+
+        self._data_validator = DataQualityValidator()
 
         # Faz sınıfları (sıra önemli)
         self._phases = [
@@ -200,6 +211,19 @@ class ToucheOrchestrator:
             logger.error("quantum_signal_filter_error", error=str(e))
             return signal
 
+    @staticmethod
+    def _get_swing_lookback(timeframe: str) -> int:
+        """
+        Swing point lookback'i timeframe'e göre ayarla.
+        Yüksek TF'de 5 bar = çok uzun süre, düşük TF'de çok az.
+        """
+        _TF_LOOKBACK = {
+            "1m": 10, "3m": 9, "5m": 8, "15m": 7, "30m": 7,
+            "1h": 7,  "2h": 6, "4h": 6, "6h": 5,
+            "1d": 4,  "3d": 4, "1w": 3, "1M": 3,
+        }
+        return _TF_LOOKBACK.get(timeframe.lower(), 5)
+
     async def analyze(
         self,
         df: pl.DataFrame,
@@ -215,6 +239,22 @@ class ToucheOrchestrator:
         ts = int(time.time())
         logger.info("touche_pipeline_start", symbol=self.symbol, timeframe=self.timeframe,
                     rows=len(df), fundamental=fundamental_score)
+
+        # ── 0. Veri Kalite Kontrolü ───────────────────────────────────────────
+        quality = self._data_validator.validate(df)
+        if not quality.is_valid:
+            logger.error("data_quality_failed_pipeline_abort",
+                         errors=quality.errors, symbol=self.symbol)
+            # Geçersiz veriyle analiz yapma — güvenli NEUTRAL sinyal döndür
+            return ToucheSignal(
+                symbol=self.symbol, timeframe=self.timeframe, timestamp=ts,
+                eqs_score=0.0, signal="NEUTRAL", signal_strength="NO_TRADE",
+                recommendation="HOLD", confidence=0.0,
+                metadata={"data_quality_errors": quality.errors},
+            )
+        if quality.has_warnings:
+            logger.warning("data_quality_warnings_pipeline_continues",
+                           warnings=quality.warnings, symbol=self.symbol)
 
         # ── 1. İndikatörleri Hesapla ──────────────────────────────────────────
         enriched_df = self._compute_indicators(df)

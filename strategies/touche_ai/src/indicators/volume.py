@@ -94,3 +94,63 @@ class VolumeRatioIndicator(BaseIndicator):
 
         logger.debug("volume_ratio_computed", period=self.period)
         return df
+
+
+class CMFIndicator(BaseIndicator):
+    """
+    Chaikin Money Flow (CMF) — Para Akış Yönü ve Gücü.
+
+    Formül:
+      MFM = ((Close - Low) - (High - Close)) / (High - Low + ε)  → Money Flow Multiplier
+      MFV = MFM × Volume                                          → Money Flow Volume
+      CMF(n) = Sum(MFV, n) / Sum(Volume, n)                       → normalised [-1, +1]
+
+    Yorum:
+      CMF > +0.1 → Alım baskısı (birikme)
+      CMF < -0.1 → Satış baskısı (dağıtma)
+      CMF ≈ 0    → Nötr
+
+    OBV slope'tan daha güvenilir: hacim boyutunu ve fiyat kapanış pozisyonunu birleştirir.
+    Çıktı sütunu: cmf_{period}
+    """
+
+    NAME = "CMF"
+    REQUIRED_COLUMNS = ["high", "low", "close", "volume"]
+    MIN_ROWS = 5
+
+    def __init__(self, period: int = 20):
+        self.period = period
+
+    def compute(self, df: pl.DataFrame) -> pl.DataFrame:
+        self.validate(df)
+
+        df = (
+            df
+            .with_columns(
+                # Money Flow Multiplier
+                (
+                    (pl.col("close") - pl.col("low")) -
+                    (pl.col("high")  - pl.col("close"))
+                ) / (pl.col("high") - pl.col("low") + 1e-10)
+            ).alias("_mfm")
+        )
+
+        # Polars with_columns expects the alias inside
+        df = df.with_columns(
+            (
+                (
+                    (pl.col("close") - pl.col("low")) -
+                    (pl.col("high")  - pl.col("close"))
+                ) / (pl.col("high") - pl.col("low") + 1e-10)
+            ).alias("_mfm")
+        ).with_columns(
+            (pl.col("_mfm") * pl.col("volume")).alias("_mfv")
+        ).with_columns([
+            pl.col("_mfv").rolling_sum(window_size=self.period, min_periods=3).alias("_sum_mfv"),
+            pl.col("volume").rolling_sum(window_size=self.period, min_periods=3).alias("_sum_vol"),
+        ]).with_columns(
+            (pl.col("_sum_mfv") / (pl.col("_sum_vol") + 1e-10)).alias(f"cmf_{self.period}")
+        ).drop(["_mfm", "_mfv", "_sum_mfv", "_sum_vol"])
+
+        logger.debug("cmf_computed", period=self.period)
+        return df

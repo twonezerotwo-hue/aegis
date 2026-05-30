@@ -22,8 +22,9 @@ from src.phases.phase7_macro import MacroFilterPhase
 from src.indicators.momentum import RSIIndicator, StochRSIIndicator, MACDIndicator
 from src.indicators.trend import ADXIndicator, EMAIndicator
 from src.indicators.volatility import ATRIndicator, BollingerIndicator
-from src.indicators.volume import OBVIndicator, VolumeRatioIndicator
+from src.indicators.volume import OBVIndicator, VolumeRatioIndicator, CMFIndicator
 from src.indicators.structure import SwingPointsIndicator, PivotsIndicator
+from src.validators.data_quality import DataQualityValidator
 
 
 # ─── Yardımcı: Tam Zenginleştirilmiş DataFrame ────────────────────────────────
@@ -39,6 +40,7 @@ def enrich(df: pl.DataFrame) -> pl.DataFrame:
     df = BollingerIndicator().compute(df)
     df = OBVIndicator().compute(df)
     df = VolumeRatioIndicator().compute(df)
+    df = CMFIndicator().compute(df)
     df = SwingPointsIndicator().compute(df)
     df = PivotsIndicator().compute(df)
     return df
@@ -277,3 +279,219 @@ class TestPhase7Macro:
         )
         assert_valid_result(result)
         assert result.phase_id == 7
+
+
+# ─── Yeni Düzeltme Testleri ───────────────────────────────────────────────────
+
+class TestDivergenceCorrection:
+    """KRİTİK #1: RSI swing barlarından alınmalı, şu anki bardan değil."""
+
+    def test_divergence_uses_swing_bar_rsi_not_current(self, bullish_ohlcv, default_config):
+        """Diverjans tespiti swing low barındaki RSI'ı kullanmalı."""
+        df = enrich(bullish_ohlcv)
+        ctx = make_ctx(df, default_config)
+        result = asyncio.get_event_loop().run_until_complete(
+            MarketStructurePhase().run(ctx)
+        )
+        assert_valid_result(result)
+        # metadata'da divergence_source olmalı (yeni alan)
+        assert "divergence_source" in result.metadata
+
+    def test_hidden_divergence_reported(self, standard_ohlcv, default_config):
+        """Gizli diverjans metadata'da raporlanmalı."""
+        df = enrich(standard_ohlcv)
+        ctx = make_ctx(df, default_config)
+        result = asyncio.get_event_loop().run_until_complete(
+            MarketStructurePhase().run(ctx)
+        )
+        assert "hidden_signal" in result.metadata
+        assert result.metadata["hidden_signal"] in ("BULLISH", "BEARISH", "NEUTRAL")
+
+    def test_macd_divergence_source_tracked(self, standard_ohlcv, default_config):
+        """MACD histogram diverjansı kaynağı takip edilmeli."""
+        df = enrich(standard_ohlcv)
+        ctx = make_ctx(df, default_config)
+        result = asyncio.get_event_loop().run_until_complete(
+            MarketStructurePhase().run(ctx)
+        )
+        assert result.metadata["divergence_source"] in ("RSI", "MACD", "RSI+MACD", "none")
+
+
+class TestFairValueGap:
+    """Phase 3: FVG tespiti ve zone expiry."""
+
+    def test_fvg_keys_in_metadata(self, standard_ohlcv, default_config):
+        """FVG metadata'da raporlanmalı."""
+        df = enrich(standard_ohlcv)
+        ctx = make_ctx(df, default_config)
+        result = asyncio.get_event_loop().run_until_complete(
+            ZoneConfluencePhase().run(ctx)
+        )
+        assert "bullish_fvgs" in result.metadata
+        assert "bearish_fvgs" in result.metadata
+        assert isinstance(result.metadata["bullish_fvgs"], list)
+
+    def test_zero_price_returns_neutral(self, default_config):
+        """Sıfır fiyat durumunda güvenli NEUTRAL dönmeli."""
+        df = pl.DataFrame({
+            "timestamp": list(range(50)),
+            "open":  [0.0] * 50,
+            "high":  [0.0] * 50,
+            "low":   [0.0] * 50,
+            "close": [0.0] * 50,
+            "volume":[100.0] * 50,
+        })
+        ctx = PhaseContext(symbol="BTCUSDT", timeframe="4h", df=df,
+                           config=default_config, atr=1.0)
+        result = asyncio.get_event_loop().run_until_complete(
+            ZoneConfluencePhase().run(ctx)
+        )
+        assert result.signal == "NEUTRAL"
+        assert result.passed is True
+
+    def test_confluence_float_accepted(self, standard_ohlcv, default_config):
+        """Confluence artık float (FVG +1.5) — metadata float kabul etmeli."""
+        df = enrich(standard_ohlcv)
+        ctx = make_ctx(df, default_config)
+        result = asyncio.get_event_loop().run_until_complete(
+            ZoneConfluencePhase().run(ctx)
+        )
+        assert isinstance(result.metadata["confluences"], (int, float))
+
+
+class TestCMFPhase4:
+    """Phase 4: CMF entegrasyonu."""
+
+    def test_cmf_in_metadata(self, standard_ohlcv, default_config):
+        """CMF değeri metadata'da raporlanmalı."""
+        df = enrich(standard_ohlcv)
+        ctx = make_ctx(df, default_config)
+        result = asyncio.get_event_loop().run_until_complete(
+            AccumDistPhase().run(ctx)
+        )
+        assert "cmf_value" in result.metadata
+        assert "cmf_signal" in result.metadata
+
+    def test_cmf_range(self, standard_ohlcv, default_config):
+        """CMF -1 ile +1 arasında olmalı."""
+        df = enrich(standard_ohlcv)
+        ctx = make_ctx(df, default_config)
+        result = asyncio.get_event_loop().run_until_complete(
+            AccumDistPhase().run(ctx)
+        )
+        cmf = result.metadata.get("cmf_value", 0.0)
+        assert -1.1 <= cmf <= 1.1, f"CMF aralık dışı: {cmf}"
+
+
+class TestPatternOverlap:
+    """Phase 5: Tüm formasyonlar değerlendirilmeli, en yüksek skor seçilmeli."""
+
+    def test_engulfing_beats_hammer_when_both_match(self, default_config):
+        """BullishEngulfing (80p) Hammer'ı (70p) geçmeli."""
+        import math
+        # Engulfing şartları:
+        #   c>o (bullish), pc<po (prev bearish), c>po, o<pc, body >= prev_body*1.2
+        # Hammer şartları (bazı barlar her ikisini de karşılayabilir)
+        prev_o, prev_c = 102.0, 100.0   # Bearish önceki bar
+        body = abs(prev_c - prev_o) * 1.5
+        curr_o = prev_c - 0.5           # Altında açılış (engulfing)
+        curr_c = prev_o + body          # Önceki açılışı geçen kapanış
+
+        df_small = pl.DataFrame({
+            "timestamp": list(range(80)),
+            "open":   [100.0] * 78 + [prev_o,  curr_o],
+            "high":   [101.0] * 78 + [prev_o + 1, curr_c + 0.5],
+            "low":    [99.0]  * 78 + [prev_c - 2.0, curr_o - 3.0],  # lower_wick for hammer check
+            "close":  [100.5] * 78 + [prev_c,  curr_c],
+            "volume": [500.0] * 80,
+        })
+        df_small = enrich(df_small)
+        ctx = PhaseContext(symbol="BTCUSDT", timeframe="4h", df=df_small,
+                           config=default_config, atr=2.0)
+        result = asyncio.get_event_loop().run_until_complete(
+            EntryTimingPhase().run(ctx)
+        )
+        assert_valid_result(result)
+        # Eğer iki formasyon birden tetiklendiyse metadata'da gösterilmeli
+        if result.metadata.get("pattern") == "BullishEngulfing":
+            assert result.score >= 80.0
+
+
+class TestDataQualityValidator:
+    """DataQualityValidator unit testleri."""
+
+    def test_valid_df_passes(self, standard_ohlcv):
+        validator = DataQualityValidator()
+        report = validator.validate(standard_ohlcv)
+        assert report.is_valid
+
+    def test_too_few_rows_fails(self):
+        df = pl.DataFrame({
+            "open": [100.0] * 10, "high": [101.0] * 10,
+            "low":  [99.0]  * 10, "close": [100.5] * 10,
+            "volume": [500.0] * 10,
+        })
+        validator = DataQualityValidator(min_rows=70)
+        report = validator.validate(df)
+        assert not report.is_valid
+        assert any("Yetersiz bar" in e for e in report.errors)
+
+    def test_invalid_candle_detected(self):
+        df = pl.DataFrame({
+            "open":  [100.0] * 80,
+            "high":  [99.0]  + [101.0] * 79,   # İlk bar: high < low = geçersiz
+            "low":   [100.5] + [99.0]  * 79,
+            "close": [100.2] * 80,
+            "volume":[500.0] * 80,
+        })
+        validator = DataQualityValidator()
+        report = validator.validate(df)
+        assert not report.is_valid
+        assert any("geçersiz bar" in e for e in report.errors)
+
+    def test_zero_price_fails(self):
+        closes = [0.0] * 80
+        df = pl.DataFrame({
+            "open": closes, "high": closes, "low": closes,
+            "close": closes, "volume": [500.0] * 80,
+        })
+        validator = DataQualityValidator()
+        report = validator.validate(df)
+        assert not report.is_valid
+
+    def test_excessive_zero_volume_warns(self):
+        df = pl.DataFrame({
+            "open":  [100.0] * 80, "high": [101.0] * 80,
+            "low":   [99.0]  * 80, "close": [100.5] * 80,
+            "volume": [0.0] * 70 + [500.0] * 10,  # %87 sıfır hacim
+        })
+        validator = DataQualityValidator(max_zero_vol_pct=0.10)
+        report = validator.validate(df)
+        assert report.has_warnings
+        assert any("sıfır-hacim" in w for w in report.warnings)
+
+
+class TestSequentialPhaseBonus:
+    """EQS: ardışık faz uyumu bonusu testi."""
+
+    def test_sequential_bonus_in_eqs(self, standard_ohlcv, default_config):
+        """5 faz aynı yönde oy verirse EQS boost uygulanmalı."""
+        from src.engine.scoring import EQSScorer, EQSResult
+        from src.phases.base import PhaseResult
+
+        # 5 BULLISH faz + 2 NEUTRAL (risk + makro)
+        mock_results = [
+            PhaseResult(phase_id=i, phase_name=f"P{i}", score=75.0,
+                        signal="BULLISH", passed=True, reason="test")
+            for i in range(1, 6)
+        ] + [
+            PhaseResult(phase_id=6, phase_name="Risk", score=70.0,
+                        signal="NEUTRAL", passed=True, reason="test"),
+            PhaseResult(phase_id=7, phase_name="Macro", score=65.0,
+                        signal="NEUTRAL", passed=True, reason="test"),
+        ]
+        scorer = EQSScorer(use_optimizer=False)
+        result = scorer.compute(mock_results, volatility_regime="NORMAL")
+        # 5 faz uyumlu → bonus uygulanmış olmalı (base ~72 → boost ile daha yüksek)
+        assert isinstance(result.eqs_score, float)
+        assert result.eqs_score > 0

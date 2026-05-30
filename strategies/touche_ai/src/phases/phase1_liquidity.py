@@ -43,15 +43,30 @@ class LiquiditySweepPhase(BasePhase):
         lookback = cfg.get("lookback_bars", 20)
         sweep_atr_mult = cfg.get("sweep_atr_threshold", 0.5)
         wick_body_ratio = cfg.get("min_wick_body_ratio", 0.6)
+        # Teyit barı gerektir — sweep + 1 bar teyit (SMC kuralı: dönüşü kanıtla)
+        require_confirm = cfg.get("require_confirmation_bar", True)
 
-        if atr <= 0 or len(df) < lookback + 2:
+        if atr <= 0 or len(df) < lookback + 3:
             return self._neutral_result("Yetersiz veri veya ATR=0")
 
-        # Son bar değerleri
-        o = float(df["open"][-1])
-        h = float(df["high"][-1])
-        l = float(df["low"][-1])
-        c = float(df["close"][-1])
+        # Son 2 bar: [-2] sweep adayı, [-1] teyit barı
+        # Teyit modu: ÖNCEKI bar sweep, MEVCUT bar yönü teyit eder
+        # Tek-bar mod: MEVCUT barda hem sweep hem kapanış (daha erken ama daha az güvenilir)
+        if require_confirm:
+            # [-2] = potansiyel sweep barı
+            o  = float(df["open"][-2]);  h  = float(df["high"][-2])
+            l  = float(df["low"][-2]);   c  = float(df["close"][-2])
+            # [-1] = teyit barı (güncel kapanmış bar)
+            co = float(df["open"][-1]);  cc = float(df["close"][-1])
+            confirm_bullish = cc > c    # Teyit barı sweep barından yüksek kapandı
+            confirm_bearish = cc < c    # Teyit barı sweep barından düşük kapandı
+        else:
+            o = float(df["open"][-1])
+            h = float(df["high"][-1])
+            l = float(df["low"][-1])
+            c = float(df["close"][-1])
+            confirm_bullish = True
+            confirm_bearish = True
 
         body_size = abs(c - o)
         total_range = h - l
@@ -61,8 +76,9 @@ class LiquiditySweepPhase(BasePhase):
         if total_range < 1e-10:
             return self._neutral_result("Sıfır aralıklı bar")
 
-        # Önceki N bar içindeki swing seviyeleri
-        lookback_df = df[-(lookback + 1):-1]
+        # Önceki N bar içindeki swing seviyeleri (teyit modunda sweep barını dışla)
+        offset = 2 if require_confirm else 1
+        lookback_df = df[-(lookback + offset):-offset]
         if "swing_high_price" not in df.columns or "swing_low_price" not in df.columns:
             return self._neutral_result("swing_high_price / swing_low_price sütunu eksik")
 
@@ -80,11 +96,12 @@ class LiquiditySweepPhase(BasePhase):
             bullish_sweep_hit
             and upper_wick_ok
             and upper_wick_dominant
-            and c < o  # Kapanış açılışın altında
+            and c < o              # Sweep barı kapanışı açılışın altında
+            and confirm_bearish    # Teyit barı da aşağı kapandı
         )
 
         # ── Aşağı Likidite Süpürmesi (Bullish Setup) ────────────────────────
-        # Wick, bir swing low'u aştı, kapanış yukarıda → bullish
+        # Wick, bir swing low'u aştı, kapanış yukarıda + teyit barı da yüksek kapandı
         bearish_sweep_hit = any(l < sl for sl in prev_swing_lows)
         lower_wick_ok = lower_wick >= sweep_atr_mult * atr
         lower_wick_dominant = (lower_wick / (total_range + 1e-10)) >= wick_body_ratio
@@ -93,7 +110,8 @@ class LiquiditySweepPhase(BasePhase):
             bearish_sweep_hit
             and lower_wick_ok
             and lower_wick_dominant
-            and c > o  # Kapanış açılışın üstünde
+            and c > o              # Sweep barı kapanışı açılışın üstünde
+            and confirm_bullish    # Teyit barı da yukarı kapandı
         )
 
         # ── Skor ve Sinyal Belirleme ─────────────────────────────────────────
@@ -103,6 +121,7 @@ class LiquiditySweepPhase(BasePhase):
             "atr": round(atr, 4),
             "prev_swing_highs": [round(x, 4) for x in prev_swing_highs[-3:]],
             "prev_swing_lows": [round(x, 4) for x in prev_swing_lows[-3:]],
+            "confirmation_bar_mode": require_confirm,
         }
 
         if bullish_sweep:
