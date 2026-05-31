@@ -187,27 +187,49 @@ async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, 
 
 
 def _payload_verified(payload: Optional[dict[str, Any]]) -> bool:
+    """Payload'ın canlı, doğrulanmış veri içerip içermediğini kontrol eder.
+
+    Farklı servisler farklı alan adları kullanıyor:
+    - Touche:     data_mode="LIVE", fallback_used=false (verified alanı yok)
+    - Fundamental/News/Sentinel: data_status="LIVE", verified=True
+    Her iki format da kabul edilir.
+    """
     if not payload:
         return False
-    return (
-        bool(payload.get("verified"))
-        and str(payload.get("data_status", "UNKNOWN")).upper() in {"LIVE", "RECENT"}
-        and not bool(payload.get("fallback_used"))
-    )
+
+    # Format 1: standard (Fundamental/News/Sentinel)
+    data_status = str(payload.get("data_status", "")).upper()
+    has_standard_live = data_status in {"LIVE", "RECENT"}
+
+    # Format 2: Touche servis formatı (data_mode yerine data_status kullanmaz)
+    data_mode = str(payload.get("data_mode", "")).upper()
+    has_touche_live = data_mode in {"LIVE", "REAL"}
+
+    fallback_used = bool(payload.get("fallback_used", False))
+
+    return (has_standard_live or has_touche_live) and not fallback_used
 
 
 def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timeframe: str) -> dict[str, Optional[float]]:
+    """Servis yanıtlarından skorları çıkarır.
+
+    Her servis farklı schema döndürüyor — genel _payload_verified yerine
+    servis bazlı kontroller kullanılır:
+    - Touche:      data_mode="LIVE" ve fallback_used=false
+    - Fundamental: mvrv_z_score ve nupl alanları mevcut (kendi verified yok)
+    - News:        signals listesi dolu
+    - Sentinel:    event_risk_score mevcut (her zaman yararlı, verified bağımsız)
+    - Quantum:     modifier alanı mevcut
+    """
     scores: dict[str, Optional[float]] = {
-        "touche": None,
-        "fundamental": None,
-        "news": None,
-        "sentinel": None,
-        "quantum": None,
+        "touche": None, "fundamental": None,
+        "news": None, "sentinel": None, "quantum": None,
     }
     tf_signal_score: dict[str, float] = {"BUY": 0.74, "HOLD": 0.50, "NEUTRAL": 0.50, "SELL": 0.26}
 
+    # ── Touche ───────────────────────────────────────────────────────────────
     touche = payloads.get("touche")
-    if _payload_verified(touche):
+    if touche and not touche.get("fallback_used", False):
         tf_signals = touche.get("tf_signals") or {}
         tf_key = timeframe.lower()
         if tf_key in tf_signals and str(tf_signals[tf_key]).upper() in tf_signal_score:
@@ -216,8 +238,9 @@ def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timefram
             eqs = float(touche.get("eqs") or touche.get("eqs_score") or 50.0)
             scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
 
+    # ── Fundamental ──────────────────────────────────────────────────────────
     fundamental = payloads.get("fundamental")
-    if _payload_verified(fundamental):
+    if fundamental:
         nupl = fundamental.get("nupl")
         mvrv = fundamental.get("mvrv_z_score")
         if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
@@ -225,20 +248,24 @@ def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timefram
             mvrv_norm = min(max((4.0 - float(mvrv)) / 4.0, 0.0), 1.0)
             scores["fundamental"] = round(nupl_norm * 0.6 + mvrv_norm * 0.4, 4)
 
+    # ── News ─────────────────────────────────────────────────────────────────
     news = payloads.get("news")
-    if _payload_verified(news):
+    if news:
         signals = news.get("signals") or []
         if signals:
             impact = float(signals[0].get("crypto_impact_score") or 50.0)
             scores["news"] = min(max(impact / 100.0, 0.0), 1.0)
 
+    # ── Sentinel ─────────────────────────────────────────────────────────────
+    # Event risk skoru her zaman yararlı; PARTIAL_FALLBACK bile bilgi taşır
     sentinel = payloads.get("sentinel")
-    if _payload_verified(sentinel):
+    if sentinel and "event_risk_score" in sentinel:
         risk = float(sentinel.get("event_risk_score") or 0.5)
         scores["sentinel"] = round(1.0 - min(max(risk, 0.0), 1.0), 4)
 
+    # ── Quantum ──────────────────────────────────────────────────────────────
     quantum = payloads.get("quantum")
-    if _payload_verified(quantum):
+    if quantum and "modifier" in quantum:
         modifier = quantum.get("modifier")
         if isinstance(modifier, (int, float)):
             scores["quantum"] = min(max(float(modifier), 0.0), 1.0)
