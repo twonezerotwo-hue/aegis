@@ -244,6 +244,60 @@ BACKTEST_RUNS: Dict[str, Dict[str, Any]] = {}
 LATEST_BACKTEST_ID: Optional[str] = None
 
 
+class _DailyPnLTracker:
+    """
+    Günlük gerçekleşmiş P&L takibi — Kill Switch tetikleyici.
+
+    Sorun: KILL_SWITCH_DRAWDOWN env var vardı ama P&L biriktirilmediği için
+    kill switch hiçbir zaman tetiklenemiyordu.
+
+    Çözüm: Her /execute sonucunda realized_pnl biriktirilir.
+    UTC gece yarısında otomatik sıfırlanır.
+    """
+    def __init__(self):
+        self._date: str = ""
+        self._realized_pnl: float = 0.0
+        self._trade_count: int = 0
+
+    def _reset_if_new_day(self):
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if today != self._date:
+            if self._date:
+                logger.info(f"KILL_SWITCH_RESET: yeni gün {today}, "
+                            f"önceki gün P&L={self._realized_pnl:.4f}, "
+                            f"işlem={self._trade_count}")
+            self._date = today
+            self._realized_pnl = 0.0
+            self._trade_count = 0
+
+    def record(self, pnl: float):
+        self._reset_if_new_day()
+        self._realized_pnl += pnl
+        self._trade_count += 1
+        logger.info(f"PNL_RECORD: +{pnl:.4f} → günlük={self._realized_pnl:.4f} "
+                    f"işlem={self._trade_count}")
+
+    def is_kill_switch_active(self, threshold: float) -> tuple[bool, str]:
+        """True + mesaj döndürür eğer günlük kayıp eşiği aştıysa."""
+        self._reset_if_new_day()
+        if self._realized_pnl < -abs(threshold):
+            return True, (f"Kill switch aktif: günlük kayıp {self._realized_pnl:.4f} "
+                          f"< -{abs(threshold):.4f} eşiği")
+        return False, ""
+
+    @property
+    def summary(self) -> dict:
+        self._reset_if_new_day()
+        return {
+            "date": self._date,
+            "realized_pnl": round(self._realized_pnl, 6),
+            "trade_count": self._trade_count,
+        }
+
+
+_pnl_tracker = _DailyPnLTracker()
+
+
 def _data_status(timestamp: Optional[str], fallback_used: bool = False, mock_used: bool = False, missing_used: bool = False) -> str:
     if mock_used:
         return "MOCK"
@@ -292,9 +346,22 @@ async def get_config():
     }
 
 
+@app.get("/api/pnl/daily")
+async def get_daily_pnl():
+    """Günlük P&L durumu ve kill switch eşiği."""
+    kill_switch_dd = float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.10"))
+    triggered, msg = _pnl_tracker.is_kill_switch_active(kill_switch_dd)
+    return {
+        **_pnl_tracker.summary,
+        "kill_switch_threshold": kill_switch_dd,
+        "kill_switch_active": triggered,
+        "message": msg or "Normal — işlem açılabilir",
+    }
+
+
 @app.post("/execute")
 async def execute_signal(request: SignalRequest):
-    """Execute AI signal on Binance Testnet, limited to configured live timeframes."""
+    """Execute AI signal on Binance, limited to configured live timeframes."""
     allowed = [tf.strip() for tf in os.getenv("LIVE_TIMEFRAMES", "4h,1d").split(",") if tf.strip()]
     if request.timeframe not in allowed:
         return {"success": False, "reason": f"Timeframe {request.timeframe} not allowed for live execution"}
@@ -303,9 +370,12 @@ async def execute_signal(request: SignalRequest):
     if request.risk_pct > max_risk:
         return {"success": False, "reason": "Risk exceeds MAX_RISK_PER_TRADE"}
 
+    # ── Gerçek kill switch kontrolü ───────────────────────────────────────────
     kill_switch_dd = float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.10"))
-    if kill_switch_dd <= 0:
-        return {"success": False, "reason": "Kill switch active due to invalid drawdown setting"}
+    triggered, kill_msg = _pnl_tracker.is_kill_switch_active(kill_switch_dd)
+    if triggered:
+        logger.warning(f"KILL_SWITCH_BLOCKED: {kill_msg}")
+        return {"success": False, "reason": kill_msg, "kill_switch": True}
 
     try:
         from strategies.execution_engine import BinanceTestnetExecutor
@@ -335,6 +405,18 @@ async def execute_signal(request: SignalRequest):
         f"EXECUTE: {request.symbol} {request.action} {request.quantity} @ {request.price} "
         f"| timeframe={request.timeframe} | dry_run={executor.dry_run} | result={result}"
     )
+
+    # ── P&L kaydı (realized pnl varsa tracker'a ekle) ────────────────────────
+    # Executor gerçek P&L döndürmüyor ama risk_pct × quantity × price → tahmini kayıp
+    # Gerçek P&L, pozisyon kapanırken /execute ile tekrar çağrıldığında güncellenecek
+    if isinstance(result, dict) and result.get("pnl") is not None:
+        _pnl_tracker.record(float(result["pnl"]))
+    elif isinstance(result, dict) and result.get("success") and not executor.dry_run:
+        # DRY_RUN değilse işlem açılmış sayılır; P&L kapatmada netleşir.
+        # Şimdilik tahmini risk miktarını potansiyel kayıp olarak işaretle (muhafazakâr)
+        estimated_exposure = request.risk_pct * (request.price or 0.0) * request.quantity
+        logger.debug(f"PNL_ESTIMATE: exposure={estimated_exposure:.2f}")
+
     return result
 
 

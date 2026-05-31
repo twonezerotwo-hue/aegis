@@ -78,6 +78,8 @@ _FALLBACK_MACRO = {
     "us10y": 4.25,
     "brent": 92.0,
     "xau": 4800.0,
+    "hyg": 78.0,          # HYG ETF — kredi piyasası sağlığı (risk-on/off)
+    "funding_rate": 0.0,  # BTC perp funding rate (8h %) — crowded position tespiti
 }
 
 
@@ -338,6 +340,7 @@ async def _get_macro_snapshot() -> dict:
         "us10y": "US10Y",
         "brent": "BRENT",
         "xau": "XAU/USD",
+        "hyg": "HYG",     # High Yield Corporate Bond ETF — risk iştahı göstergesi
     }
 
     values: dict[str, object] = {}
@@ -383,6 +386,37 @@ async def _get_macro_snapshot() -> dict:
         fallback = _fallback_snapshot(f"twelve_data_exception:{exc}")
         _get_macro_snapshot._cache = (now, fallback)
         return fallback
+
+    # ── Binance Funding Rate (public endpoint, auth gerekmez) ────────────────
+    # Yüksek pozitif funding (>0.05%/8h) = kalabalık long = tersine dönüş riski
+    # Negatif funding = kalabalık short = squeeze riski
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            fr_resp = await client.get(
+                "https://fapi.binance.com/fapi/v1/premiumIndex",
+                params={"symbol": "BTCUSDT"},
+            )
+            if fr_resp.status_code == 200:
+                fr_data = fr_resp.json()
+                values["funding_rate"] = float(fr_data.get("lastFundingRate", 0.0))
+                field_sources["funding_rate"] = {
+                    "source": "binance_fapi",
+                    "timestamp": fr_data.get("time"),
+                    "verified": True,
+                    "fallback_used": False,
+                }
+            else:
+                raise RuntimeError(f"status={fr_resp.status_code}")
+    except Exception as exc:
+        values["funding_rate"] = _FALLBACK_MACRO["funding_rate"]
+        fallback_fields.append("funding_rate")
+        warnings.append(f"funding_rate: {exc}")
+        field_sources["funding_rate"] = {
+            "source": "hardcoded_fallback",
+            "timestamp": None,
+            "verified": False,
+            "fallback_used": True,
+        }
 
     timestamp = _latest_timestamp(timestamps)
     data_status = "LIVE" if not fallback_fields else "PARTIAL_FALLBACK"
@@ -438,35 +472,56 @@ def _build_macro_price_df(macro: dict) -> pd.DataFrame:
 
 
 def _compute_event_risk(macro: dict) -> float:
+    """Risk skoru 0-1. HYG + funding rate artık gerçek veri ile besleniyor."""
+    hyg = float(macro.get("hyg", 78.0))
+    funding = float(macro.get("funding_rate", 0.0))
+
+    # HYG < 75 = kredi piyasası bozulmuş → risk artar (ters oran)
+    hyg_risk = max(0.0, min(1.0, (80.0 - hyg) / 20.0))
+
+    # Yüksek pozitif funding = kalabalık long = tersine dönüş riski
+    # >0.05%/8h = aşırı iyimserlik, <-0.05%/8h = aşırı kötümserlik
+    funding_risk = min(1.0, abs(funding) * 20.0)  # 0.05 → 1.0
+
     components = [
         float(macro.get("dxy", SENTINEL_DXY_THRESHOLD)) / SENTINEL_DXY_THRESHOLD,
         float(macro.get("vix", SENTINEL_VIX_THRESHOLD)) / SENTINEL_VIX_THRESHOLD,
         float(macro.get("us10y", SENTINEL_US10Y_THRESHOLD)) / SENTINEL_US10Y_THRESHOLD,
         float(macro.get("brent", SENTINEL_BRENT_THRESHOLD)) / SENTINEL_BRENT_THRESHOLD,
         float(macro.get("xau", SENTINEL_XAU_THRESHOLD)) / SENTINEL_XAU_THRESHOLD,
+        hyg_risk,       # Yeni: kredi piyasası sağlığı
+        funding_risk,   # Yeni: pozisyon kalabalığı
     ]
     score = sum(components) / len(components)
     return round(max(0.0, min(1.0, score - 0.6)), 3)
 
 
 def _compute_regime_probabilities(macro: dict) -> dict:
-    dxy = float(macro.get("dxy", 99))
+    """HYG kredi sağlığı + funding rate kalabalık pozisyon da rejime dahil."""
+    dxy   = float(macro.get("dxy", 99))
     us10y = float(macro.get("us10y", 4.25))
-    vix = float(macro.get("vix", 22))
-    xau = float(macro.get("xau", 4800))
+    vix   = float(macro.get("vix", 22))
+    xau   = float(macro.get("xau", 4800))
+    hyg   = float(macro.get("hyg", 78.0))
+    funding = float(macro.get("funding_rate", 0.0))
 
     scores = {"risk_on": 0.0, "normalization": 0.0, "risk_off": 0.0, "accumulation": 0.0}
     scores["risk_on"] += max(0, (102 - dxy) * 0.03)
     scores["risk_on"] += max(0, (4.5 - us10y) * 0.12)
     scores["risk_on"] += max(0, (22 - vix) * 0.02)
+    scores["risk_on"] += max(0, (hyg - 75) * 0.04)   # HYG güçlü → risk iştahı
     scores["risk_off"] += max(0, (dxy - 100) * 0.025)
     scores["risk_off"] += max(0, (us10y - 4.0) * 0.10)
     scores["risk_off"] += max(0, (vix - 20) * 0.025)
     scores["risk_off"] += max(0, (xau - 4500) * 0.00005)
+    scores["risk_off"] += max(0, (75 - hyg) * 0.05)   # HYG zayıf → risk-off
+    # Aşırı yüksek pozitif funding = kalabalık long = yakında tersine dönüş riski
+    if funding > 0.05:
+        scores["risk_off"] += (funding - 0.05) * 2.0
 
-    if 96 <= dxy <= 103 and 3.5 <= us10y <= 5.0 and vix < 25:
+    if 96 <= dxy <= 103 and 3.5 <= us10y <= 5.0 and vix < 25 and hyg > 74:
         scores["normalization"] = 0.35
-    if vix < 20 and us10y < 4.5 and dxy < 101:
+    if vix < 20 and us10y < 4.5 and dxy < 101 and hyg > 76:
         scores["accumulation"] = 0.30
 
     exp_scores = {k: math.exp(min(v, 10)) for k, v in scores.items()}
