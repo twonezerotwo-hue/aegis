@@ -26,7 +26,7 @@ import { MetricCard } from "../components/MetricCard";
 import { ConsensusCard } from "../components/ConsensusCard";
 import { SystemStatus } from "../components/SystemStatus";
 import { AlertBanner } from "../components/AlertBanner";
-import AIAnalysisCard from "../components/AIAnalysisCard";
+import { KontrolMerkezi } from "../components/control/KontrolMerkezi";
 import { SymbolSelector } from "../components/SymbolSelector";
 import { TimeframeSelector } from "../components/TimeframeSelector";
 import { useMetrics } from "../hooks/useMetrics";
@@ -40,12 +40,12 @@ const Backtest = lazy(() => import("./Backtest").then((m) => ({ default: m.defau
 const PaperTrading = lazy(() => import("./PaperTrading").then((m) => ({ default: m.default ?? m })));
 
 // ── Tab definitions ────────────────────────────────────────────────────────────
-type TabId = "portfolio" | "metrics" | "ai_analysis" | "backtest" | "paper_trading";
+type TabId = "control" | "portfolio" | "metrics" | "backtest" | "paper_trading";
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: "portfolio",     label: "Portföy" },
+  { id: "control",       label: "Kontrol" },
+  { id: "portfolio",     label: "Analiz" },
   { id: "metrics",       label: "Metrikler" },
-  { id: "ai_analysis",   label: "AI Analiz" },
   { id: "backtest",      label: "Backtest" },
   { id: "paper_trading", label: "Paper Trading" },
 ];
@@ -67,6 +67,25 @@ interface AssetState {
   error: string | null;
   lastSuccessfulData: ConsensusResponse | null;
 }
+
+const CONSENSUS_STATUS_STRENGTH: Record<string, number> = {
+  UNKNOWN: 0,
+  MISSING: 1,
+  FALLBACK: 2,
+  MOCK: 3,
+  PARTIAL_FALLBACK: 4,
+  STALE: 5,
+  RECENT: 6,
+  LIVE: 7,
+};
+
+const getConsensusStatusStrength = (consensus: ConsensusResponse | null): number => {
+  const status = consensus?.data_status ?? "UNKNOWN";
+  return CONSENSUS_STATUS_STRENGTH[status] ?? 0;
+};
+
+const getConsensusTimestamp = (consensus: ConsensusResponse | null): string | null =>
+  consensus?.last_updated ?? consensus?.timestamp ?? null;
 
 const INITIAL_ASSET_STATE: Record<AssetKey, AssetState> = {
   gold:      { data: null, loading: true, error: null, lastSuccessfulData: null },
@@ -101,7 +120,26 @@ const DashboardV2Inner: React.FC = () => {
   } = useVadeContext();
 
   // ── Tab state ──────────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = React.useState<TabId>("portfolio");
+  const [activeTab, setActiveTab] = React.useState<TabId>("control");
+
+  // ── Daily P&L / Kill Switch ────────────────────────────────────────────────
+  const [dailyPnl, setDailyPnl] = React.useState<{
+    realized_pnl: number; trade_count: number;
+    kill_switch_threshold: number; kill_switch_active: boolean;
+    message: string; date: string;
+  } | null>(null);
+
+  React.useEffect(() => {
+    const API = import.meta.env.VITE_API_URL || "http://localhost:8502";
+    const fetchPnl = () =>
+      fetch(`${API}/api/pnl/daily`)
+        .then(r => r.json())
+        .then(setDailyPnl)
+        .catch(() => {});
+    fetchPnl();
+    const interval = setInterval(fetchPnl, 30_000);
+    return () => clearInterval(interval);
+  }, []);
 
   // ── Metrics tab state (independent symbol/TF) ─────────────────────────────
   const [metricsSymbol, setMetricsSymbol] = React.useState("BTC/USDT");
@@ -246,15 +284,34 @@ const DashboardV2Inner: React.FC = () => {
   // BTC SSE override
   React.useEffect(() => {
     if (!btcConsensusFromSSE) return;
-    setAssetConsensus((cur) => ({
-      ...cur,
-      btc: {
-        data: btcConsensusFromSSE,
-        loading: false,
-        error: null,
-        lastSuccessfulData: btcConsensusFromSSE,
-      },
-    }));
+    setAssetConsensus((cur) => {
+      const current = cur.btc.data ?? cur.btc.lastSuccessfulData;
+      const incomingStrength = getConsensusStatusStrength(btcConsensusFromSSE);
+      const currentStrength = getConsensusStatusStrength(current);
+      const currentTs = getConsensusTimestamp(current);
+      const incomingTs = getConsensusTimestamp(btcConsensusFromSSE);
+      const shouldReplace =
+        current === null ||
+        (currentStrength <= CONSENSUS_STATUS_STRENGTH.MISSING &&
+          incomingStrength > currentStrength) ||
+        (currentStrength <= CONSENSUS_STATUS_STRENGTH.MISSING &&
+          incomingStrength === currentStrength &&
+          (currentTs === null || (incomingTs !== null && incomingTs >= currentTs)));
+
+      if (!shouldReplace) {
+        return cur;
+      }
+
+      return {
+        ...cur,
+        btc: {
+          data: btcConsensusFromSSE,
+          loading: false,
+          error: null,
+          lastSuccessfulData: btcConsensusFromSSE,
+        },
+      };
+    });
   }, [btcConsensusFromSSE]);
 
   const handleRefetch = React.useCallback(
@@ -336,6 +393,9 @@ const DashboardV2Inner: React.FC = () => {
             liveStatus={effectiveLiveStatus}
             liveMessage={effectiveLiveMessage}
             alertCount={latestAlert ? 1 : 0}
+            killSwitchActive={dailyPnl?.kill_switch_active ?? false}
+            dailyPnl={dailyPnl?.realized_pnl ?? null}
+            dailyTradeCount={dailyPnl?.trade_count ?? 0}
           />
         </ErrorBoundary>
 
@@ -360,7 +420,17 @@ const DashboardV2Inner: React.FC = () => {
           </div>
         </div>
 
-        {/* ── PORTFÖY TAB ───────────────────────────────────────────────────── */}
+        {/* ── KONTROL MERKEZİ TAB ─────────────────────────────────────────── */}
+        {activeTab === "control" && (
+          <KontrolMerkezi
+            macro={effectiveMacro}
+            btcConsensus={assetConsensus.btc.data ?? null}
+            dailyPnl={dailyPnl}
+            loading={loading && !effectiveMacro}
+          />
+        )}
+
+        {/* ── ANALİZ TAB (eski Portföy) ─────────────────────────────────── */}
         {activeTab === "portfolio" && (
           <>
             {/* Vade seçimi */}
@@ -552,25 +622,6 @@ const DashboardV2Inner: React.FC = () => {
                 Backend bağlantısı bekleniyor — http://localhost:8502
               </div>
             )}
-          </div>
-        )}
-
-        {/* ── AI ANALİZ TAB ─────────────────────────────────────────────────── */}
-        {activeTab === "ai_analysis" && (
-          <div className="space-y-4">
-            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
-              <div className="flex flex-wrap items-center gap-4">
-                <SymbolSelector
-                  currentSymbol={metricsSymbol}
-                  onSymbolChange={setMetricsSymbol}
-                />
-                <TimeframeSelector
-                  currentTimeframe={metricsTimeframe}
-                  onTimeframeChange={setMetricsTimeframe}
-                />
-              </div>
-            </div>
-            <AIAnalysisCard symbol={metricsSymbol} timeframe={metricsTimeframe} />
           </div>
         )}
 

@@ -18,6 +18,9 @@ interface GlobalHeaderProps {
   liveStatus: "live" | "reconnecting" | "fallback";
   liveMessage?: string | null;
   alertCount?: number;
+  killSwitchActive?: boolean;
+  dailyPnl?: number | null;
+  dailyTradeCount?: number;
 }
 
 const navigateTo = (path: string) => {
@@ -61,6 +64,9 @@ export const GlobalHeader: React.FC<GlobalHeaderProps> = ({
   liveStatus,
   liveMessage,
   alertCount = 0,
+  killSwitchActive = false,
+  dailyPnl = null,
+  dailyTradeCount = 0,
 }) => {
   const [clock, setClock] = useState(() => new Date().toLocaleTimeString("tr-TR"));
   const live = getLiveConfig(liveStatus, liveMessage);
@@ -94,6 +100,34 @@ export const GlobalHeader: React.FC<GlobalHeaderProps> = ({
             >
               {regime}
             </span>
+            {/* Kill Switch badge */}
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide ${
+                killSwitchActive
+                  ? "border-rose-500/60 bg-rose-500/15 text-rose-300 animate-pulse"
+                  : "border-slate-700 bg-slate-800/50 text-slate-500"
+              }`}
+              title="Günlük kayıp limiti durumu"
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${killSwitchActive ? "bg-rose-400 animate-ping" : "bg-emerald-400"}`} />
+              {killSwitchActive ? "Kill Switch AKTİF" : "Kill Switch: Kapalı"}
+            </span>
+
+            {/* Daily P&L */}
+            {dailyPnl !== null && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-mono font-semibold ${
+                  dailyPnl >= 0
+                    ? "border-emerald-500/30 bg-emerald-500/8 text-emerald-300"
+                    : "border-rose-500/30 bg-rose-500/8 text-rose-300"
+                }`}
+                title={`Günlük gerçekleşen P&L — ${dailyTradeCount} işlem`}
+              >
+                {dailyPnl >= 0 ? "+" : ""}${dailyPnl.toFixed(2)}
+                <span className="text-[9px] font-normal text-slate-500 ml-0.5">/{dailyTradeCount}i</span>
+              </span>
+            )}
+
             {/* Alert badge */}
             {alertCount > 0 && (
               <span

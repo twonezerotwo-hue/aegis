@@ -215,6 +215,7 @@ interface RawHistoricalEdgeResponse {
 const GATEWAY_URL = import.meta.env.VITE_API_URL || "http://localhost:8502";
 const ANALYZER_URL = import.meta.env.VITE_ANALYZER_API_URL || "http://localhost:8007";
 const CONSENSUS_URL = import.meta.env.VITE_CONSENSUS_API_URL || "http://localhost:8005";
+const MACRO_ASSET_SYMBOLS = new Set(["XAU/USDT", "XAG/USDT", "BOND/USDT", "CASH/USDT"]);
 
 const gatewayClient = axios.create({
   baseURL: GATEWAY_URL,
@@ -309,6 +310,15 @@ const hasFallbackSourceHint = (value: string | null): boolean => {
 
   const normalized = value.toLowerCase();
   return normalized.includes("fallback") || normalized.includes("cache");
+};
+
+const isMissingLikeSource = (value: string | null): boolean => {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.toLowerCase();
+  return normalized.includes("missing") || normalized.includes("unavailable");
 };
 
 const isPartialFallbackSource = (value: string | null): boolean => {
@@ -752,8 +762,8 @@ const normalizeModuleScores = (gateway: RawConsensusGatewayResponse, process: Ra
   touche: getNumber(process?.module_scores?.touche, getNumber(gateway.components?.touche?.score, 0.5)),
   fundamental: getNumber(process?.module_scores?.fundamental, getNumber(gateway.components?.fundamental?.score, 0.5)),
   news: getNumber(process?.module_scores?.news, getNumber(gateway.components?.news?.score, 0.5)),
-  sentinel: getNumber(process?.module_scores?.sentinel, 0.5),
-  quantum: getNumber(process?.module_scores?.quantum, 0.5),
+  sentinel: getNumber(process?.module_scores?.sentinel, getNumber(gateway.module_sources?.sentinel?.value, 0.5)),
+  quantum: getNumber(process?.module_scores?.quantum, getNumber(gateway.module_sources?.quantum?.value, 0.5)),
 });
 
 const normalizeModuleWeights = (process: RawConsensusProcessResponse | null): ModuleWeights => ({
@@ -795,12 +805,27 @@ const CONSENSUS_STATUS_PRIORITY: Array<NonNullable<ConsensusResponse["data_statu
   "FALLBACK",
   "MOCK",
   "MISSING",
+  "PARTIAL_FALLBACK",
   "STALE",
   "UNKNOWN",
-  "PARTIAL_FALLBACK",
   "RECENT",
   "LIVE",
 ];
+
+const CONSENSUS_STATUS_STRENGTH: Record<NonNullable<ConsensusResponse["data_status"]>, number> = {
+  UNKNOWN: 0,
+  MISSING: 1,
+  FALLBACK: 2,
+  MOCK: 3,
+  PARTIAL_FALLBACK: 4,
+  STALE: 5,
+  RECENT: 6,
+  LIVE: 7,
+};
+
+const getConsensusStatusStrength = (
+  status: ConsensusResponse["data_status"] | undefined
+): number => (status ? CONSENSUS_STATUS_STRENGTH[status] ?? 0 : 0);
 
 const aggregateConsensusStatus = (
   statuses: Array<ConsensusResponse["data_status"] | undefined>
@@ -822,6 +847,66 @@ const mergeWarnings = (...warningLists: Array<string[] | undefined>): string[] |
   return merged.length > 0 ? merged : undefined;
 };
 
+const getRawModuleStatus = (raw: RawConsensusModuleSource | undefined): ConsensusResponse["data_status"] => {
+  const explicitStatus = getDataStatus(raw?.data_status);
+  if (explicitStatus) {
+    return explicitStatus;
+  }
+
+  const source = getOptionalString(raw?.source);
+  if (raw?.fallback_used === true) {
+    return "FALLBACK";
+  }
+  if (pickTimestamp(raw?.timestamp)) {
+    return "LIVE";
+  }
+  if (!source || isMissingLikeSource(source)) {
+    return "MISSING";
+  }
+  return "UNKNOWN";
+};
+
+const pickPreferredModuleSource = (
+  preferred: RawConsensusModuleSource | undefined,
+  fallback: RawConsensusModuleSource | undefined
+): RawConsensusModuleSource | undefined => {
+  if (!preferred) {
+    return fallback;
+  }
+  if (!fallback) {
+    return preferred;
+  }
+
+  const preferredStrength = getConsensusStatusStrength(getRawModuleStatus(preferred));
+  const fallbackStrength = getConsensusStatusStrength(getRawModuleStatus(fallback));
+  if (fallbackStrength > preferredStrength) {
+    return fallback;
+  }
+  if (fallbackStrength < preferredStrength) {
+    return preferred;
+  }
+
+  const preferredTimestamp = pickTimestamp(preferred.timestamp);
+  const fallbackTimestamp = pickTimestamp(fallback.timestamp);
+  if (!preferredTimestamp && fallbackTimestamp) {
+    return fallback;
+  }
+
+  return preferred;
+};
+
+const getAggregateEligibleModuleStatus = (
+  moduleSource: ConsensusModuleSource | undefined
+): ConsensusResponse["data_status"] | undefined => {
+  if (!moduleSource) {
+    return undefined;
+  }
+  if (moduleSource.data_status === "MISSING" && moduleSource.source === "gateway_only_missing_module") {
+    return undefined;
+  }
+  return moduleSource.data_status;
+};
+
 const normalizeConsensusModuleSource = (
   raw: RawConsensusModuleSource | undefined,
   defaults: {
@@ -834,10 +919,13 @@ const normalizeConsensusModuleSource = (
 ): ConsensusModuleSource => {
   const missingSource = raw === undefined;
   const timestamp = pickTimestamp(raw?.timestamp);
-  const fallbackUsed = raw?.fallback_used === true || missingSource;
+  const source = getOptionalString(raw?.source) ?? defaults.source;
+  const explicitStatus = getDataStatus(raw?.data_status);
+  const missingLikeSource = isMissingLikeSource(source);
+  const fallbackUsed = raw?.fallback_used === true;
   const dataStatus =
-    getDataStatus(raw?.data_status) ??
-    (missingSource ? "FALLBACK" : fallbackUsed ? "FALLBACK" : timestamp ? "LIVE" : "UNKNOWN");
+    explicitStatus ??
+    (missingSource || missingLikeSource ? "MISSING" : fallbackUsed ? "FALLBACK" : timestamp ? "LIVE" : "UNKNOWN");
   const assetSpecific = raw?.asset_specific ?? false;
   const sharedScore = raw?.shared_score ?? false;
   const warnings = mergeWarnings(
@@ -848,7 +936,7 @@ const normalizeConsensusModuleSource = (
   return {
     module: getString(raw?.module, defaults.module),
     service: getString(raw?.service, defaults.service),
-    source: getString(raw?.source, defaults.source),
+    source: source,
     source_data: getString(raw?.source_data, defaults.sourceData),
     timestamp,
     timestamp_source: getString(raw?.timestamp_source, timestamp ? "source_timestamp" : "none"),
@@ -877,7 +965,10 @@ const normalizeConsensusModuleSources = (
     defaults: { service: string; source: string; sourceData: string; value: number }
   ): ConsensusModuleSource =>
     normalizeConsensusModuleSource(
-      processSources[processKey] ?? (gatewayKey ? gatewaySources[gatewayKey] : undefined),
+      pickPreferredModuleSource(
+        processSources[processKey],
+        gatewayKey ? gatewaySources[gatewayKey] : undefined
+      ),
       {
         module: processKey,
         service: defaults.service,
@@ -906,13 +997,13 @@ const normalizeConsensusModuleSources = (
       sourceData: "news",
       value: moduleScores.news,
     }),
-    sentinel: pickSource("sentinel", null, {
+    sentinel: pickSource("sentinel", "sentinel", {
       service: "consensus-engine",
       source: gatewayOnly ? "gateway_only_missing_module" : "missing_module_source",
       sourceData: "sentinel",
       value: moduleScores.sentinel,
     }),
-    quantum: pickSource("quantum", null, {
+    quantum: pickSource("quantum", "quantum", {
       service: "consensus-engine",
       source: gatewayOnly ? "gateway_only_missing_module" : "missing_module_source",
       sourceData: "quantum",
@@ -945,21 +1036,30 @@ const normalizeConsensus = (
   const fallbackUsed =
     gateway.fallback_used === true ||
     process?.fallback_used === true ||
-    gatewayOnly ||
     Object.values(moduleSources).some((moduleSource) => moduleSource.fallback_used);
-  const source = getString(
-    process?.source ?? gateway.source,
-    gatewayOnly ? "gateway_only" : "dashboard-gateway"
-  );
-  const dataStatus = aggregateConsensusStatus([
-    getDataStatus(process?.data_status),
+  const gatewayStatus = aggregateConsensusStatus([
     getDataStatus(gateway.data_status),
     moduleSources.technical.data_status,
     moduleSources.fundamental.data_status,
     moduleSources.news.data_status,
     moduleSources.sentinel.data_status,
     moduleSources.quantum.data_status,
-    fallbackUsed ? "FALLBACK" : undefined,
+  ]);
+  const processStatus = getDataStatus(process?.data_status);
+  const preferGatewayMeta =
+    gatewayOnly ||
+    getConsensusStatusStrength(gatewayStatus) >= getConsensusStatusStrength(processStatus);
+  const source = getString(
+    (preferGatewayMeta ? gateway.source : process?.source) ?? (preferGatewayMeta ? process?.source : gateway.source),
+    gatewayOnly ? "gateway_only" : "dashboard-gateway"
+  );
+  const dataStatus = aggregateConsensusStatus([
+    preferGatewayMeta ? getDataStatus(gateway.data_status) : getDataStatus(process?.data_status),
+    moduleSources.technical.data_status,
+    moduleSources.fundamental.data_status,
+    moduleSources.news.data_status,
+    getAggregateEligibleModuleStatus(moduleSources.sentinel),
+    getAggregateEligibleModuleStatus(moduleSources.quantum),
     timestamp ? undefined : "UNKNOWN",
   ]);
   const warnings = mergeWarnings(
@@ -970,7 +1070,7 @@ const normalizeConsensus = (
     moduleSources.news.warnings,
     moduleSources.sentinel.warnings,
     moduleSources.quantum.warnings,
-    dataStatus && ["STALE", "FALLBACK", "MOCK", "MISSING", "UNKNOWN"].includes(dataStatus)
+    dataStatus && ["STALE", "FALLBACK", "PARTIAL_FALLBACK", "MOCK", "MISSING", "UNKNOWN"].includes(dataStatus)
       ? ["Signal is not verified because source data is stale/fallback/mock."]
       : undefined
   );
@@ -1106,20 +1206,25 @@ export const fetchConsensus = async (
   horizon: string = "medium"
 ): Promise<ConsensusResponse> => {
   const compactSymbol = symbol.replace("/USDT", "").replace("/", "");
+  const gatewayOnly = MACRO_ASSET_SYMBOLS.has(symbol);
 
   console.log("[apiV2] Fetching", compactSymbol, horizon);
 
-  const [gatewaySettled, processSettled] = await Promise.allSettled([
-    gatewayClient.get<RawConsensusGatewayResponse>("/api/consensus", {
-      params: { symbol, timeframe, horizon },
-      signal: options.signal,
-    }),
-    consensusClient.post<RawConsensusProcessResponse>(
-      "/process",
-      { symbol: compactSymbol, timeframe, horizon },
-      { signal: options.signal }
-    ),
-  ]);
+  const gatewayPromise = gatewayClient.get<RawConsensusGatewayResponse>("/api/consensus", {
+    params: { symbol, timeframe, horizon },
+    signal: options.signal,
+  });
+  const processPromise: Promise<RawConsensusProcessResponse | null> = gatewayOnly
+    ? Promise.resolve(null)
+    : consensusClient
+        .post<RawConsensusProcessResponse>(
+          "/process",
+          { symbol: compactSymbol, timeframe, horizon },
+          { signal: options.signal }
+        )
+        .then((response) => response.data);
+
+  const [gatewaySettled, processSettled] = await Promise.allSettled([gatewayPromise, processPromise]);
 
   if (gatewaySettled.status === "rejected") {
     const err =
@@ -1130,7 +1235,7 @@ export const fetchConsensus = async (
     throw err;
   }
 
-  if (processSettled.status === "rejected") {
+  if (!gatewayOnly && processSettled.status === "rejected") {
     console.warn(
       `[apiV2] /process failed for ${symbol} (gateway-only fallback):`,
       processSettled.reason instanceof Error
@@ -1141,8 +1246,8 @@ export const fetchConsensus = async (
 
   return normalizeConsensus(
     gatewaySettled.value.data,
-    processSettled.status === "fulfilled" ? processSettled.value.data : null,
-    processSettled.status === "rejected"
+    processSettled.status === "fulfilled" ? processSettled.value : null,
+    gatewayOnly || processSettled.status === "rejected"
   );
 };
 
