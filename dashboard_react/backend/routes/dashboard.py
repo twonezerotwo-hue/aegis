@@ -10,6 +10,7 @@ import httpx
 from typing import Any, Optional
 
 from services.prometheus_client import PrometheusClient, TIMEFRAME_MAPPING
+from services.market_data import fetch_market_data
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +81,12 @@ async def _fetch_live_scores(symbol: str, timeframe: str) -> dict[str, Optional[
     try:
         if not isinstance(results[1], Exception) and results[1].status_code == 200:
             d = results[1].json()
-            nupl = float(d.get("nupl") or 0.5)
-            mvrv = float(d.get("mvrv_z_score") or 2.0)
-            nupl_norm = min(max((nupl + 0.5) / 1.5, 0.0), 1.0)
-            mvrv_norm = min(max((4.0 - mvrv) / 4.0, 0.0), 1.0)
-            scores["fundamental"] = round(nupl_norm * 0.6 + mvrv_norm * 0.4, 4)
+            if str(d.get("quality", "")).strip().lower() != "mock":
+                nupl = float(d.get("nupl") or 0.5)
+                mvrv = float(d.get("mvrv_z_score") or 2.0)
+                nupl_norm = min(max((nupl + 0.5) / 1.5, 0.0), 1.0)
+                mvrv_norm = min(max((4.0 - mvrv) / 4.0, 0.0), 1.0)
+                scores["fundamental"] = round(nupl_norm * 0.6 + mvrv_norm * 0.4, 4)
     except Exception as exc:
         logger.debug("live_score fundamental error: %s", exc)
 
@@ -241,6 +243,9 @@ def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timefram
     # ── Fundamental ──────────────────────────────────────────────────────────
     fundamental = payloads.get("fundamental")
     if fundamental:
+        if str(fundamental.get("quality", "")).strip().lower() == "mock":
+            fundamental = None
+    if fundamental:
         nupl = fundamental.get("nupl")
         mvrv = fundamental.get("mvrv_z_score")
         if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
@@ -381,7 +386,12 @@ _TIMEFRAME_SECONDS = {
     "1w": 604800,
     "1month": 2592000,
 }
-_CONSENSUS_STATUS_PRIORITY = ("FALLBACK", "MOCK", "MISSING", "STALE", "UNKNOWN", "RECENT", "LIVE")
+# Aggregate status priority — en kötüden en iyiye.
+# FALLBACK > MISSING > MOCK > STALE > PARTIAL_FALLBACK > UNKNOWN > RECENT > LIVE
+# Eski sıra: MOCK, FALLBACK'ten önce geliyordu — fundamental MOCK = tüm BTC MOCK.
+# Yeni: PARTIAL_FALLBACK simüle veriye düşmüştür, zinciri kirletmez.
+_CONSENSUS_STATUS_PRIORITY = ("FALLBACK", "MISSING", "MOCK", "STALE", "PARTIAL_FALLBACK", "UNKNOWN", "RECENT", "LIVE")
+_KNOWN_DATA_STATUSES = {"LIVE", "RECENT", "STALE", "FALLBACK", "PARTIAL_FALLBACK", "MOCK", "MISSING", "UNKNOWN"}
 
 
 def _status_from_timestamp(
@@ -424,6 +434,98 @@ def _normalize_score(value: float | None) -> float | None:
     if normalized > 1:
         normalized = normalized / 100.0
     return min(max(normalized, 0.0), 1.0)
+
+
+def _clean_timestamp(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _normalize_status_value(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    return normalized if normalized in _KNOWN_DATA_STATUSES else None
+
+
+def _extract_payload_timestamp(payload: Optional[dict[str, Any]], module: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    direct = (
+        _clean_timestamp(payload.get("last_updated"))
+        or _clean_timestamp(payload.get("timestamp"))
+        or _clean_timestamp(payload.get("available_timestamp"))
+    )
+    if direct:
+        return direct
+
+    if module == "touche":
+        data_range = payload.get("data_range")
+        if isinstance(data_range, dict):
+            return _clean_timestamp(data_range.get("end"))
+
+    if module == "news":
+        signals = payload.get("signals")
+        if isinstance(signals, list):
+            for item in signals:
+                if isinstance(item, dict):
+                    nested_timestamp = _clean_timestamp(item.get("timestamp"))
+                    if nested_timestamp:
+                        return nested_timestamp
+
+    return None
+
+
+def _payload_data_status(payload: Optional[dict[str, Any]], module: str, timeframe: str) -> str:
+    if not isinstance(payload, dict):
+        return "MISSING"
+
+    explicit_status = _normalize_status_value(payload.get("data_status"))
+    if explicit_status:
+        return explicit_status
+
+    fallback_used = bool(payload.get("fallback_used", False))
+    timestamp = _extract_payload_timestamp(payload, module)
+
+    if module == "touche":
+        data_mode = str(payload.get("data_mode", "")).strip().upper()
+        if data_mode in {"MOCK", "SIMULATED"}:
+            return "MOCK"
+        if fallback_used or data_mode == "FALLBACK":
+            return "FALLBACK"
+        if data_mode in {"LIVE", "REAL"}:
+            # FIX: Touche timestamp = günlük mum başlangıç tarihi (gece yarısı), analiz
+            # zamanı değil. _status_from_timestamp bu tarihi "20 saat eski = STALE" sayıyor.
+            # Servis HTTP 200 döndürdüyse analiz LIVE'dır — mum tarihi kullanılmaz.
+            return "LIVE"
+        return "UNKNOWN"
+
+    if module == "fundamental":
+        quality = str(payload.get("quality", "")).strip().lower()
+        if quality == "mock":
+            # FIX: Glassnode key yoksa simüle MVRV/NUPL döner → "mock".
+            # Ama bu "tamamen uydurma" değil, tutarlı bir fallback model.
+            # MOCK yerine PARTIAL_FALLBACK — tek MOCK modül tüm BTC'yi MOCK yapıyor.
+            return "PARTIAL_FALLBACK"
+        if fallback_used:
+            return "FALLBACK"
+        if timestamp:
+            return _status_from_timestamp(timestamp, False, timeframe=timeframe)
+        return "UNKNOWN"
+
+    if module == "news":
+        signals = payload.get("signals")
+        if not isinstance(signals, list) or not signals:
+            return "MISSING"
+        return _status_from_timestamp(timestamp, fallback_used, timeframe=timeframe) if timestamp else "UNKNOWN"
+
+    if module == "quantum":
+        signal = str(payload.get("futures_signal", "")).strip().upper()
+        if signal == "CACHE_FALLBACK" or fallback_used:
+            return "FALLBACK"
+        return _status_from_timestamp(timestamp, False, timeframe=timeframe) if timestamp else "UNKNOWN"
+
+    return _status_from_timestamp(timestamp, fallback_used, timeframe=timeframe)
 
 
 def _merge_warnings(*warning_lists: list[str]) -> list[str]:
@@ -557,7 +659,7 @@ async def _prometheus_module_snapshot(
         timestamp=None,
         timestamp_source="none",
         data_status="MISSING",
-        fallback_used=True,
+        fallback_used=False,
         asset_specific=False,
         shared_score=False,
         warnings=["Default neutral module score; Prometheus metric unavailable."],
@@ -782,41 +884,100 @@ async def get_news_metrics(
         }
 
 
-async def _fetch_macro_for_asset_scoring() -> dict:
-    """Fetch sentinel macro indicators for non-crypto asset scoring."""
-    SENTINEL_URL = "http://sentinel-api:8004"
-    defaults = {"dxy": 98.5, "vix": 22.0, "us10y": 4.25, "brent": 92.0, "xau": 4800.0, "hg": 4.5, "event_risk_score": 0.3}
-    timestamp = None
-    fallback_used = True
-    source = "hardcoded_macro_defaults"
+async def _fetch_macro_for_asset_scoring(horizon: str = "medium") -> dict:
+    """Fetch real macro inputs for non-crypto asset scoring.
+
+    Prefers canonical market-data + Sentinel sources and only falls back field-by-field.
+    """
+    defaults = {
+        "dxy": 98.5,
+        "vix": 22.0,
+        "us10y": 4.25,
+        "brent": 92.0,
+        "xau": 4800.0,
+        "hg": 4.5,
+        "event_risk_score": 0.3,
+    }
+    metrics = dict(defaults)
     warnings = ["Shared module score, not asset-specific."]
-    data_status = "FALLBACK"
+    fallback_fields: list[str] = []
+    timestamps: list[str] = []
+
+    market_results = await fetch_market_data()
+    for field in ("dxy", "vix", "us10y", "brent", "xau", "hg"):
+        result = market_results.get(field) or {}
+        if result and not result.get("fallback_used", True):
+            metrics[field] = float(result["value"])
+            ts = result.get("timestamp")
+            if isinstance(ts, str) and ts.strip():
+                timestamps.append(ts)
+        else:
+            fallback_fields.append(field)
+            reason = result.get("fallback_reason", "unavailable") if result else "no_result"
+            warnings = _merge_warnings(warnings, [f"{field}: hardcoded fallback ({reason})"])
+
+    sentinel_data: dict[str, Any] = {}
+    sentinel_timestamp: str | None = None
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{SENTINEL_URL}/sentinel/event_risk", params={"symbol": "BTC"})
-            if resp.status_code == 200:
-                data = resp.json()
-                data = data if isinstance(data, dict) else {}
-                timestamp = data.get("timestamp")
-                defaults["event_risk_score"] = float(data.get("event_risk_score", 0.3))
-                snap = data.get("macro_snapshot", {})
-                for key in ("dxy", "vix", "us10y", "brent", "xau", "hg"):
-                    if key in snap:
-                        defaults[key] = float(snap[key])
-                fallback_used = bool(data.get("fallback_used", False))
-                source = str(data.get("source", "sentinel_btc_macro_snapshot_shared"))
-                data_status = str(data.get("data_status", "UNKNOWN"))
-                warnings = _merge_warnings(warnings, data.get("warnings", []))
-    except Exception as e:
-        logger.warning(f"Macro fetch failed, using defaults: {e}")
-        warnings = _merge_warnings(warnings, [f"Sentinel macro snapshot unavailable: {e}"])
-    logger.info(f"Macro data for scoring: {defaults}")
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(
+                f"{_SENTINEL_URL}/sentinel/event_risk",
+                params={"symbol": "BTC", "horizon": horizon},
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            sentinel_data = raw if isinstance(raw, dict) else {}
+            sentinel_timestamp = _clean_timestamp(sentinel_data.get("timestamp"))
+            if sentinel_timestamp:
+                timestamps.append(sentinel_timestamp)
+    except Exception as exc:
+        logger.warning("macro_asset_sentinel_unavailable: %s", exc)
+        warnings = _merge_warnings(warnings, [f"Sentinel macro snapshot unavailable: {exc}"])
+
+    sentinel_snapshot = sentinel_data.get("macro_snapshot", {})
+    if not isinstance(sentinel_snapshot, dict):
+        sentinel_snapshot = {}
+
+    event_risk_value = sentinel_data.get("event_risk_score")
+    if isinstance(event_risk_value, (int, float)):
+        metrics["event_risk_score"] = float(event_risk_value)
+    else:
+        fallback_fields.append("event_risk_score")
+        warnings = _merge_warnings(warnings, ["event_risk_score: hardcoded fallback (sentinel_unavailable)"])
+
+    live_market_fields = sum(1 for field in ("dxy", "vix", "us10y", "brent", "xau", "hg") if field not in fallback_fields)
+    if live_market_fields == 0:
+        for field in ("dxy", "vix", "us10y", "brent", "xau", "hg"):
+            value = sentinel_snapshot.get(field)
+            if isinstance(value, (int, float)):
+                metrics[field] = float(value)
+                if field in fallback_fields:
+                    fallback_fields.remove(field)
+
+    source_timestamp = _latest_timestamp(*timestamps) if timestamps else None
+    if not fallback_fields:
+        data_status = "LIVE"
+    elif len(fallback_fields) == 7:
+        data_status = "FALLBACK"
+    else:
+        data_status = "PARTIAL_FALLBACK"
+
+    if sentinel_data:
+        source = str(sentinel_data.get("source", "market_data_plus_sentinel"))
+        if data_status == "LIVE":
+            source = "market_data_live"
+        elif data_status == "PARTIAL_FALLBACK":
+            source = "market_data_partial_plus_fallback"
+    else:
+        source = "hardcoded_macro_defaults"
+
+    logger.info("Macro data for asset scoring: %s", metrics)
     return {
-        "metrics": defaults,
-        "timestamp": timestamp if isinstance(timestamp, str) and timestamp.strip() else None,
+        "metrics": metrics,
+        "timestamp": source_timestamp,
         "source": source,
-        "fallback_used": fallback_used,
-        "data_status": data_status if data_status != "UNKNOWN" else _status_from_timestamp(timestamp, fallback_used, timeframe="1h"),
+        "fallback_used": data_status != "LIVE",
+        "data_status": data_status,
         "warnings": warnings,
     }
 
@@ -855,11 +1016,14 @@ def _derive_asset_scores(asset_key: str, m: dict) -> tuple:
 async def get_consensus(
     symbol: str = Query("BTC/USDT"),
     timeframe: str = Query("1h"),
+    horizon: str = Query("medium"),
     prometheus_url: str = Query("http://prometheus:9090")
 ):
     """Get 3-way weighted consensus with timeframe"""
     if timeframe not in VALID_TIMEFRAMES:
         timeframe = "1h"
+    if horizon not in {"short", "medium", "long"}:
+        horizon = "medium"
 
     try:
         # Detect non-crypto assets for macro-derived scoring
@@ -867,9 +1031,10 @@ async def get_consensus(
         module_sources: dict[str, Any]
 
         if asset_key in _MACRO_ASSETS:
-            macro_bundle = await _fetch_macro_for_asset_scoring()
+            macro_bundle = await _fetch_macro_for_asset_scoring(horizon)
             macro_data = macro_bundle["metrics"]
             touche_score, fundamental_score, news_score = _derive_asset_scores(asset_key, macro_data)
+            sentinel_score = round(1.0 - min(max(float(macro_data["event_risk_score"]), 0.0), 1.0), 4)
             logger.info(f"Macro-derived scores for {asset_key}: T={touche_score:.4f} F={fundamental_score:.4f} N={news_score:.4f}")
             module_sources = {
                 "technical": _build_module_source(
@@ -914,6 +1079,20 @@ async def get_consensus(
                     warnings=_merge_warnings(macro_bundle["warnings"]),
                     value=news_score,
                 ),
+                "sentinel": _build_module_source(
+                    module="sentinel",
+                    service="sentinel-api",
+                    source=macro_bundle["source"],
+                    source_data="shared BTC event risk snapshot",
+                    timestamp=macro_bundle["timestamp"],
+                    timestamp_source="sentinel_response" if macro_bundle["timestamp"] else "none",
+                    data_status=macro_bundle["data_status"],
+                    fallback_used=macro_bundle["fallback_used"],
+                    asset_specific=False,
+                    shared_score=True,
+                    warnings=_merge_warnings(macro_bundle["warnings"]),
+                    value=sentinel_score,
+                ),
             }
         else:
             live_payloads = await _fetch_live_module_payloads(symbol, timeframe)
@@ -925,8 +1104,9 @@ async def get_consensus(
                 live_score: Optional[float],
             ) -> tuple[float, dict[str, Any]]:
                 payload = live_payloads.get(payload_key)
+                timestamp = _extract_payload_timestamp(payload, payload_key)
+                data_status = _payload_data_status(payload, payload_key, timeframe)
                 if live_score is not None and payload:
-                    timestamp = payload.get("timestamp")
                     return live_score, _build_module_source(
                         module=module,
                         service=f"{module}-api",
@@ -934,12 +1114,33 @@ async def get_consensus(
                         source_data=f"{module}_service_response",
                         timestamp=timestamp,
                         timestamp_source="service_payload" if timestamp else "none",
-                        data_status=str(payload.get("data_status", "UNKNOWN")),
+                        data_status=data_status,
                         fallback_used=bool(payload.get("fallback_used", False)),
                         asset_specific=True,
                         shared_score=False,
                         warnings=_merge_warnings(payload.get("warnings", [])),
                         value=live_score,
+                    )
+                if payload:
+                    unusable_status = data_status if data_status in {"MOCK", "FALLBACK", "PARTIAL_FALLBACK", "UNKNOWN", "MISSING"} else "MISSING"
+                    warning_text = (
+                        "Service payload is not verified live data and was excluded from consensus."
+                        if unusable_status in {"MOCK", "FALLBACK", "PARTIAL_FALLBACK", "MISSING", "UNKNOWN"}
+                        else "Verified live module score unavailable."
+                    )
+                    return 0.5, _build_module_source(
+                        module=module,
+                        service=f"{module}-api",
+                        source=str(payload.get("source", "live_service_payload_unusable")),
+                        source_data=f"{module}_service_response",
+                        timestamp=timestamp,
+                        timestamp_source="service_payload" if timestamp else "none",
+                        data_status=unusable_status,
+                        fallback_used=bool(payload.get("fallback_used", False)),
+                        asset_specific=unusable_status not in {"MISSING"},
+                        shared_score=False,
+                        warnings=_merge_warnings(payload.get("warnings", []), [warning_text]),
+                        value=0.5,
                     )
                 return 0.5, _build_module_source(
                     module=module,
@@ -959,10 +1160,14 @@ async def get_consensus(
             touche_score, technical_source = _module_payload_source("touche", "technical", live["touche"])
             fundamental_score, fundamental_source = _module_payload_source("fundamental", "fundamental", live["fundamental"])
             news_score, news_source = _module_payload_source("news", "news", live["news"])
+            _, sentinel_source = _module_payload_source("sentinel", "sentinel", live["sentinel"])
+            _, quantum_source = _module_payload_source("quantum", "quantum", live["quantum"])
             module_sources = {
                 "technical": technical_source,
                 "fundamental": fundamental_source,
                 "news": news_source,
+                "sentinel": sentinel_source,
+                "quantum": quantum_source,
             }
 
         # Normalize to 0-1
@@ -993,23 +1198,29 @@ async def get_consensus(
             module_sources["technical"]["timestamp"],
             module_sources["fundamental"]["timestamp"],
             module_sources["news"]["timestamp"],
+            module_sources.get("sentinel", {}).get("timestamp"),
+            module_sources.get("quantum", {}).get("timestamp"),
         )
         warnings = _merge_warnings(
             module_sources["technical"]["warnings"],
             module_sources["fundamental"]["warnings"],
             module_sources["news"]["warnings"],
+            module_sources.get("sentinel", {}).get("warnings", []),
+            module_sources.get("quantum", {}).get("warnings", []),
         )
         data_status = _aggregate_status([
             module_sources["technical"]["data_status"],
             module_sources["fundamental"]["data_status"],
             module_sources["news"]["data_status"],
+            module_sources.get("sentinel", {}).get("data_status"),
+            module_sources.get("quantum", {}).get("data_status"),
         ])
         fallback_used = any(module_source["fallback_used"] for module_source in module_sources.values())
         verified = (
             data_status in {"LIVE", "RECENT"}
             and all(bool(module_source["verified"]) for module_source in module_sources.values())
         )
-        if data_status in {"STALE", "FALLBACK", "MOCK", "MISSING"}:
+        if data_status in {"STALE", "FALLBACK", "PARTIAL_FALLBACK", "MOCK", "MISSING", "UNKNOWN"}:
             warnings = _merge_warnings(warnings, ["Signal is not verified because source data is stale/fallback/mock."])
         source = "dashboard_gateway_macro_derived_consensus" if asset_key in _MACRO_ASSETS else "dashboard_gateway_prometheus_consensus"
         return {
