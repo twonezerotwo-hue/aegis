@@ -1,5 +1,5 @@
 """
-AEGIS v7.4 - Sentinel API live macro data with explicit fallback metadata.
+AEGIS v7.5 - Sentinel API live macro data with HMM regime detection.
 
 Sentinel AI Limited - Macro-Economic Risk Analysis API
 """
@@ -17,6 +17,16 @@ import time
 import os
 import httpx
 from dotenv import load_dotenv
+
+# HMM Rejim Tespiti — kural tabanlı fallback korumalı
+try:
+    from hmm_regime import get_regime_probs, get_detector, _background_train
+    _HMM_AVAILABLE = True
+    logger_init = logging.getLogger(__name__)
+    logger_init.info("HMM rejim modülü yüklendi")
+except Exception as _hmm_import_err:
+    _HMM_AVAILABLE = False
+    logging.getLogger(__name__).warning("HMM modülü yüklenemedi: %s — kural tabanlı fallback", _hmm_import_err)
 
 from correlation_engine import CorrelationEngine
 
@@ -128,7 +138,7 @@ async def _refresh_metric_snapshot() -> None:
     macro = await _get_macro_snapshot()
     risk_score = _compute_event_risk(macro)
     multiplier_value = round(max(0.1, min(1.0, 1.0 - risk_score)), 3)
-    regime_probs = _compute_regime_probabilities(macro)
+    regime_probs = await _compute_regime_probabilities(macro)
     max_regime = max(regime_probs, key=lambda key: regime_probs[key]) if regime_probs else "normalization"
     regime_value = 2 if max_regime == "risk_off" else 0 if max_regime == "risk_on" else 1
 
@@ -178,6 +188,15 @@ async def lifespan(app: FastAPI):
     logger.info("Sentinel AI Module starting up...")
     thread = threading.Thread(target=update_metrics_background, daemon=True)
     thread.start()
+
+    # HMM arka plan eğitimi — yfinance'tan 1500 günlük veri çekip modeli eğit
+    # Ana servis başlatmayı beklemeden devam eder (create_task = non-blocking)
+    if _HMM_AVAILABLE:
+        asyncio.create_task(_background_train(get_detector()))
+        logger.info("HMM arka plan eğitimi başlatıldı (yfinance, ~1500 gün)")
+    else:
+        logger.warning("HMM kullanılamıyor — kural tabanlı rejim tespiti aktif")
+
     yield
     logger.info("Sentinel AI Module shutting down...")
 
@@ -232,7 +251,7 @@ async def get_event_risk(symbol: str = "BTC", horizon: str = "medium"):
 
     macro = await _get_macro_snapshot()
     risk_score = _compute_event_risk(macro)
-    regime_probs = _compute_regime_probabilities(macro)
+    regime_probs = await _compute_regime_probabilities(macro)
     liquidity = _compute_liquidity_score(macro)
     volatility = _compute_volatility_composite(macro)
 
@@ -295,6 +314,23 @@ async def get_correlation():
     return corr_engine.analyze(price_df)
 
 
+@app.get("/sentinel/hmm/status")
+async def get_hmm_status():
+    """HMM rejim modelinin eğitim durumu ve performans bilgisi."""
+    if not _HMM_AVAILABLE:
+        return {"available": False, "method": "rule_based",
+                "message": "hmmlearn kurulu değil — kural tabanlı fallback aktif"}
+    det = get_detector()
+    macro = await _get_macro_snapshot()
+    probs = det.predict(macro)
+    dominant = max(probs, key=probs.get) if probs else "unknown"
+    return {
+        **det.status,
+        "current_regime_probs": probs,
+        "dominant_regime": dominant,
+    }
+
+
 @app.get("/sentinel/macro")
 async def get_macro(horizon: str = "medium"):
     macro = await _get_macro_snapshot()
@@ -308,7 +344,7 @@ async def get_macro(horizon: str = "medium"):
         "fallback": bool(macro.get("fallback_used")),
         "metrics": macro,
         "correlation": corr_data,
-        "regime_probability_distribution": _compute_regime_probabilities(macro),
+        "regime_probability_distribution": await _compute_regime_probabilities(macro),
         "liquidity_composite": _compute_liquidity_score(macro),
         "volatility_composite": _compute_volatility_composite(macro),
         "timestamp": macro.get("timestamp"),
@@ -496,8 +532,29 @@ def _compute_event_risk(macro: dict) -> float:
     return round(max(0.0, min(1.0, score - 0.6)), 3)
 
 
-def _compute_regime_probabilities(macro: dict) -> dict:
-    """HYG kredi sağlığı + funding rate kalabalık pozisyon da rejime dahil."""
+async def _compute_regime_probabilities(macro: dict) -> dict:
+    """
+    Rejim olasılık dağılımı — HMM öncelikli, kural tabanlı fallback.
+
+    HMM Eğitilmişse: Gaussian HMM posterior dağılımı (istatistiksel)
+    HMM Eğitilmemişse: Kural tabanlı eşik karşılaştırmaları (deterministic)
+    HMM İmport Hatası: Kural tabanlı fallback (hmmlearn kurulu değil)
+    """
+    if _HMM_AVAILABLE:
+        try:
+            probs = await get_regime_probs(macro)
+            det = get_detector()
+            logger.debug("regime_method=%s probs=%s", det.status.get("method"), probs)
+            return probs
+        except Exception as exc:
+            logger.warning("hmm_regime_failed: %s — kural tabanlı fallback", exc)
+
+    # Kural tabanlı fallback (orijinal mantık)
+    return _rule_based_regime(macro)
+
+
+def _rule_based_regime(macro: dict) -> dict:
+    """Orijinal kural tabanlı rejim hesabı — HMM fallback olarak kullanılır."""
     dxy   = float(macro.get("dxy", 99))
     us10y = float(macro.get("us10y", 4.25))
     vix   = float(macro.get("vix", 22))
@@ -509,13 +566,12 @@ def _compute_regime_probabilities(macro: dict) -> dict:
     scores["risk_on"] += max(0, (102 - dxy) * 0.03)
     scores["risk_on"] += max(0, (4.5 - us10y) * 0.12)
     scores["risk_on"] += max(0, (22 - vix) * 0.02)
-    scores["risk_on"] += max(0, (hyg - 75) * 0.04)   # HYG güçlü → risk iştahı
+    scores["risk_on"] += max(0, (hyg - 75) * 0.04)
     scores["risk_off"] += max(0, (dxy - 100) * 0.025)
     scores["risk_off"] += max(0, (us10y - 4.0) * 0.10)
     scores["risk_off"] += max(0, (vix - 20) * 0.025)
     scores["risk_off"] += max(0, (xau - 4500) * 0.00005)
-    scores["risk_off"] += max(0, (75 - hyg) * 0.05)   # HYG zayıf → risk-off
-    # Aşırı yüksek pozitif funding = kalabalık long = yakında tersine dönüş riski
+    scores["risk_off"] += max(0, (75 - hyg) * 0.05)
     if funding > 0.05:
         scores["risk_off"] += (funding - 0.05) * 2.0
 
@@ -554,7 +610,8 @@ def _compute_liquidity_score(macro: dict) -> dict:
 def simulate_macro_scenario(dxy=100, vix=20, us10y=4.0, m2sl=20, brent=90, xau=4800):
     macro = {"dxy": dxy, "vix": vix, "us10y": us10y, "m2sl": m2sl, "brent": brent, "xau": xau}
     return {
-        "regime_probability_distribution": _compute_regime_probabilities(macro),
+        # simulate sync context — kural tabanlı fallback kullan (await yok)
+        "regime_probability_distribution": _rule_based_regime(macro),
         "liquidity_composite": _compute_liquidity_score(macro),
         "volatility_composite": _compute_volatility_composite(macro),
     }
