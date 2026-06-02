@@ -18,6 +18,12 @@ interface DailyPnL {
   message: string;
 }
 
+interface RationaleState {
+  text: string;
+  source: "groq" | "ollama" | "rule_based" | null;
+  loading: boolean;
+}
+
 interface KontrolProps {
   macro: MacroViewModel | null;
   btcConsensus: ConsensusResponse | null;
@@ -261,10 +267,59 @@ const RiskPaneli: React.FC<{ macro: MacroViewModel | null; pnl: DailyPnL | null 
 
 // ── Ana Bileşen ───────────────────────────────────────────────────────────────
 
+const SOURCE_BADGE: Record<string, string> = {
+  groq:       "text-violet-400",
+  ollama:     "text-emerald-400",
+  rule_based: "text-slate-500",
+};
+const SOURCE_LABEL: Record<string, string> = {
+  groq:       "Groq",
+  ollama:     "Ollama",
+  rule_based: "Kural",
+};
+
 export const KontrolMerkezi: React.FC<KontrolProps> = ({
   macro, btcConsensus, dailyPnl, loading,
 }) => {
+  const [rationale, setRationale] = React.useState<RationaleState>({
+    text: "", source: null, loading: false,
+  });
+
+  const fetchRationale = React.useCallback(async () => {
+    if (!btcConsensus || rationale.loading) return;
+    setRationale(r => ({ ...r, loading: true }));
+
+    const API = (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:8502";
+    const ctx = {
+      action:            btcConsensus.action,
+      confidence_pct:    Math.round(btcConsensus.confidence * 100),
+      five_module_score: btcConsensus.five_module_score,
+      regime:            macro?.regime ?? "NORMALIZATION",
+      event_risk_pct:    (macro?.metrics?.event_risk_score ?? 0.3) * 100,
+      vix:               macro?.metrics?.vix ?? null,
+      hyg:               (macro?.metrics as Record<string, number> | undefined)?.hyg ?? null,
+      funding_rate_pct:  ((macro?.metrics as Record<string, number> | undefined)?.funding_rate ?? 0) * 100,
+      module_scores:     btcConsensus.module_scores,
+      symbol:            btcConsensus.symbol ?? "BTC",
+      timeframe:         btcConsensus.timeframe ?? "4h",
+      warnings:          btcConsensus.warnings ?? [],
+    };
+
+    try {
+      const res = await fetch(`${API}/api/signal/rationale`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ctx),
+      });
+      const data = await res.json();
+      setRationale({ text: data.text, source: data.source, loading: false });
+    } catch {
+      setRationale({ text: "Gerekçe alınamadı.", source: "rule_based", loading: false });
+    }
+  }, [btcConsensus, macro, rationale.loading]);
+
   return (
+    <div className="space-y-4">
     <div className="grid gap-4 lg:grid-cols-3">
 
       {/* Zone 1: Karar */}
@@ -285,6 +340,51 @@ export const KontrolMerkezi: React.FC<KontrolProps> = ({
         <RiskPaneli macro={macro} pnl={dailyPnl} />
       </div>
 
+    </div>
+
+    {/* LLM Sinyal Gerekçesi */}
+    <div className="rounded-2xl border border-slate-700/40 bg-slate-900/60 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+            AI Gerekçe
+          </p>
+          {rationale.source && (
+            <span className={`text-[9px] font-mono ${SOURCE_BADGE[rationale.source] ?? "text-slate-600"}`}>
+              [{SOURCE_LABEL[rationale.source] ?? rationale.source}]
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={fetchRationale}
+          disabled={rationale.loading || !btcConsensus}
+          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-[10px] font-semibold text-slate-300 transition-colors hover:border-violet-500/50 hover:text-violet-300 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {rationale.loading ? (
+            <>
+              <span className="h-2 w-2 animate-spin rounded-full border-2 border-slate-600 border-t-violet-400" />
+              Üretiliyor…
+            </>
+          ) : (
+            <>
+              <span className="text-[11px]">✦</span>
+              {rationale.text ? "Yenile" : "Gerekçe Üret"}
+            </>
+          )}
+        </button>
+      </div>
+
+      {rationale.text ? (
+        <p className="mt-3 text-[12px] leading-6 text-slate-300">
+          {rationale.text}
+        </p>
+      ) : (
+        <p className="mt-2 text-[10px] italic text-slate-700">
+          Mevcut sinyal için Groq veya Ollama'dan Türkçe gerekçe almak için butona bas.
+        </p>
+      )}
+    </div>
     </div>
   );
 };

@@ -1,7 +1,9 @@
 ﻿from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.routing import APIRouter
 import httpx
 import asyncio
+import importlib
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
@@ -22,7 +24,6 @@ except Exception as _aegis_core_import_err:
     _log.getLogger(__name__).warning("aegis_core_routes unavailable: %s", _aegis_core_import_err)
 
 from routes import dashboard
-from routes import paper_trading
 from routes import macro
 from routes import stream
 
@@ -33,17 +34,97 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import Touche AI components
-try:
-    from strategies.touche_ai.src.engine.scoring import EQSScorer
-    from strategies.touche_ai.src.engine.unified_optimizer import UnifiedOptimizer, TradeRecord
-    touche_available = True
-    logger.info("Touche AI modules imported successfully")
-except ImportError as e:
-    touche_available = False
-    logger.warning(f"Touche AI import failed: {e}")
-
 load_dotenv()
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+LEGACY_RUNTIME_ENABLED = _env_flag("AEGIS_ENABLE_LEGACY_RUNTIME", False)
+PAPER_TRADING_ENABLED = _env_flag("AEGIS_ENABLE_PAPER_TRADING", LEGACY_RUNTIME_ENABLED)
+EXECUTION_ENDPOINTS_ENABLED = _env_flag("AEGIS_ENABLE_EXECUTION_ENDPOINTS", LEGACY_RUNTIME_ENABLED)
+OPTIMIZER_ENDPOINTS_ENABLED = _env_flag("AEGIS_ENABLE_OPTIMIZER_ENDPOINTS", LEGACY_RUNTIME_ENABLED)
+
+
+def _legacy_feature_detail(feature: str, env_var: str, extra_reason: Optional[str] = None) -> Dict[str, Any]:
+    detail: Dict[str, Any] = {
+        "status": "disabled",
+        "feature": feature,
+        "reason": f"{feature} is disabled in the default safe runtime.",
+        "env_var": env_var,
+        "legacy_runtime_enabled": False,
+    }
+    if extra_reason:
+        detail["extra_reason"] = extra_reason
+    return detail
+
+
+def _raise_legacy_feature_disabled(feature: str, env_var: str, extra_reason: Optional[str] = None) -> None:
+    raise HTTPException(
+        status_code=503,
+        detail=_legacy_feature_detail(feature, env_var, extra_reason=extra_reason),
+    )
+
+
+def _legacy_runtime_state() -> Dict[str, Any]:
+    return {
+        "legacy_runtime_enabled": LEGACY_RUNTIME_ENABLED,
+        "paper_trading_enabled": PAPER_TRADING_ENABLED,
+        "execution_endpoints_enabled": EXECUTION_ENDPOINTS_ENABLED,
+        "optimizer_endpoints_enabled": OPTIMIZER_ENDPOINTS_ENABLED,
+    }
+
+
+def _build_legacy_disabled_router(
+    *,
+    prefix: str,
+    feature: str,
+    env_var: str,
+    tags: List[str],
+    extra_reason: Optional[str] = None,
+) -> APIRouter:
+    router = APIRouter(prefix=prefix, tags=tags)
+    methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+
+    @router.api_route("", methods=methods, include_in_schema=False)
+    @router.api_route("/", methods=methods, include_in_schema=False)
+    async def _disabled_root():
+        _raise_legacy_feature_disabled(feature, env_var, extra_reason=extra_reason)
+
+    @router.api_route("/{path:path}", methods=methods, include_in_schema=False)
+    async def _disabled_path(path: str):
+        _raise_legacy_feature_disabled(feature, env_var, extra_reason=extra_reason)
+
+    return router
+
+
+def _load_paper_trading_router() -> APIRouter:
+    if not PAPER_TRADING_ENABLED:
+        logger.info("Paper trading routes disabled in default safe runtime")
+        return _build_legacy_disabled_router(
+            prefix="/api/paper",
+            feature="paper trading routes",
+            env_var="AEGIS_ENABLE_PAPER_TRADING",
+            tags=["paper_trading_disabled"],
+        )
+
+    try:
+        module = importlib.import_module("routes.paper_trading")
+        logger.info("Paper trading routes enabled explicitly")
+        return module.router
+    except Exception as exc:
+        logger.warning("Paper trading router unavailable: %s", exc)
+        return _build_legacy_disabled_router(
+            prefix="/api/paper",
+            feature="paper trading routes",
+            env_var="AEGIS_ENABLE_PAPER_TRADING",
+            tags=["paper_trading_disabled"],
+            extra_reason=str(exc),
+        )
 
 
 # ========== AUTO REGIME â†’ WEIGHT SWITCHING ==========
@@ -173,8 +254,8 @@ if _aegis_core_available and _aegis_core_routes_mod is not None:
     app.include_router(_aegis_core_routes_mod.router)
     logger.info("aegis_core_routes loaded")
 
-# Include paper trading routes
-app.include_router(paper_trading.router)
+# Include legacy paper trading routes behind an explicit opt-in runtime flag.
+app.include_router(_load_paper_trading_router())
 
 # Include macro routes
 app.include_router(macro.router)
@@ -230,14 +311,23 @@ VALID_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w", "1month"]
 prometheus_client = PrometheusClient(PROMETHEUS_URL)
 sentinel_client = SentinelClient(SENTINEL_URL)
 
-# Initialize Touche AI Unified Optimizer
+# Initialize legacy optimizer runtime only when explicitly enabled.
+UnifiedOptimizerClass: Optional[Any] = None
+TradeRecordClass: Optional[Any] = None
 unified_optimizer: Optional[Any] = None
-if touche_available:
+if OPTIMIZER_ENDPOINTS_ENABLED:
     try:
-        unified_optimizer = UnifiedOptimizer(learning_rate=0.01)
+        from strategies.touche_ai.src.engine.unified_optimizer import UnifiedOptimizer as _UnifiedOptimizer
+        from strategies.touche_ai.src.engine.unified_optimizer import TradeRecord as _TradeRecord
+
+        UnifiedOptimizerClass = _UnifiedOptimizer
+        TradeRecordClass = _TradeRecord
+        unified_optimizer = _UnifiedOptimizer(learning_rate=0.01)
         logger.info("Unified optimizer initialized successfully")
     except Exception as e:
         logger.warning(f"Could not initialize unified optimizer: {e}")
+else:
+    logger.info("Unified optimizer runtime disabled in default safe runtime")
 
 # In-memory backtest run storage (used when volume-mounted backtest engine is unavailable)
 BACKTEST_RUNS: Dict[str, Dict[str, Any]] = {}
@@ -312,6 +402,17 @@ def _clean_timestamp(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _require_optimizer_runtime() -> None:
+    if not OPTIMIZER_ENDPOINTS_ENABLED:
+        _raise_legacy_feature_disabled(
+            "optimizer endpoints",
+            "AEGIS_ENABLE_OPTIMIZER_ENDPOINTS",
+        )
+
+    if unified_optimizer is None or TradeRecordClass is None:
+        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+
+
 class SignalRequest(BaseModel):
     symbol: str
     action: str
@@ -332,6 +433,7 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "port": 8502,
         "prometheus": PROMETHEUS_URL,
+        "runtime": _legacy_runtime_state(),
     }
 
 
@@ -343,6 +445,35 @@ async def get_config():
         "default_symbol": "BTC/USDT",
         "default_timeframe": "1h",
         "valid_timeframes": VALID_TIMEFRAMES,
+        "runtime": _legacy_runtime_state(),
+    }
+
+
+@app.post("/api/signal/rationale")
+async def signal_rationale(ctx: Dict = Body(...)):
+    """
+    Mevcut sinyal bağlamı için Türkçe LLM gerekçesi üretir.
+
+    Body: { action, confidence_pct, five_module_score, regime,
+            event_risk_pct, vix, hyg, funding_rate_pct,
+            module_scores: {touche,fundamental,news,sentinel,quantum},
+            symbol, timeframe, warnings }
+
+    Returns: { text, source }  — source: "groq" | "ollama" | "rule_based"
+    """
+    from services.llm_service import get_llm_service
+    result = await get_llm_service().signal_rationale(ctx)
+    return result
+
+
+@app.get("/api/llm/status")
+async def llm_status():
+    """LLM servis durumu — hangi kaynak aktif."""
+    from services.llm_service import get_llm_service, _GROQ_API_KEY, _OLLAMA_BASE, _GROQ_MODEL, _OLLAMA_MODEL
+    return {
+        "groq": {"configured": bool(_GROQ_API_KEY), "model": _GROQ_MODEL},
+        "ollama": {"base_url": _OLLAMA_BASE, "model": _OLLAMA_MODEL},
+        "sources": get_llm_service().available_sources,
     }
 
 
@@ -362,6 +493,12 @@ async def get_daily_pnl():
 @app.post("/execute")
 async def execute_signal(request: SignalRequest):
     """Execute AI signal on Binance, limited to configured live timeframes."""
+    if not EXECUTION_ENDPOINTS_ENABLED:
+        _raise_legacy_feature_disabled(
+            "live execution endpoint",
+            "AEGIS_ENABLE_EXECUTION_ENDPOINTS",
+        )
+
     allowed = [tf.strip() for tf in os.getenv("LIVE_TIMEFRAMES", "4h,1d").split(",") if tf.strip()]
     if request.timeframe not in allowed:
         return {"success": False, "reason": f"Timeframe {request.timeframe} not allowed for live execution"}
@@ -438,7 +575,16 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
         logger.info(f"Dashboard query: symbol={symbol}, timeframe={timeframe}")
 
         # Try live AI service calls first (real-time), fall back to Prometheus
-        from routes.dashboard import _fetch_live_scores, _fetch_module_details, _build_metric_summary, _fetch_live_module_payloads
+        from routes.dashboard import (
+            _aggregate_status,
+            _build_metric_summary,
+            _extract_payload_timestamp,
+            _fetch_live_module_payloads,
+            _fetch_live_scores,
+            _fetch_module_details,
+            _latest_timestamp,
+            _payload_data_status,
+        )
         live_scores, module_details, live_payloads = await asyncio.gather(
             _fetch_live_scores(symbol, timeframe),
             _fetch_module_details(symbol, timeframe),
@@ -472,20 +618,24 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
 
         def _payload_timestamp(module: str) -> Optional[str]:
             payload = live_payloads.get(module) or {}
-            value = payload.get("timestamp")
-            return value if isinstance(value, str) and value.strip() else None
+            return _extract_payload_timestamp(payload, module)
 
         def _payload_source(module: str) -> str:
             payload = live_payloads.get(module) or {}
-            if live_scores[module] is not None:
+            if payload:
                 return str(payload.get("source", "live_service_api"))
             return "prometheus_fallback" if not missing_metrics[module] else "live_service_missing"
 
         def _payload_status(module: str) -> str:
             payload = live_payloads.get(module) or {}
-            if live_scores[module] is not None:
-                return str(payload.get("data_status", "LIVE"))
+            if payload:
+                return _payload_data_status(payload, module, timeframe)
             return _data_status(None, fallback_used=False, missing_used=missing_metrics[module])
+
+        module_statuses = {
+            module: _payload_status(module)
+            for module in ("touche", "fundamental", "quantum", "sentinel", "news")
+        }
 
         sources = {module: _payload_source(module) for module in ("touche", "fundamental", "quantum", "sentinel", "news")}
 
@@ -526,6 +676,7 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
 
         def _metric_payload(name: str, module: str, score: float, color: str, missing: bool, include_symbol: bool = True, include_macro: bool = False, summary: str = "") -> Dict[str, Any]:
             timestamp = _payload_timestamp(module)
+            data_status = module_statuses[module]
             payload: Dict[str, Any] = {
                 "name": name,
                 "score": round(score, 4),
@@ -536,8 +687,8 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
                 "timestamp": timestamp,
                 "last_updated": timestamp,
                 "source": sources[module],
-                "fallback_used": missing,
-                "data_status": _payload_status(module),
+                "fallback_used": data_status in {"FALLBACK", "PARTIAL_FALLBACK"},
+                "data_status": data_status,
             }
             if include_symbol:
                 payload["symbol"] = symbol
@@ -545,8 +696,41 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
                 payload["macro"] = macro_metrics
             return payload
 
-        dashboard_fallback_used = any(missing_metrics.values())
-        dashboard_status = _data_status(None, fallback_used=dashboard_fallback_used)
+        dashboard_fallback_used = any(
+            status in {"FALLBACK", "PARTIAL_FALLBACK"} for status in module_statuses.values()
+        ) or str(macro_metrics.get("data_status", "")).upper() in {"FALLBACK", "PARTIAL_FALLBACK"}
+        metric_timestamps = [
+            _payload_timestamp(module)
+            for module in ("touche", "fundamental", "quantum", "sentinel", "news")
+        ]
+        macro_timestamp = _clean_timestamp(macro_metrics.get("timestamp")) or _clean_timestamp(macro_metrics.get("last_updated"))
+        effective_timestamp = _latest_timestamp(macro_timestamp, *metric_timestamps)
+        dashboard_status = _aggregate_status([
+            module_statuses["touche"],
+            module_statuses["fundamental"],
+            module_statuses["quantum"],
+            module_statuses["sentinel"],
+            module_statuses["news"],
+            str(macro_metrics.get("data_status", "")).upper(),
+            "FALLBACK" if dashboard_fallback_used else "",
+            "UNKNOWN" if effective_timestamp is None else "",
+        ])
+        consensus_timestamp = _latest_timestamp(
+            _payload_timestamp("touche"),
+            _payload_timestamp("fundamental"),
+            _payload_timestamp("news"),
+        )
+        consensus_status = _aggregate_status([
+            module_statuses["touche"],
+            module_statuses["fundamental"],
+            module_statuses["news"],
+            "FALLBACK" if (
+                module_statuses["touche"] in {"FALLBACK", "PARTIAL_FALLBACK"}
+                or module_statuses["fundamental"] in {"FALLBACK", "PARTIAL_FALLBACK"}
+                or module_statuses["news"] in {"FALLBACK", "PARTIAL_FALLBACK"}
+            ) else "",
+            "UNKNOWN" if consensus_timestamp is None else "",
+        ])
 
         service_states = {
             "touche": "UP" if live_scores["touche"] is not None or not missing_metrics["touche"] else "DOWN",
@@ -561,16 +745,16 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             "services": service_states,
             "up_count": sum(1 for status in service_states.values() if status == "UP"),
             "total_count": 6,
-            "timestamp": None,
-            "last_updated": None,
+            "timestamp": effective_timestamp,
+            "last_updated": effective_timestamp,
             "source": "dashboard_live_service_probe",
             "fallback_used": False,
             "data_status": "LIVE" if any(status == "UP" for status in service_states.values()) else "MISSING",
         }
 
         return {
-            "timestamp": None,
-            "last_updated": None,
+            "timestamp": effective_timestamp,
+            "last_updated": effective_timestamp,
             "source": "dashboard_aggregate",
             "fallback_used": dashboard_fallback_used,
             "data_status": dashboard_status,
@@ -595,11 +779,11 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
                 },
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "timestamp": None,
-                "last_updated": None,
+                "timestamp": consensus_timestamp,
+                "last_updated": consensus_timestamp,
                 "source": "dashboard_aggregate",
                 "fallback_used": dashboard_fallback_used,
-                "data_status": dashboard_status,
+                "data_status": consensus_status,
             },
             "macro": macro_metrics,
             "health": system_health,
@@ -886,6 +1070,15 @@ async def get_analysis_report(symbol: str = Query("BTC/USDT"), timeframe: str = 
 @app.get("/api/optimizer/status")
 async def get_unified_optimizer_status():
     """Get unified optimizer status (weights + parameters + statistics)"""
+    if not OPTIMIZER_ENDPOINTS_ENABLED:
+        return {
+            "enabled": False,
+            **_legacy_feature_detail(
+                "optimizer endpoints",
+                "AEGIS_ENABLE_OPTIMIZER_ENDPOINTS",
+            ),
+        }
+
     if not unified_optimizer:
         return {"enabled": False, "error": "Unified optimizer not available"}
 
@@ -926,11 +1119,10 @@ async def record_trade_to_optimizer(
         volatility: Market volatility
         fibonacci_level: Fibonacci retracement level
     """
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     try:
-        trade_record = TradeRecord(
+        trade_record = TradeRecordClass(
             entry_price=entry_price,
             exit_price=exit_price,
             pnl=pnl,
@@ -957,8 +1149,7 @@ async def record_trade_to_optimizer(
 @app.get("/api/optimizer/weights")
 async def get_unified_optimizer_weights():
     """Get current phase weights from unified optimizer"""
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     return {
         "weights": unified_optimizer.weights.copy(),
@@ -970,8 +1161,7 @@ async def get_unified_optimizer_weights():
 @app.get("/api/optimizer/stats")
 async def get_optimizer_statistics():
     """Get optimizer trading statistics"""
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     return {
         "stats": unified_optimizer.stats.copy(),
@@ -987,8 +1177,7 @@ async def trigger_periodic_optimization(optimization_type: str = Query("light"))
     Args:
         optimization_type: "light" (grid search) or "heavy" (bayesian)
     """
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     if len(unified_optimizer.trade_history) < 10:
         return {
@@ -1010,8 +1199,7 @@ async def trigger_periodic_optimization(optimization_type: str = Query("light"))
 @app.post("/api/optimizer/save-config")
 async def save_unified_optimizer_config(filepath: str = Query("unified_optimizer_config.yaml")):
     """Save unified optimizer configuration to YAML file"""
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     try:
         full_path = os.path.join(
@@ -1036,8 +1224,7 @@ async def save_unified_optimizer_config(filepath: str = Query("unified_optimizer
 @app.post("/api/optimizer/load-config")
 async def load_unified_optimizer_config(filepath: str = Query("unified_optimizer_config.yaml")):
     """Load unified optimizer configuration from YAML file"""
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     try:
         full_path = os.path.join(
@@ -1062,8 +1249,7 @@ async def load_unified_optimizer_config(filepath: str = Query("unified_optimizer
 @app.get("/api/optimizer/trade-history")
 async def get_trade_history(limit: int = Query(20)):
     """Get recent trade history"""
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     try:
         recent_trades = unified_optimizer.trade_history[-limit:]
@@ -1094,8 +1280,7 @@ async def get_trade_history(limit: int = Query(20)):
 @app.get("/api/optimizer/optimization-history")
 async def get_optimization_history(limit: int = Query(10)):
     """Get recent optimization history"""
-    if not unified_optimizer:
-        raise HTTPException(status_code=503, detail="Unified optimizer not available")
+    _require_optimizer_runtime()
 
     try:
         history = unified_optimizer.optimization_history[-limit:]
