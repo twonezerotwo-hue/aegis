@@ -241,10 +241,10 @@ def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timefram
             scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
 
     # ── Fundamental ──────────────────────────────────────────────────────────
+    # FIX: quality="mock" (Glassnode key yok) olsa bile MVRV/NUPL değerleri
+    # mevcut — score hesaplanır, data_status=PARTIAL_FALLBACK olarak işaretlenir.
+    # Eski kod fundamental=None yapıyordu → score 0.0 kalıyordu.
     fundamental = payloads.get("fundamental")
-    if fundamental:
-        if str(fundamental.get("quality", "")).strip().lower() == "mock":
-            fundamental = None
     if fundamental:
         nupl = fundamental.get("nupl")
         mvrv = fundamental.get("mvrv_z_score")

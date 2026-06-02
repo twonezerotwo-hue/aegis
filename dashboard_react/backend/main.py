@@ -705,6 +705,10 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
         ]
         macro_timestamp = _clean_timestamp(macro_metrics.get("timestamp")) or _clean_timestamp(macro_metrics.get("last_updated"))
         effective_timestamp = _latest_timestamp(macro_timestamp, *metric_timestamps)
+        # FIX: "FALLBACK" if dashboard_fallback_used else "" satırı kaldırıldı.
+        # dashboard_fallback_used=True olduğunda (herhangi modül PARTIAL_FALLBACK ise)
+        # bu satır listeye "FALLBACK" ekliyordu → _aggregate_status her zaman "FALLBACK"
+        # dönüyordu. Gerçek aggregate modül statülerinden gelmeli.
         dashboard_status = _aggregate_status([
             module_statuses["touche"],
             module_statuses["fundamental"],
@@ -712,24 +716,17 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             module_statuses["sentinel"],
             module_statuses["news"],
             str(macro_metrics.get("data_status", "")).upper(),
-            "FALLBACK" if dashboard_fallback_used else "",
-            "UNKNOWN" if effective_timestamp is None else "",
         ])
         consensus_timestamp = _latest_timestamp(
             _payload_timestamp("touche"),
             _payload_timestamp("fundamental"),
             _payload_timestamp("news"),
         )
+        # FIX: aynı "FALLBACK" enjeksiyon hatası — gerçek modül statülerinden aggregate al
         consensus_status = _aggregate_status([
             module_statuses["touche"],
             module_statuses["fundamental"],
             module_statuses["news"],
-            "FALLBACK" if (
-                module_statuses["touche"] in {"FALLBACK", "PARTIAL_FALLBACK"}
-                or module_statuses["fundamental"] in {"FALLBACK", "PARTIAL_FALLBACK"}
-                or module_statuses["news"] in {"FALLBACK", "PARTIAL_FALLBACK"}
-            ) else "",
-            "UNKNOWN" if consensus_timestamp is None else "",
         ])
 
         service_states = {
