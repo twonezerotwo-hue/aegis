@@ -5,6 +5,7 @@
  */
 
 import React from "react";
+import { LineChart, Line, ResponsiveContainer, Tooltip, ReferenceLine } from "recharts";
 import type { ConsensusResponse, MacroViewModel } from "../../types/dashboardV2";
 import { DataStatusBadge } from "../ui/DataStatusBadge";
 import { formatDataAge } from "../../utils/dataFreshness";
@@ -16,6 +17,18 @@ interface DailyPnL {
   kill_switch_threshold: number;
   kill_switch_active: boolean;
   message: string;
+}
+
+interface EquityPoint { timestamp: string; balance: number; }
+interface OpenPosition { symbol: string; quantity: number; entry_price: number; current_price?: number; pnl?: number; }
+interface PaperSession {
+  current_balance: number;
+  initial_capital: number;
+  pnl: number;
+  pnl_pct: number;
+  equity_curve: EquityPoint[];
+  positions: OpenPosition[];
+  trades: { id: string; side: string; price: number; quantity: number; }[];
 }
 
 interface RationaleState {
@@ -139,68 +152,116 @@ const KararPaneli: React.FC<{ consensus: ConsensusResponse | null; loading: bool
 
 // ── Zone 2: Performans ────────────────────────────────────────────────────────
 
-const PerformansPaneli: React.FC<{ pnl: DailyPnL | null }> = ({ pnl }) => (
-  <div className="space-y-4">
-    <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
-      Günlük Performans
-    </p>
+const PerformansPaneli: React.FC<{ pnl: DailyPnL | null; paper: PaperSession | null }> = ({ pnl, paper }) => {
+  const initialCapital = paper?.initial_capital ?? 10000;
+  const curveData = (paper?.equity_curve ?? []).map(p => ({
+    ts: new Date(p.timestamp).getTime(),
+    v: p.balance,
+  }));
+  const firstBalance = curveData[0]?.v ?? initialCapital;
 
-    {pnl ? (
-      <>
-        {/* Günlük P&L büyük sayı */}
-        <div className="flex items-end justify-between">
+  return (
+    <div className="space-y-3">
+      <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+        Performans
+      </p>
+
+      {/* Kill switch P&L */}
+      {pnl && (
+        <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
           <div>
-            <p className="text-[9px] uppercase tracking-wider text-slate-600">Gerçekleşen P&L</p>
-            <p className={`font-mono text-3xl font-extrabold leading-none ${pnlColor(pnl.realized_pnl)}`}>
+            <p className="text-[9px] text-slate-600">Günlük P&L</p>
+            <p className={`font-mono text-lg font-bold ${pnlColor(pnl.realized_pnl)}`}>
               {pnl.realized_pnl >= 0 ? "+" : ""}${pnl.realized_pnl.toFixed(2)}
             </p>
           </div>
           <div className="text-right">
-            <p className="text-[9px] uppercase tracking-wider text-slate-600">İşlem</p>
-            <p className="font-mono text-xl font-bold text-white">{pnl.trade_count}</p>
+            <p className="text-[9px] text-slate-600">{pnl.trade_count} işlem</p>
+            <p className={`text-[10px] font-semibold ${pnl.kill_switch_active ? "text-rose-400" : "text-emerald-400"}`}>
+              {pnl.kill_switch_active ? "⚠ LİMİT" : "● Normal"}
+            </p>
           </div>
+        </div>
+      )}
+
+      {/* Equity Curve */}
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <p className="text-[9px] text-slate-600">Equity Curve — Paper</p>
+          {paper && (
+            <p className={`font-mono text-[10px] font-semibold ${pnlColor(paper.pnl)}`}>
+              ${paper.current_balance.toFixed(0)}
+              <span className="ml-1 text-[9px] text-slate-600">
+                ({paper.pnl >= 0 ? "+" : ""}{paper.pnl_pct.toFixed(1)}%)
+              </span>
+            </p>
+          )}
         </div>
 
-        {/* Kill switch progress bar */}
-        <div>
-          <div className="mb-1.5 flex items-center justify-between text-[9px]">
-            <span className="text-slate-600">Günlük limit</span>
-            <span className={pnl.kill_switch_active ? "font-semibold text-rose-400" : "text-slate-500"}>
-              {pnl.kill_switch_active
-                ? "⚠ LİMİT AŞILDI"
-                : `${Math.abs(pnl.realized_pnl).toFixed(2)} / $${(pnl.kill_switch_threshold * 10000).toFixed(0)}`
-              }
-            </span>
+        {curveData.length >= 2 ? (
+          <div className="h-16 w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={curveData} margin={{ top: 2, right: 2, left: 2, bottom: 2 }}>
+                <ReferenceLine y={firstBalance} stroke="#334155" strokeDasharray="3 3" />
+                <Line
+                  type="monotone"
+                  dataKey="v"
+                  stroke={paper && paper.pnl >= 0 ? "#34d399" : "#f87171"}
+                  strokeWidth={1.5}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+                <Tooltip
+                  contentStyle={{ background: "#0f172a", border: "1px solid #1e293b", borderRadius: 6, fontSize: 10 }}
+                  formatter={(v: number) => [`$${v.toFixed(0)}`, "Bakiye"]}
+                  labelFormatter={() => ""}
+                />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
-          <div className="h-1.5 rounded-full bg-slate-700/60">
-            <div
-              className={`h-1.5 rounded-full transition-all duration-500 ${
-                pnl.kill_switch_active ? "bg-rose-500" : "bg-amber-500"
-              }`}
-              style={{
-                width: `${Math.min(100, (Math.abs(pnl.realized_pnl) / (pnl.kill_switch_threshold * 10000)) * 100)}%`,
-              }}
-            />
+        ) : (
+          <div className="flex h-16 items-center justify-center rounded-lg border border-slate-800 bg-slate-950/30">
+            <p className="text-[9px] text-slate-700">
+              {paper ? "Yeterli veri yok" : "Paper trading başlatılmadı"}
+            </p>
           </div>
-        </div>
-
-        <p className="text-[9px] italic text-slate-700">
-          {pnl.message}
-        </p>
-      </>
-    ) : (
-      <div className="space-y-2 py-2">
-        <div className="text-center">
-          <p className="font-mono text-2xl font-bold text-slate-600">—</p>
-          <p className="text-[9px] text-slate-700">P&L verisi yükleniyor</p>
-        </div>
-        <p className="text-[9px] text-slate-700 text-center">
-          /api/pnl/daily endpoint'ine bağlanılıyor…
-        </p>
+        )}
       </div>
-    )}
-  </div>
-);
+
+      {/* Açık Pozisyonlar */}
+      <div>
+        <p className="mb-1.5 text-[9px] font-semibold uppercase tracking-wider text-slate-600">
+          Açık Pozisyonlar {paper?.positions?.length ? `(${paper.positions.length})` : ""}
+        </p>
+        {paper?.positions?.length ? (
+          <div className="space-y-1.5">
+            {paper.positions.slice(0, 3).map((pos, i) => (
+              <div key={i} className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950/30 px-2.5 py-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] font-bold text-slate-400">{pos.symbol.replace("/USDT", "")}</span>
+                  <span className="text-[9px] text-slate-600">{pos.quantity.toFixed(4)}</span>
+                </div>
+                <div className="text-right">
+                  <p className="font-mono text-[9px] text-slate-400">${pos.entry_price.toFixed(0)}</p>
+                  {pos.pnl !== undefined && (
+                    <p className={`font-mono text-[9px] font-semibold ${pnlColor(pos.pnl)}`}>
+                      {pos.pnl >= 0 ? "+" : ""}${pos.pnl.toFixed(1)}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+            {paper.positions.length > 3 && (
+              <p className="text-[9px] text-slate-700">+{paper.positions.length - 3} pozisyon daha</p>
+            )}
+          </div>
+        ) : (
+          <p className="text-[9px] italic text-slate-700">Açık pozisyon yok</p>
+        )}
+      </div>
+    </div>
+  );
+};
 
 // ── Zone 3: Risk Göstergesi ────────────────────────────────────────────────────
 
@@ -285,6 +346,20 @@ export const KontrolMerkezi: React.FC<KontrolProps> = ({
     text: "", source: null, loading: false,
   });
 
+  // Paper trading session — 30s polling
+  const [paper, setPaper] = React.useState<PaperSession | null>(null);
+  React.useEffect(() => {
+    const API = (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:8502";
+    const fetch_ = () =>
+      fetch(`${API}/api/paper/status`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => d && setPaper(d))
+        .catch(() => {});
+    fetch_();
+    const id = setInterval(fetch_, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
   const fetchRationale = React.useCallback(async () => {
     if (!btcConsensus || rationale.loading) return;
     setRationale(r => ({ ...r, loading: true }));
@@ -332,7 +407,7 @@ export const KontrolMerkezi: React.FC<KontrolProps> = ({
 
       {/* Zone 2: Performans */}
       <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-5 shadow-md">
-        <PerformansPaneli pnl={dailyPnl} />
+        <PerformansPaneli pnl={dailyPnl} paper={paper} />
       </div>
 
       {/* Zone 3: Risk */}

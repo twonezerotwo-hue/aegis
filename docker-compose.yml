@@ -233,7 +233,10 @@ services:
     ports:
       - "8001:8001"
     networks:
-      - aegis_network
+      aegis_network:
+      aegis_clean_v71_aegis_network:
+        aliases:
+          - touche-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -266,7 +269,10 @@ services:
     ports:
       - "8002:8002"
     networks:
-      - aegis_network
+      aegis_network:
+      aegis_clean_v71_aegis_network:
+        aliases:
+          - fundamental-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -294,7 +300,10 @@ services:
     ports:
       - "8003:8003"
     networks:
-      - aegis_network
+      aegis_network:
+      aegis_clean_v71_aegis_network:
+        aliases:
+          - quantum-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -330,7 +339,10 @@ services:
     ports:
       - "8004:8004"
     networks:
-      - aegis_network
+      aegis_network:
+      aegis_clean_v71_aegis_network:
+        aliases:
+          - sentinel-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -362,7 +374,10 @@ services:
     ports:
       - "8005:8005"
     networks:
-      - aegis_network
+      aegis_network:
+      aegis_clean_v71_aegis_network:
+        aliases:
+          - consensus-api
     depends_on:
       postgres:
         condition: service_healthy
@@ -578,6 +593,11 @@ services:
 networks:
   aegis_network:
     driver: bridge
+  # Nginx + diğer legacy servislerin ulaşabilmesi için external ağ.
+  # Container restart'ta alias'ların kaybolmasını önler — compose kalıcı yönetir.
+  aegis_clean_v71_aegis_network:
+    external: true
+    name: aegis_clean_v71_aegis_network
 
 volumes:
   postgres_data:
