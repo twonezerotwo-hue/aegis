@@ -33,188 +33,29 @@ _SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://sentinel-api:8004")
 _QUANTUM_URL = os.environ.get("QUANTUM_URL", "http://quantum-api:8003")
 
 
-async def _fetch_live_scores(symbol: str, timeframe: str) -> dict[str, Optional[float]]:
-    """
-    Fetch real-time module scores directly from each AI service.
-    Returns dict with keys: touche, fundamental, news, sentinel, quantum (all 0-1 or None).
-    """
-    symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"  # BTC/USDT → BTCUSDT
-    symbol_clean = symbol.replace("/USDT", "").replace("/", "")             # BTC/USDT → BTC
+import math as _math
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        results = await asyncio.gather(
-            client.get(f"{_TOUCHE_URL}/touche/analyze", params={"symbol": symbol_binance, "timeframe": timeframe}),
-            client.get(f"{_FUNDAMENTAL_URL}/fundamental/metrics", params={"symbol": symbol_clean, "timeframe": timeframe}),
-            client.get(f"{_NEWS_URL}/signals", params={"symbol": symbol_clean, "timeframe": timeframe}),
-            client.get(f"{_SENTINEL_URL}/sentinel/event_risk", params={"symbol": symbol_clean}),
-            return_exceptions=True,
-        )
+# ── Timeframe hassasiyet parametreleri ─────────────────────────────────────────
 
-    scores: dict[str, Optional[float]] = {"touche": None, "fundamental": None, "news": None, "sentinel": None, "quantum": 0.5}
+# News: haber yaşına göre exponential decay yarı-ömrü (saat)
+# Kısa TF = yakın haberlere daha fazla ağırlık
+_TF_NEWS_HALF_LIFE: dict[str, float] = {
+    "5m": 0.5, "15m": 1.0, "1h": 4.0, "4h": 12.0,
+    "1d": 48.0, "1w": 168.0, "1month": 720.0,
+}
 
-    # Touche: prefer the per-timeframe signal score; fall back to global EQS.
-    # The Touche service returns a single aggregated EQS plus per-TF signal labels.
-    # To make the Metrikler tab respond to timeframe changes, we map the selected
-    # TF's BUY/SELL/NEUTRAL label to a calibrated 0-1 score when available.
-    _TF_SIGNAL_SCORE: dict[str, float] = {
-        "BUY": 0.74,
-        "HOLD": 0.50,
-        "NEUTRAL": 0.50,
-        "SELL": 0.26,
-    }
-    try:
-        if not isinstance(results[0], Exception) and results[0].status_code == 200:
-            d = results[0].json()
-            tf_signals: dict = d.get("tf_signals") or {}
-            tf_key = timeframe.lower()
-            if tf_key in tf_signals:
-                # Timeframe-specific signal available — use it as the primary score
-                scores["touche"] = _TF_SIGNAL_SCORE.get(str(tf_signals[tf_key]).upper(), 0.50)
-            else:
-                # No per-TF signal for this timeframe — use global EQS aggregate
-                eqs = float(d.get("eqs") or d.get("eqs_score") or 50.0)
-                scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
-    except Exception as exc:
-        logger.debug("live_score touche error: %s", exc)
+# Fundamental: TF'e göre seviye (MVRV/NUPL mutlak) vs momentum ağırlığı
+# Kısa TF = momentum ağırlıklı, uzun TF = seviye ağırlıklı
+_TF_FUNDAMENTAL_LEVEL_W: dict[str, float] = {
+    "5m": 0.15, "15m": 0.25, "1h": 0.40,
+    "4h": 0.55, "1d": 0.70, "1w": 0.85, "1month": 0.95,
+}
 
-    # Fundamental: derive from NUPL + MVRV Z-score
-    try:
-        if not isinstance(results[1], Exception) and results[1].status_code == 200:
-            d = results[1].json()
-            if str(d.get("quality", "")).strip().lower() != "mock":
-                nupl = float(d.get("nupl") or 0.5)
-                mvrv = float(d.get("mvrv_z_score") or 2.0)
-                nupl_norm = min(max((nupl + 0.5) / 1.5, 0.0), 1.0)
-                mvrv_norm = min(max((4.0 - mvrv) / 4.0, 0.0), 1.0)
-                scores["fundamental"] = round(nupl_norm * 0.6 + mvrv_norm * 0.4, 4)
-    except Exception as exc:
-        logger.debug("live_score fundamental error: %s", exc)
-
-    # News: crypto_impact_score is 0-100
-    try:
-        if not isinstance(results[2], Exception) and results[2].status_code == 200:
-            d = results[2].json()
-            signals = d.get("signals") or []
-            if signals:
-                impact = float(signals[0].get("crypto_impact_score") or 50.0)
-                scores["news"] = min(max(impact / 100.0, 0.0), 1.0)
-    except Exception as exc:
-        logger.debug("live_score news error: %s", exc)
-
-    # Sentinel: event_risk_score 0-1, inverted (low risk = good)
-    try:
-        if not isinstance(results[3], Exception) and results[3].status_code == 200:
-            d = results[3].json()
-            risk = float(d.get("event_risk_score") or 0.5)
-            scores["sentinel"] = round(1.0 - min(max(risk, 0.0), 1.0), 4)
-    except Exception as exc:
-        logger.debug("live_score sentinel error: %s", exc)
-
-    return scores
-
-
-async def _fetch_module_details(symbol: str, timeframe: str) -> dict:
-    """
-    Fetch raw module data for summary generation.
-    Returns a dict with keys: touche, fundamental, news, sentinel (each a raw dict or None).
-    """
-    symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"
-    symbol_clean = symbol.replace("/USDT", "").replace("/", "")
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        results = await asyncio.gather(
-            client.get(f"{_TOUCHE_URL}/touche/analyze", params={"symbol": symbol_binance, "timeframe": timeframe}),
-            client.get(f"{_FUNDAMENTAL_URL}/fundamental/metrics", params={"symbol": symbol_clean, "timeframe": timeframe}),
-            client.get(f"{_NEWS_URL}/signals", params={"symbol": symbol_clean, "timeframe": timeframe}),
-            client.get(f"{_SENTINEL_URL}/sentinel/event_risk", params={"symbol": symbol_clean}),
-            return_exceptions=True,
-        )
-
-    details: dict = {"touche": None, "fundamental": None, "news": None, "sentinel": None}
-    try:
-        if not isinstance(results[0], Exception) and results[0].status_code == 200:
-            details["touche"] = results[0].json()
-    except Exception:
-        pass
-    try:
-        if not isinstance(results[1], Exception) and results[1].status_code == 200:
-            details["fundamental"] = results[1].json()
-    except Exception:
-        pass
-    try:
-        if not isinstance(results[2], Exception) and results[2].status_code == 200:
-            d = results[2].json()
-            sigs = d.get("signals") or []
-            details["news"] = sigs[0] if sigs else None
-    except Exception:
-        pass
-    try:
-        if not isinstance(results[3], Exception) and results[3].status_code == 200:
-            details["sentinel"] = results[3].json()
-    except Exception:
-        pass
-    return details
-
-
-def _compute_mtf_alignment(tf_signals: dict[str, str], current_tf: str) -> dict:
-    """
-    Multi-timeframe hizalanma skoru — Touche tf_signals'dan hesaplanır.
-
-    Mantık: İşlem yaptığımız timeframe (current_tf) ile daha yüksek timeframe'ler
-    aynı yönde mi? Üst TF'ler ONAY veriyorsa güven artar, çelişiyorsa düşer.
-
-    TF hiyerarşisi (düşükten yükseğe): 15m < 1h < 4h < 1d < 1w
-    """
-    TF_ORDER = {"15m": 1, "1h": 2, "4h": 3, "1d": 4, "1w": 5}
-    SIGNAL_VAL = {"BUY": 1, "SELL": -1, "NEUTRAL": 0, "HOLD": 0}
-
-    if not tf_signals or current_tf.lower() not in TF_ORDER:
-        return {"score": 0.5, "aligned": False, "direction": "NEUTRAL",
-                "confirming_tfs": [], "conflicting_tfs": [], "method": "unavailable"}
-
-    current_order = TF_ORDER.get(current_tf.lower(), 2)
-    current_signal = tf_signals.get(current_tf.lower(), "NEUTRAL").upper()
-    current_val = SIGNAL_VAL.get(current_signal, 0)
-
-    if current_val == 0:  # Mevcut TF nötr → hizalama anlamlı değil
-        return {"score": 0.5, "aligned": False, "direction": "NEUTRAL",
-                "confirming_tfs": [], "conflicting_tfs": [], "method": "neutral_base"}
-
-    confirming, conflicting = [], []
-    for tf, sig in tf_signals.items():
-        tf_order = TF_ORDER.get(tf.lower(), 0)
-        if tf_order <= current_order or tf_order == 0:
-            continue  # sadece üst TF'lere bak
-        sig_val = SIGNAL_VAL.get(sig.upper(), 0)
-        if sig_val == 0:
-            continue
-        if sig_val == current_val:
-            confirming.append(tf)
-        else:
-            conflicting.append(tf)
-
-    total_higher = len(confirming) + len(conflicting)
-    if total_higher == 0:
-        # Üst TF verisi yok → mütevazı güven
-        return {"score": 0.55 if current_val > 0 else 0.45,
-                "aligned": False, "direction": current_signal,
-                "confirming_tfs": [], "conflicting_tfs": [], "method": "no_higher_tf"}
-
-    alignment_ratio = len(confirming) / total_higher
-    # Tüm üst TF'ler onaylıyorsa 0.85, tümü çelişiyorsa 0.25
-    base = 0.5 + current_val * 0.35 * alignment_ratio
-    score = max(0.10, min(0.90, base))
-
-    return {
-        "score": round(score, 3),
-        "aligned": len(confirming) > len(conflicting),
-        "direction": current_signal,
-        "alignment_ratio": round(alignment_ratio, 2),
-        "confirming_tfs": confirming,
-        "conflicting_tfs": conflicting,
-        "higher_tf_count": total_higher,
-        "method": "tf_signals",
-    }
+# Touche multi-TF ağırlıkları: mesafeye göre yarıya düşür
+_TF_ORDER = {"15m": 1, "1h": 2, "4h": 3, "1d": 4, "1w": 5}
+_TF_SIGNAL_SCORE: dict[str, float] = {
+    "BUY": 0.74, "HOLD": 0.50, "NEUTRAL": 0.50, "SELL": 0.26,
+}
 
 
 async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, Optional[dict[str, Any]]]:
@@ -274,62 +115,93 @@ def _payload_verified(payload: Optional[dict[str, Any]]) -> bool:
 
 
 def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timeframe: str) -> dict[str, Optional[float]]:
-    """Servis yanıtlarından skorları çıkarır.
+    """
+    Servis yanıtlarından TF-duyarlı skorları çıkarır.
 
-    Her servis farklı schema döndürüyor — genel _payload_verified yerine
-    servis bazlı kontroller kullanılır:
-    - Touche:      data_mode="LIVE" ve fallback_used=false
-    - Fundamental: mvrv_z_score ve nupl alanları mevcut (kendi verified yok)
-    - News:        signals listesi dolu
-    - Sentinel:    event_risk_score mevcut (her zaman yararlı, verified bağımsız)
-    - Quantum:     modifier alanı mevcut
+    Touche:      Multi-TF ağırlıklı konsensüs (mevcut TF ağırlık=1, uzak TF'ler yarıya düşer)
+    Fundamental: Kısa TF = momentum ağırlıklı, uzun TF = seviye (MVRV/NUPL) ağırlıklı
+    News:        Exponential time decay — kısa TF'de eski haberler daha hızlı sönümlenir
+    Sentinel:    BY DESIGN TF bağımsız (makro göstergeler)
     """
     scores: dict[str, Optional[float]] = {
         "touche": None, "fundamental": None,
         "news": None, "sentinel": None, "quantum": None,
     }
-    tf_signal_score: dict[str, float] = {"BUY": 0.74, "HOLD": 0.50, "NEUTRAL": 0.50, "SELL": 0.26}
 
-    # ── Touche ───────────────────────────────────────────────────────────────
+    # ── TOUCHE: Multi-TF ağırlıklı konsensüs ─────────────────────────────────
     touche = payloads.get("touche")
     if touche and not touche.get("fallback_used", False):
         tf_signals = touche.get("tf_signals") or {}
         tf_key = timeframe.lower()
-        if tf_key in tf_signals and str(tf_signals[tf_key]).upper() in tf_signal_score:
-            scores["touche"] = tf_signal_score[str(tf_signals[tf_key]).upper()]
+        current_ord = _TF_ORDER.get(tf_key, 2)
+
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for tf, sig in tf_signals.items():
+            tf_ord = _TF_ORDER.get(tf.lower(), 0)
+            if tf_ord == 0:
+                continue
+            distance = abs(tf_ord - current_ord)
+            w = 1.0 / (2 ** distance)
+            val = _TF_SIGNAL_SCORE.get(str(sig).upper(), 0.50)
+            weighted_sum += val * w
+            weight_total += w
+
+        if weight_total > 0:
+            scores["touche"] = round(weighted_sum / weight_total, 4)
         else:
             eqs = float(touche.get("eqs") or touche.get("eqs_score") or 50.0)
             scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
 
-    # ── Fundamental ──────────────────────────────────────────────────────────
-    # FIX: quality="mock" (Glassnode key yok) olsa bile MVRV/NUPL değerleri
-    # mevcut — score hesaplanır, data_status=PARTIAL_FALLBACK olarak işaretlenir.
-    # Eski kod fundamental=None yapıyordu → score 0.0 kalıyordu.
+    # ── FUNDAMENTAL: TF-duyarlı MVRV/NUPL yorumu ─────────────────────────────
     fundamental = payloads.get("fundamental")
     if fundamental:
         nupl = fundamental.get("nupl")
         mvrv = fundamental.get("mvrv_z_score")
         if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
-            nupl_norm = min(max((float(nupl) + 0.5) / 1.5, 0.0), 1.0)
-            mvrv_norm = min(max((4.0 - float(mvrv)) / 4.0, 0.0), 1.0)
-            scores["fundamental"] = round(nupl_norm * 0.6 + mvrv_norm * 0.4, 4)
+            nupl_f = float(nupl); mvrv_f = float(mvrv)
 
-    # ── News ─────────────────────────────────────────────────────────────────
+            # Seviye skoru (uzun TF için — mutlak değerler önemli)
+            nupl_level = min(max((nupl_f + 0.5) / 1.5, 0.0), 1.0)
+            mvrv_level = min(max((4.0 - mvrv_f) / 4.0, 0.0), 1.0)
+            level_score = nupl_level * 0.6 + mvrv_level * 0.4
+
+            # Momentum skoru (kısa TF için — birikim bölgesinde mi?)
+            mvrv_healthy = 1.0 - min(1.0, abs(mvrv_f - 1.5) / 3.0)  # peak at MVRV=1.5
+            nupl_pos     = min(max((nupl_f + 0.1) / 0.8, 0.0), 1.0)
+            momentum_score = nupl_pos * 0.65 + mvrv_healthy * 0.35
+
+            lw = _TF_FUNDAMENTAL_LEVEL_W.get(timeframe, 0.55)
+            mw = 1.0 - lw
+            scores["fundamental"] = round(level_score * lw + momentum_score * mw, 4)
+
+    # ── NEWS: TF Relevance Decay ──────────────────────────────────────────────
+    # News servisi tek bir ANLIK agregasyon üretiyor (timestamp=NOW).
+    # Gerçek time-decay çalışmıyor (tüm ağırlıklar=1.0).
+    # Bunun yerine: kısa TF = haber tam etkili, uzun TF = ortaya çekilir.
+    # Mantık: 1h trader için bugünkü haber çok önemli.
+    #         1w trader için temel veriler daha önemli, haber ikincil.
+    # relevance_w × raw + (1 - relevance_w) × 0.50 (nötr)
+    _TF_NEWS_RELEVANCE: dict[str, float] = {
+        "5m": 1.00, "15m": 0.98, "1h": 0.92,
+        "4h": 0.80, "1d": 0.65, "1w": 0.45, "1month": 0.25,
+    }
     news = payloads.get("news")
     if news:
-        signals = news.get("signals") or []
-        if signals:
-            impact = float(signals[0].get("crypto_impact_score") or 50.0)
-            scores["news"] = min(max(impact / 100.0, 0.0), 1.0)
+        signals_raw = news.get("signals") or []
+        if signals_raw:
+            impact_raw = float(signals_raw[0].get("crypto_impact_score") or 50.0) / 100.0
+            relevance  = _TF_NEWS_RELEVANCE.get(timeframe, 0.80)
+            news_score = impact_raw * relevance + 0.50 * (1.0 - relevance)
+            scores["news"] = round(min(max(news_score, 0.0), 1.0), 4)
 
-    # ── Sentinel ─────────────────────────────────────────────────────────────
-    # Event risk skoru her zaman yararlı; PARTIAL_FALLBACK bile bilgi taşır
+    # ── SENTINEL: TF bağımsız (makro göstergeler) ────────────────────────────
     sentinel = payloads.get("sentinel")
     if sentinel and "event_risk_score" in sentinel:
         risk = float(sentinel.get("event_risk_score") or 0.5)
         scores["sentinel"] = round(1.0 - min(max(risk, 0.0), 1.0), 4)
 
-    # ── Quantum ──────────────────────────────────────────────────────────────
+    # ── QUANTUM ───────────────────────────────────────────────────────────────
     quantum = payloads.get("quantum")
     if quantum and "modifier" in quantum:
         modifier = quantum.get("modifier")
