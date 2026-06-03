@@ -352,6 +352,53 @@ def _binance_symbol(symbol: str) -> str:
     return f"{normalized}USDT"
 
 
+def _compute_macd(closes: list[float], fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
+    """MACD hesapla: histogram ve sinyal yönü."""
+    if len(closes) < slow + signal:
+        return {"histogram": 0.0, "direction": "NEUTRAL", "cross": None}
+    def ema(vals: list[float], period: int) -> list[float]:
+        k = 2.0 / (period + 1)
+        result = [vals[0]]
+        for v in vals[1:]:
+            result.append(v * k + result[-1] * (1 - k))
+        return result
+    ema_fast   = ema(closes, fast)
+    ema_slow   = ema(closes, slow)
+    macd_line  = [f - s for f, s in zip(ema_fast[slow-1:], ema_slow)]
+    signal_line = ema(macd_line, signal)
+    hist        = [m - s for m, s in zip(macd_line[signal-1:], signal_line)]
+    if not hist:
+        return {"histogram": 0.0, "direction": "NEUTRAL", "cross": None}
+    h_last = hist[-1]
+    h_prev = hist[-2] if len(hist) >= 2 else h_last
+    direction = "BULLISH" if h_last > 0 else "BEARISH" if h_last < 0 else "NEUTRAL"
+    cross = None
+    if h_prev < 0 and h_last > 0:
+        cross = "GOLDEN"   # histogram sıfır çizgisini yukarı geçti
+    elif h_prev > 0 and h_last < 0:
+        cross = "DEATH"    # histogram sıfır çizgisini aşağı geçti
+    return {"histogram": round(h_last, 6), "direction": direction, "cross": cross}
+
+
+def _compute_ema_trend(closes: list[float], fast: int = 20, slow: int = 50) -> dict:
+    """EMA20/EMA50 trendi ve fiyatın EMA'ya göre konumu."""
+    if len(closes) < slow:
+        return {"fast": None, "slow": None, "trend": "NEUTRAL", "price_vs_slow": None}
+    k_f = 2.0 / (fast + 1); k_s = 2.0 / (slow + 1)
+    ef = closes[0]; es = closes[0]
+    for c in closes[1:]:
+        ef = c * k_f + ef * (1 - k_f)
+        es = c * k_s + es * (1 - k_s)
+    price = closes[-1]
+    trend = "BULLISH" if ef > es else "BEARISH" if ef < es else "NEUTRAL"
+    return {
+        "ema_fast": round(ef, 2),
+        "ema_slow": round(es, 2),
+        "trend": trend,
+        "price_above_ema": price > es,
+    }
+
+
 async def _analyze_timeframe(symbol: str, timeframe: str) -> dict[str, Any]:
     if _data_fetcher is None:
         raise RuntimeError("service_not_initialized")
@@ -363,20 +410,28 @@ async def _analyze_timeframe(symbol: str, timeframe: str) -> dict[str, Any]:
     if len(closes) < 15:
         raise RuntimeError(f"insufficient_ohlcv_rows:{timeframe}")
 
-    eqs = round(min(95.0, max(5.0, _compute_rsi(closes))), 2)
+    rsi   = _compute_rsi(closes)
+    eqs   = round(min(95.0, max(5.0, rsi)), 2)
+    macd  = _compute_macd(closes)
+    ema   = _compute_ema_trend(closes)
     timestamp = fetch_meta.get("timestamp")
+
     return {
-        "eqs": eqs,
-        "signal": _signal_from_eqs(eqs),
-        "timestamp": timestamp,
-        "source": fetch_meta.get("source", "binance_public"),
-        "verified": bool(fetch_meta.get("verified")),
+        "eqs":      eqs,
+        "signal":   _signal_from_eqs(eqs),
+        "rsi":      round(rsi, 2),
+        "rsi_zone": "oversold" if rsi < 30 else "overbought" if rsi > 70 else "neutral",
+        "macd":     macd,
+        "ema_trend": ema,
+        "timestamp":   timestamp,
+        "source":      fetch_meta.get("source", "binance_public"),
+        "verified":    bool(fetch_meta.get("verified")),
         "data_status": fetch_meta.get("data_status", "UNKNOWN"),
-        "cached": bool(fetch_meta.get("cached")),
-        "row_count": len(closes),
+        "cached":      bool(fetch_meta.get("cached")),
+        "row_count":   len(closes),
         "range": {
             "start": df.index[0].isoformat() if len(df.index) else None,
-            "end": df.index[-1].isoformat() if len(df.index) else None,
+            "end":   df.index[-1].isoformat() if len(df.index) else None,
         },
     }
 

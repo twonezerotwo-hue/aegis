@@ -107,25 +107,27 @@ function whyLines(key: string, m: MetricRaw, tf: string): string[] {
   const summary = m.summary ?? "";
 
   if (key === "touche") {
-    // summary: "EQS 17.1 (küresel) · 15m: BUY · 1h: NEUTRAL · 4h: SELL · 1d: SELL · Çoğunluk SAT."
-    const tfMatches = summary.matchAll(/(\d+[mhd]+):\s*(BUY|SELL|NEUTRAL)/gi);
-    const tfs: { tf: string; sig: string }[] = [];
-    for (const m2 of tfMatches) tfs.push({ tf: m2[1].toLowerCase(), sig: m2[2].toUpperCase() });
-    const eqsMatch = summary.match(/EQS\s*([\d.]+)/);
-    const eqs = eqsMatch ? eqsMatch[1] : "—";
-    const current = tfs.find(t => t.tf === tf.toLowerCase());
-    const higher  = tfs.filter(t => ["4h","1d","1w"].includes(t.tf));
-    const conflict = higher.filter(t => current && t.sig !== current.sig && current.sig !== "NEUTRAL");
+    // summary: "EQS 17.1 (küresel) · 15m: BUY · 1h: NEUTRAL · 4h: SELL · 1d: SELL · Çoğunluk SAT. | 4H RSI=18↓(aşırı satım) MACD=↓ EMA=↓trend"
+    const tfMatches = [...summary.matchAll(/(\d+[mhd]+):\s*(BUY|SELL|NEUTRAL)/gi)];
+    const tfs: { tf: string; sig: string }[] = tfMatches.map(m2 => ({ tf: m2[1].toLowerCase(), sig: m2[2].toUpperCase() }));
+    const eqsMatch  = summary.match(/EQS\s*([\d.]+)/);
+    const eqs       = eqsMatch ? eqsMatch[1] : "—";
+    const indMatch  = summary.match(/\|\s*([^|]+RSI[^|]+)/);  // "4H RSI=18↓ MACD=↓ EMA=↓trend"
+    const indStr    = indMatch ? indMatch[1].trim() : null;
+    const current   = tfs.find(t => t.tf === tf.toLowerCase());
+    const conflict  = tfs.filter(t => ["4h","1d","1w"].includes(t.tf) && current && t.sig !== current.sig && current.sig !== "NEUTRAL");
 
     const l1 = tfs.length
-      ? `Teknik analiz ${tfs.map(t => `${t.tf}=${t.sig}`).join(", ")} sinyali üretti; küresel EQS ${eqs}.`
-      : `Teknik analiz skoru ${eqs} ile hesaplandı.`;
-    const l2 = current
-      ? `Seçili ${tf.toUpperCase()} timeframe'de sinyal ${current.sig}${conflict.length ? `; ancak üst TF'ler (${conflict.map(t=>t.tf.toUpperCase()).join(", ")}) çelişiyor` : "; üst TF'ler de aynı yönde"}.`
-      : `Seçili TF (${tf}) için sinyal verisi yok, küresel EQS kullanıldı.`;
+      ? `Teknik analiz ${tfs.map(t => `${t.tf.toUpperCase()}=${t.sig}`).join(" · ")} sinyali ürettti; küresel EQS ${eqs}/100.`
+      : `Teknik analiz EQS ${eqs}/100 skoru üretti.`;
+    const l2 = indStr
+      ? `Öne çıkan göstergeler: ${indStr}.`
+      : current
+        ? `Seçili ${tf.toUpperCase()}'de sinyal ${current.sig}${conflict.length ? `; ancak üst TF'ler (${conflict.map(t=>t.tf.toUpperCase()).join(", ")}) çelişiyor` : "; üst TF'ler de aynı yönde"}.`
+        : `${tf.toUpperCase()} için sinyal yok, küresel EQS kullanıldı.`;
     const l3 = conflict.length
       ? `Çelişki yüzünden ağırlıklı oy ortaya çekildi → nihai skor %${pct}.`
-      : `TF'ler uyumlu olduğundan skor ${pct >= 65 ? "güçlü" : pct >= 45 ? "nötr" : "zayıf"} kaldı → %${pct}.`;
+      : `TF'ler uyumlu → skor ${pct >= 65 ? "güçlü AL bölgesi" : pct >= 45 ? "nötr bekleme" : "güçlü SAT bölgesi"}; %${pct}.`;
     return [l1, l2, l3];
   }
 

@@ -234,17 +234,40 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
     if module == "touche":
         eqs = raw.get("eqs") or raw.get("eqs_score") or round(score * 100, 1)
         tf = raw.get("tf_signals") or {}
+        td = raw.get("timeframe_details") or {}  # RSI/MACD/EMA per-TF
+
+        # TF sinyal listesi
         parts = [f"{k}: {v}" for k, v in tf.items() if k in ("15m", "1h", "4h", "1d")]
         signals = " · ".join(parts) if parts else "sinyal yok"
-        buy_count = sum(1 for v in tf.values() if str(v).upper() == "BUY")
+
+        # En belirgin indikatör bilgisini ekle (en düşük veya en yüksek EQS'li TF)
+        indicator_hint = ""
+        if td:
+            # En güçlü sinyal TF'ini bul
+            extremes = [(k, v) for k, v in td.items() if isinstance(v, dict) and "rsi" in v]
+            if extremes:
+                most_extreme = min(extremes, key=lambda x: abs(x[1].get("rsi", 50) - 50),
+                                   default=None) if len(extremes) > 1 else extremes[0]
+                # Değil, en extreme olan (en uzak 50'den)
+                most_extreme = max(extremes, key=lambda x: abs(x[1].get("rsi", 50) - 50))
+                tf_key, tf_data = most_extreme
+                rsi_v = tf_data.get("rsi", 50)
+                macd_d = (tf_data.get("macd") or {}).get("direction", "")
+                ema_tr = (tf_data.get("ema_trend") or {}).get("trend", "")
+                macd_cross = (tf_data.get("macd") or {}).get("cross")
+                cross_str = f" [{'altın çapraz' if macd_cross=='GOLDEN' else 'ölüm çaprazı'}]" if macd_cross else ""
+                indicator_hint = (
+                    f" | {tf_key.upper()} RSI={rsi_v:.0f}"
+                    f"{'↓(aşırı satım)' if rsi_v < 30 else '↑(aşırı alım)' if rsi_v > 70 else ''}"
+                    f" MACD={'↑' if macd_d=='BULLISH' else '↓' if macd_d=='BEARISH' else '→'}"
+                    f" EMA={'↑trend' if ema_tr=='BULLISH' else '↓trend' if ema_tr=='BEARISH' else '→'}"
+                    f"{cross_str}"
+                )
+
+        buy_count  = sum(1 for v in tf.values() if str(v).upper() == "BUY")
         sell_count = sum(1 for v in tf.values() if str(v).upper() == "SELL")
-        if buy_count > sell_count:
-            bias = "Çoğunluk AL"
-        elif sell_count > buy_count:
-            bias = "Çoğunluk SAT"
-        else:
-            bias = "Karışık sinyal"
-        return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}."
+        bias = "Çoğunluk AL" if buy_count > sell_count else "Çoğunluk SAT" if sell_count > buy_count else "Karışık sinyal"
+        return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}.{indicator_hint}"
 
     if module == "fundamental":
         mvrv = raw.get("mvrv_z_score")
