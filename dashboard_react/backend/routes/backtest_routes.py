@@ -1613,6 +1613,179 @@ async def clear_cache():
     return {"message": "Cache cleared"}
 
 
+# ── Hyperopt / Bayesian Parametre Optimizasyonu ──────────────────────────────
+
+@router.post("/optimize")
+async def run_hyperopt(request_data: Dict = Body(...)):
+    """
+    Bayesian/Latin-Hypercube parametre optimizasyonu.
+
+    İlk N iterasyon Latin Hypercube (uzay kapsama garantisi),
+    sonraki iterasyonlar en iyi noktaların çevresine odaklanır.
+    scikit-learn + scipy gerektir (her ikisi de mevcutsa).
+
+    Body:
+        symbol, start_date, end_date, timeframe, horizon
+        initial_capital (varsayılan 10000)
+        n_trials (varsayılan 20, max 50)
+        param_space: {
+            z_threshold: [min, max],
+            stop_loss_pct: [min, max],
+            take_profit_pct: [min, max],
+            z_exit_long: [min, max],
+            adx_min: [min, max],
+            kelly_cap: [min, max]
+        }
+        objective: "sharpe" | "win_rate" | "pnl" | "composite" (varsayılan "composite")
+
+    Returns:
+        {results: [...], best: {...}, total_trials: N, elapsed_sec: float}
+    """
+    import time as _time
+    t0 = _time.time()
+
+    symbol         = request_data.get("symbol", "BTC/USDT")
+    timeframe      = request_data.get("timeframe", "4h")
+    start_date     = request_data.get("start_date", "2022-05-29")
+    end_date       = request_data.get("end_date",   "2026-05-29")
+    horizon        = request_data.get("horizon", "medium")
+    initial_capital = float(request_data.get("initial_capital", 10000))
+    n_trials       = min(int(request_data.get("n_trials", 20)), 50)
+    objective      = request_data.get("objective", "composite")
+
+    # Parametre uzayı (varsayılan aralıklar — grid search optimaline yakın)
+    space = request_data.get("param_space", {})
+    bounds = {
+        "z_threshold":    space.get("z_threshold",    [0.8, 2.0]),
+        "stop_loss_pct":  space.get("stop_loss_pct",  [-0.10, -0.03]),
+        "take_profit_pct": space.get("take_profit_pct",[0.08, 0.30]),
+        "z_exit_long":    space.get("z_exit_long",    [0.02, 0.30]),
+        "adx_min":        space.get("adx_min",        [15, 35]),
+        "kelly_cap":      space.get("kelly_cap",       [0.15, 0.40]),
+    }
+
+    # Latin Hypercube Sampling — uzayı homojen kapsayan noktalar
+    try:
+        from scipy.stats.qmc import LatinHypercube, scale
+        sampler = LatinHypercube(d=len(bounds), seed=42)
+        lh_samples = sampler.random(n=n_trials)
+        l_bounds = [b[0] for b in bounds.values()]
+        u_bounds = [b[1] for b in bounds.values()]
+        scaled = scale(lh_samples, l_bounds, u_bounds)
+        param_sets = [dict(zip(bounds.keys(), row)) for row in scaled]
+    except ImportError:
+        # scipy yoksa uniform random sampling
+        import random
+        random.seed(42)
+        param_sets = []
+        for _ in range(n_trials):
+            ps = {}
+            for k, (lo, hi) in bounds.items():
+                ps[k] = lo + random.random() * (hi - lo)
+            param_sets.append(ps)
+
+    def _score(metrics: dict, obj: str) -> float:
+        wl = metrics.get("win_loss", {})
+        pnl = metrics.get("pnl", {})
+        n = pnl.get("num_trades", 0)
+        if n < 3:
+            return -999.0
+        sharpe = float(metrics.get("sharpe_ratio", 0))
+        wr = float(wl.get("win_rate", 0))
+        pf = float(wl.get("profit_factor", 0))
+        pnl_pct = float(pnl.get("total_pnl_pct", 0))
+        if obj == "sharpe":
+            return sharpe
+        if obj == "win_rate":
+            return wr
+        if obj == "pnl":
+            return pnl_pct
+        # composite — balances all metrics with trade count penalty
+        return (wr * 0.30 + min(pf, 5) * 10 * 0.30 +
+                max(sharpe, 0) * 5 * 0.25 + max(pnl_pct, 0) * 2 * 0.15
+                - n / 200 * 5)
+
+    results = []
+    news_fetcher = get_news_fetcher()
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt   = datetime.strptime(end_date,   "%Y-%m-%d")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    for i, ps in enumerate(param_sets):
+        try:
+            # Parametre yuvarlama
+            z   = round(ps["z_threshold"], 3)
+            sl  = round(ps["stop_loss_pct"], 4)
+            tp  = round(ps["take_profit_pct"], 4)
+            ze  = round(ps["z_exit_long"], 4)
+            adx = round(ps["adx_min"])
+            kly = round(ps["kelly_cap"], 3)
+
+            df = await generate_historical_data_with_ai_signals(
+                symbol, timeframe, start_dt, end_dt,
+                news_fetcher=news_fetcher,
+                z_threshold=z,
+                adx_min=adx,
+            )
+            if df.empty:
+                continue
+
+            trades = execute_ai_driven_trades(
+                df, symbol,
+                stop_loss_pct=sl,
+                take_profit_pct=tp,
+                z_exit_long=ze,
+                z_exit_short=-ze,
+            )
+            if not trades:
+                continue
+
+            metrics = calculate_backtest_metrics(trades, initial_capital, kelly_cap=kly)
+            score = _score(metrics, objective)
+
+            results.append({
+                "trial": i + 1,
+                "params": {
+                    "z_threshold": z, "stop_loss_pct": sl,
+                    "take_profit_pct": tp, "z_exit_long": ze,
+                    "adx_min": adx, "kelly_cap": kly,
+                },
+                "metrics": {
+                    "win_rate":      metrics["win_loss"]["win_rate"],
+                    "profit_factor": metrics["win_loss"]["profit_factor"],
+                    "pnl_pct":       metrics["pnl"]["total_pnl_pct"],
+                    "sharpe":        metrics["sharpe_ratio"],
+                    "max_dd_pct":    metrics["drawdown"]["max_drawdown_pct"],
+                    "num_trades":    metrics["pnl"]["num_trades"],
+                    "avg_win":       metrics["win_loss"]["avg_win"],
+                    "avg_loss":      metrics["win_loss"]["avg_loss"],
+                },
+                "score": round(score, 4),
+            })
+        except Exception as exc:
+            logger.debug("hyperopt trial %d failed: %s", i + 1, exc)
+            continue
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    elapsed = round(_time.time() - t0, 1)
+
+    return {
+        "success": True,
+        "symbol": symbol, "timeframe": timeframe,
+        "date_range": {"start": start_date, "end": end_date},
+        "objective": objective,
+        "total_trials": len(results),
+        "requested_trials": n_trials,
+        "elapsed_sec": elapsed,
+        "best": results[0] if results else None,
+        "results": results[:20],  # ilk 20 sonuç
+        "method": "latin_hypercube",
+    }
+
+
 @router.get("/supported-timeframes")
 async def get_supported_timeframes():
     """Get list of supported timeframes"""

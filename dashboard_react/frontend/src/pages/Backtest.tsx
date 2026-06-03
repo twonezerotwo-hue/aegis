@@ -1,6 +1,186 @@
 import React, { useState, useEffect } from 'react';
 import { backtestApi, BacktestResult, AIBacktestParams } from '../services/backtestApi';
 
+const API = (import.meta.env.VITE_API_URL as string | undefined) || 'http://localhost:8502';
+
+// ── Hyperopt Panel ────────────────────────────────────────────────────────────
+interface HyperoptTrial {
+  trial: number;
+  params: { z_threshold: number; stop_loss_pct: number; take_profit_pct: number; z_exit_long: number; adx_min: number; kelly_cap: number; };
+  metrics: { win_rate: number; profit_factor: number; pnl_pct: number; sharpe: number; max_dd_pct: number; num_trades: number; };
+  score: number;
+}
+interface HyperoptResult {
+  success: boolean; symbol: string; timeframe: string;
+  total_trials: number; elapsed_sec: number; objective: string;
+  best: HyperoptTrial | null; results: HyperoptTrial[];
+}
+
+const HyperoptPanel: React.FC<{ symbol: string; timeframe: string; startDate: string; endDate: string }> = ({
+  symbol, timeframe, startDate, endDate,
+}) => {
+  const [nTrials, setNTrials] = useState(20);
+  const [objective, setObjective] = useState('composite');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<HyperoptResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    setLoading(true); setError(null); setResult(null);
+    try {
+      const r = await fetch(`${API}/backtest/optimize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, timeframe, start_date: startDate, end_date: endDate,
+          n_trials: nTrials, objective, initial_capital: 10000 }),
+      });
+      const d = await r.json();
+      if (!d.success) throw new Error(d.error || 'Optimize failed');
+      setResult(d);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Hata');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const pct = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+  const fmt = (v: number, d = 2) => v.toFixed(d);
+
+  return (
+    <div className="rounded-2xl border border-violet-500/30 bg-slate-900 p-5">
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-violet-400">⚡ Hyperopt</span>
+          <span className="text-[9px] text-slate-600">Latin Hypercube + Bayesian</span>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <label className="text-[10px] text-slate-500">Deneme</label>
+            <select value={nTrials} onChange={e => setNTrials(+e.target.value)}
+              className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[10px] text-slate-300">
+              {[10,20,30,50].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <label className="text-[10px] text-slate-500">Hedef</label>
+            <select value={objective} onChange={e => setObjective(e.target.value)}
+              className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[10px] text-slate-300">
+              <option value="composite">Bileşik</option>
+              <option value="sharpe">Sharpe</option>
+              <option value="win_rate">Win Rate</option>
+              <option value="pnl">PnL</option>
+            </select>
+          </div>
+          <button onClick={run} disabled={loading}
+            className="rounded-lg border border-violet-500/50 bg-violet-500/10 px-4 py-1.5 text-[10px] font-bold text-violet-300 hover:bg-violet-500/20 disabled:opacity-40 transition-colors">
+            {loading ? `Çalışıyor… (${nTrials} deneme)` : '▶ Optimize'}
+          </button>
+        </div>
+      </div>
+
+      {error && <p className="mb-3 text-xs text-rose-400">{error}</p>}
+
+      {loading && (
+        <div className="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-700 border-t-violet-400" />
+          <p className="text-[11px] text-slate-400">{nTrials} farklı parametre kombinasyonu deneniyor…</p>
+        </div>
+      )}
+
+      {result && (
+        <div className="space-y-4">
+          {/* Özet */}
+          <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-3">
+            <p className="mb-1 text-[10px] text-slate-500">
+              {result.total_trials} deneme · {result.elapsed_sec}s · Hedef: {result.objective}
+            </p>
+            {result.best && (
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+                {[
+                  { l: 'Win Rate', v: `${result.best.metrics.win_rate.toFixed(1)}%` },
+                  { l: 'P. Factor', v: fmt(result.best.metrics.profit_factor) },
+                  { l: 'PnL', v: pct(result.best.metrics.pnl_pct) },
+                  { l: 'Sharpe', v: fmt(result.best.metrics.sharpe) },
+                  { l: 'Max DD', v: `${result.best.metrics.max_dd_pct.toFixed(1)}%` },
+                  { l: 'İşlem', v: String(result.best.metrics.num_trades) },
+                ].map(({ l, v }) => (
+                  <div key={l} className="text-center">
+                    <p className="text-[8px] uppercase text-slate-600">{l}</p>
+                    <p className="font-mono text-[12px] font-bold text-white">{v}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+            {result.best && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                <p className="text-[9px] text-slate-500">En iyi parametreler:</p>
+                {Object.entries(result.best.params).map(([k, v]) => (
+                  <span key={k} className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[9px] text-violet-300">
+                    {k}={typeof v === 'number' ? v.toFixed(3) : v}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Sonuç tablosu */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-[9px]">
+              <thead>
+                <tr className="border-b border-slate-800 text-left text-slate-600">
+                  <th className="pb-1.5 pr-2">#</th>
+                  <th className="pb-1.5 pr-2">WR%</th>
+                  <th className="pb-1.5 pr-2">PF</th>
+                  <th className="pb-1.5 pr-2">PnL%</th>
+                  <th className="pb-1.5 pr-2">Sharpe</th>
+                  <th className="pb-1.5 pr-2">İşlem</th>
+                  <th className="pb-1.5 pr-2">z_thr</th>
+                  <th className="pb-1.5 pr-2">sl</th>
+                  <th className="pb-1.5 pr-2">tp</th>
+                  <th className="pb-1.5 pr-2">adx</th>
+                  <th className="pb-1.5">Skor</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.results.slice(0, 10).map((r, i) => (
+                  <tr key={r.trial} className={`border-b border-slate-800/50 ${i === 0 ? 'bg-violet-500/5' : ''}`}>
+                    <td className="py-1 pr-2 font-mono text-slate-500">{i + 1}</td>
+                    <td className={`py-1 pr-2 font-mono font-semibold ${r.metrics.win_rate >= 50 ? 'text-emerald-400' : 'text-slate-400'}`}>
+                      {r.metrics.win_rate.toFixed(1)}
+                    </td>
+                    <td className={`py-1 pr-2 font-mono ${r.metrics.profit_factor >= 1.5 ? 'text-emerald-400' : 'text-slate-400'}`}>
+                      {r.metrics.profit_factor.toFixed(2)}
+                    </td>
+                    <td className={`py-1 pr-2 font-mono ${r.metrics.pnl_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {pct(r.metrics.pnl_pct)}
+                    </td>
+                    <td className={`py-1 pr-2 font-mono ${r.metrics.sharpe >= 1 ? 'text-emerald-400' : 'text-slate-400'}`}>
+                      {r.metrics.sharpe.toFixed(2)}
+                    </td>
+                    <td className="py-1 pr-2 font-mono text-slate-400">{r.metrics.num_trades}</td>
+                    <td className="py-1 pr-2 font-mono text-slate-500">{r.params.z_threshold.toFixed(2)}</td>
+                    <td className="py-1 pr-2 font-mono text-slate-500">{r.params.stop_loss_pct.toFixed(3)}</td>
+                    <td className="py-1 pr-2 font-mono text-slate-500">{r.params.take_profit_pct.toFixed(2)}</td>
+                    <td className="py-1 pr-2 font-mono text-slate-500">{r.params.adx_min}</td>
+                    <td className="py-1 font-mono font-semibold text-violet-400">{r.score.toFixed(1)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {!result && !loading && (
+        <p className="text-center text-[10px] text-slate-700 py-4">
+          Latin Hypercube örnekleme ile {nTrials} parametre kombinasyonu dener, en iyi konfigürasyonu bulur.
+        </p>
+      )}
+    </div>
+  );
+};
+
 const Backtest: React.FC = () => {
   const [symbol, setSymbol] = useState('BTC/USDT');
   const [timeframe, setTimeframe] = useState('1h');
@@ -332,6 +512,14 @@ const Backtest: React.FC = () => {
           </p>
         </div>
       )}
+
+      {/* ── Hyperopt Panel ─────────────────────────────────────────────────── */}
+      <HyperoptPanel
+        symbol={symbol}
+        timeframe={timeframe}
+        startDate={startDate}
+        endDate={endDate}
+      />
     </div>
   );
 };
