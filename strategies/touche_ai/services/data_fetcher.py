@@ -132,13 +132,29 @@ class BinanceDataFetcher:
         except Exception:
             self._redis = None
 
+    # Binance'de olmayan emtia sembollerinin yfinance karşılıkları
+    # XAG/XAU Binance spot'ta yok; yfinance vadeli kontrat verisi kullanılır
+    _YFINANCE_SYMBOL_MAP: Dict[str, str] = {
+        "XAGUSDT": "SI=F",   # Gümüş (Silver Futures)
+        "XAUUSDT": "GC=F",   # Altın (Gold Futures)
+        "WTIUSDT": "CL=F",   # Ham Petrol (WTI Crude)
+        "BRENTUSDT": "BZ=F", # Brent Petrol
+    }
+
+    # yfinance interval → Binance interval dönüşümü
+    _YF_INTERVAL_MAP: Dict[str, str] = {
+        "1m": "1m", "3m": "5m", "5m": "5m", "15m": "15m", "30m": "30m",
+        "1h": "60m", "2h": "60m", "4h": "1d", "6h": "1d", "8h": "1d",
+        "12h": "1d", "1d": "1d", "3d": "1wk", "1w": "1wk", "1M": "1mo",
+    }
+
     async def fetch_ohlcv(self, symbol: str, interval: str = "1h", limit: int = 100) -> pd.DataFrame:
         """
-        Fetch OHLCV candles from Binance.
+        Fetch OHLCV candles.
 
         Modes:
-        - LIVE: try live Binance, then Redis cache
-        - CACHE_ONLY: use cached real data only
+        - LIVE: Binance önce, başarısız olursa yfinance (XAG/XAU için)
+        - CACHE_ONLY: sadece Redis cache
         """
         normalized_symbol = symbol.upper().strip()
         normalized_mode = self._data_mode.upper()
@@ -154,6 +170,28 @@ class BinanceDataFetcher:
         try:
             return await self._fetch_binance_live(normalized_symbol, interval, limit, cache_key)
         except DataUnavailableError:
+            # ── yfinance fallback: Binance'de olmayan emtialar ─────────────
+            yf_ticker = self._YFINANCE_SYMBOL_MAP.get(normalized_symbol)
+            if yf_ticker:
+                try:
+                    df = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: self._fetch_yfinance(yf_ticker, interval, limit),
+                    )
+                    self._last_fetch_meta = {
+                        "source": f"yfinance_{yf_ticker}",
+                        "timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
+                        "verified": True,
+                        "fallback_used": True,
+                        "cached": False,
+                        "data_status": "LIVE",
+                        "warning": f"Binance'de spot çifti yok; yfinance ({yf_ticker}) kullanıldı.",
+                    }
+                    return df
+                except Exception as yf_exc:
+                    logger.warning("yfinance fallback failed for %s (%s): %s",
+                                   normalized_symbol, yf_ticker, yf_exc)
+
             if self._allow_mock:
                 self._last_fetch_meta = {
                     "source": "explicit_mock_opt_in",
@@ -166,6 +204,48 @@ class BinanceDataFetcher:
                 }
                 return _mock_ohlcv(normalized_symbol, interval, limit)
             raise
+
+    def _fetch_yfinance(self, yf_ticker: str, binance_interval: str, limit: int) -> pd.DataFrame:
+        """
+        yfinance'ten OHLCV verisi çek ve Binance formatına dönüştür.
+        Bloklanabilir (executor içinde çalışmalı).
+        """
+        import yfinance as yf
+
+        yf_interval = self._YF_INTERVAL_MAP.get(binance_interval, "1d")
+
+        # yfinance period: limit bar için yeterli süreyi hesapla
+        if yf_interval in ("1m",):
+            period = "7d"
+        elif yf_interval in ("5m", "15m", "30m"):
+            period = "60d"
+        elif yf_interval in ("60m",):
+            period = "730d"
+        else:
+            period = "max"
+
+        hist = yf.Ticker(yf_ticker).history(period=period, interval=yf_interval)
+        if hist.empty:
+            raise DataUnavailableError(f"yfinance returned empty data for {yf_ticker}")
+
+        hist = hist.tail(limit).copy()
+        hist.index = hist.index.tz_localize("UTC") if hist.index.tzinfo is None else hist.index.tz_convert("UTC")
+
+        df = pd.DataFrame({
+            "open":         hist["Open"].astype(float),
+            "high":         hist["High"].astype(float),
+            "low":          hist["Low"].astype(float),
+            "close":        hist["Close"].astype(float),
+            "volume":       hist["Volume"].astype(float),
+            "close_time":   0,
+            "quote_volume": 0.0,
+            "trades":       0,
+            "taker_buy_base":  0.0,
+            "taker_buy_quote": 0.0,
+            "ignore":       0,
+        }, index=hist.index)
+        df.index.name = "timestamp"
+        return df
 
     async def fetch_ticker_24h(self, symbol: str) -> Dict[str, Any]:
         """Fetch 24h ticker statistics from Binance public REST."""

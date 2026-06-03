@@ -586,6 +586,98 @@ async def validate_price_endpoint(symbol: str):
     return vld.to_dict()
 
 
+# Fiyat ticker önbelleği — 30s TTL
+_price_cache: Dict[str, Any] = {}
+_PRICE_CACHE_TTL = 30.0
+
+# Emtia sembolleri yfinance'ten çekilir
+_COMMODITY_YF_MAP = {
+    "XAU/USDT": "GC=F",   # Altın
+    "XAG/USDT": "SI=F",   # Gümüş
+    "XAUUSDT":  "GC=F",
+    "XAGUSDT":  "SI=F",
+}
+
+
+def _fetch_yf_price_sync(yf_ticker: str) -> dict:
+    """yfinance fiyat çek — bloklama içinde."""
+    import yfinance as yf
+    t = yf.Ticker(yf_ticker)
+    hist = t.history(period="2d", interval="1m")
+    if hist.empty:
+        return {"price": 0.0, "change_24h_pct": 0.0}
+    last  = float(hist["Close"].iloc[-1])
+    prev  = float(hist["Close"].iloc[0]) if len(hist) > 1 else last
+    chg   = ((last - prev) / prev * 100) if prev else 0.0
+    return {"price": round(last, 4), "change_24h_pct": round(chg, 2)}
+
+
+@app.get("/api/price/ticker")
+async def price_ticker(symbol: str = Query(..., description="Sembol, örn: BTC/USDT veya XAU/USDT")):
+    """
+    Anlık fiyat + 24 saatlik değişim.
+
+    - BTC/ETH/SOL/XRP → Binance ticker
+    - XAU/XAG → yfinance (GC=F / SI=F)
+    30 saniye önbellekte tutulur.
+    """
+    sym = symbol.replace("%2F", "/").replace("%2f", "/").upper().strip()
+    now = __import__("time").time()
+
+    cached = _price_cache.get(sym)
+    if cached and (now - cached["_ts"]) < _PRICE_CACHE_TTL:
+        return {k: v for k, v in cached.items() if k != "_ts"}
+
+    yf_ticker = _COMMODITY_YF_MAP.get(sym)
+
+    if yf_ticker:
+        # Emtia: yfinance
+        loop = asyncio.get_event_loop()
+        data = await loop.run_in_executor(None, _fetch_yf_price_sync, yf_ticker)
+        result = {
+            "symbol":          sym,
+            "price":           data["price"],
+            "change_24h_pct":  data["change_24h_pct"],
+            "currency":        "USD",
+            "source":          f"yfinance ({yf_ticker})",
+            "available":       True,
+        }
+    else:
+        # Kripto: Binance ticker
+        binance_sym = sym.replace("/", "")
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(
+                    "https://api.binance.com/api/v3/ticker/24hr",
+                    params={"symbol": binance_sym},
+                )
+            if r.status_code == 200:
+                d = r.json()
+                result = {
+                    "symbol":         sym,
+                    "price":          round(float(d.get("lastPrice", 0)), 6),
+                    "change_24h_pct": round(float(d.get("priceChangePercent", 0)), 2),
+                    "currency":       "USDT",
+                    "source":         "binance",
+                    "available":      True,
+                }
+            else:
+                result = {
+                    "symbol": sym, "price": 0.0, "change_24h_pct": 0.0,
+                    "currency": "USDT", "source": "binance_error",
+                    "available": False, "error": f"HTTP {r.status_code}",
+                }
+        except Exception as exc:
+            result = {
+                "symbol": sym, "price": 0.0, "change_24h_pct": 0.0,
+                "currency": "USDT", "source": "error",
+                "available": False, "error": str(exc)[:120],
+            }
+
+    _price_cache[sym] = {**result, "_ts": now}
+    return result
+
+
 @app.get("/api/signals/mode")
 async def get_execution_mode():
     """Mevcut execution modunu döndür."""

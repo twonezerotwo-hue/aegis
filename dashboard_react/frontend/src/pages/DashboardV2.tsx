@@ -308,6 +308,29 @@ const DashboardV2Inner: React.FC = () => {
   const [metricsSymbol, setMetricsSymbol] = React.useState("BTC/USDT");
   const [metricsTimeframe, setMetricsTimeframe] = React.useState("1h");
   const metricsRefreshMs = ["4h", "1d", "1w", "1month"].includes(metricsTimeframe) ? 60000 : 10000;
+
+  // ── Fiyat ticker (30s önbellekli) ─────────────────────────────────────────
+  const [metricsTicker, setMetricsTicker] = React.useState<{
+    price: number; change_24h_pct: number; currency: string; available: boolean;
+  } | null>(null);
+
+  React.useEffect(() => {
+    const API = import.meta.env.VITE_API_URL || "http://localhost:8502";
+    const fetchTicker = () =>
+      fetch(`${API}/api/price/ticker?symbol=${encodeURIComponent(metricsSymbol)}`)
+        .then(r => r.json())
+        .then(d => setMetricsTicker({
+          price:          d.price ?? 0,
+          change_24h_pct: d.change_24h_pct ?? 0,
+          currency:       d.currency ?? "USD",
+          available:      d.available ?? false,
+        }))
+        .catch(() => setMetricsTicker(null));
+
+    fetchTicker();
+    const id = setInterval(fetchTicker, 30_000);
+    return () => clearInterval(id);
+  }, [metricsSymbol]);
   const { data: metricsData, loading: metricsLoading } = useMetrics(
     metricsSymbol,
     metricsTimeframe,
@@ -711,7 +734,7 @@ const DashboardV2Inner: React.FC = () => {
                 {/* ── Tek Panel ─────────────────────────────────────────────── */}
                 <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-5 shadow-md">
 
-                  {/* Header: consensus karar + sağlık noktaları */}
+                  {/* Header: consensus karar + fiyat + sağlık noktaları */}
                   {(() => {
                     const cons  = metricsData.consensus;
                     const act   = cons?.action ?? "HOLD";
@@ -729,9 +752,38 @@ const DashboardV2Inner: React.FC = () => {
                       { k: "sentinel",    label: "S" },
                       { k: "quantum",     label: "Q" },
                     ];
+                    // Fiyat formatı — büyük fiyatlar için kısalt
+                    const formatPrice = (p: number, cur: string) => {
+                      if (!p) return "—";
+                      const prefix = cur === "USDT" ? "$" : "$";
+                      if (p >= 1000) return `${prefix}${p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                      if (p >= 1)    return `${prefix}${p.toFixed(4)}`;
+                      return `${prefix}${p.toFixed(6)}`;
+                    };
+                    const chgCls = !metricsTicker ? "" :
+                      metricsTicker.change_24h_pct >= 0 ? "text-emerald-400" : "text-rose-400";
                     return (
                       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
+                          {/* Fiyat bloğu */}
+                          <div className="rounded-xl border border-slate-700/50 bg-slate-800/60 px-3 py-2 min-w-[110px]">
+                            <p className="text-[9px] font-semibold uppercase tracking-widest text-slate-500 mb-0.5">
+                              {METRICS_SYMBOLS.find(s => s.symbol === metricsSymbol)?.label ?? metricsSymbol}
+                            </p>
+                            {metricsTicker?.available ? (
+                              <div className="flex items-baseline gap-1.5">
+                                <span className="font-mono text-base font-bold text-white">
+                                  {formatPrice(metricsTicker.price, metricsTicker.currency)}
+                                </span>
+                                <span className={`font-mono text-[10px] font-semibold ${chgCls}`}>
+                                  {metricsTicker.change_24h_pct >= 0 ? "+" : ""}
+                                  {metricsTicker.change_24h_pct.toFixed(2)}%
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="font-mono text-sm text-slate-500">—</span>
+                            )}
+                          </div>
                           <span className={`inline-flex rounded-xl border px-4 py-1.5 text-lg font-extrabold ${actCls}`}>
                             {actTr}
                           </span>
