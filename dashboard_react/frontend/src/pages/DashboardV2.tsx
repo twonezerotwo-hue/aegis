@@ -12,8 +12,6 @@ import { MacroRegimeCommentary } from "../components/macro/MacroRegimeCommentary
 import { AllocationWithTip } from "../components/portfolio/AllocationWithTip";
 import { RealEstateDecisionPanel } from "../components/portfolio/RealEstateDecisionPanel";
 import { AssetConsensusCard } from "../components/assets/AssetConsensusCard";
-import { CrossAlignmentPanel } from "../components/validation/CrossAlignmentPanel";
-import type { AssetResult } from "../components/validation/CrossAlignmentPanel";
 import { GlobalHeader } from "../components/layout/GlobalHeader";
 import { Toast } from "../components/layout/Toast";
 import type { ToastItem, ToastTone } from "../components/layout/Toast";
@@ -363,15 +361,6 @@ const DashboardV2Inner: React.FC = () => {
     ? "HEALTHY"
     : effectiveMacro.status.toUpperCase();
 
-  const anyAssetReady = Object.values(assetConsensus).some((s) => !s.loading);
-
-  const alignmentAssets = React.useMemo<Record<string, AssetResult>>(() => {
-    const result: Record<string, AssetResult> = {};
-    for (const { key, label } of ASSETS) {
-      result[key] = { label, consensus: assetConsensus[key].data };
-    }
-    return result;
-  }, [assetConsensus]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -515,17 +504,6 @@ const DashboardV2Inner: React.FC = () => {
                 </div>
               </div>
             </ErrorBoundary>
-
-            {/* Cross-Validasyon */}
-            {effectiveMacro && anyAssetReady && (
-              <ErrorBoundary fallback="Cross-Validasyon">
-                <CrossAlignmentPanel
-                  macro={effectiveMacro}
-                  assets={alignmentAssets}
-                  vade={vade}
-                />
-              </ErrorBoundary>
-            )}
 
             {/* Real Estate Decision Layer — bottom of portfolio tab */}
             <ErrorBoundary fallback="Gayrimenkul Karar Paneli">
