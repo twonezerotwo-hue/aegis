@@ -99,6 +99,71 @@ const VADE_OPTIONS: { value: Vade; label: string; sub: string }[] = [
   { value: "long",   label: "Uzun",  sub: "6 Ay+" },
 ];
 
+// ── Modül açıklamaları — proper component (hooks kuralı: sadece burada) ──────
+const _MODULE_INFO = [
+  { key: "touche",      name: "Touche EQS",         color: "border-violet-500/30", dot: "bg-violet-400", lines: [
+    "Varlığın fiyat hareketini teknik analiz yöntemleriyle (EMA, MACD, RSI, Bollinger, Swing, FVG) inceler; alım veya satım baskısının yönünü ölçer.",
+    "Seçili timeframe'in sinyalini üst timeframe'lerle ağırlıklı oylamaya sokar — tüm TF'ler aynı yönde ise skor güçlenir, çelişki varsa ortaya çekilir.",
+    "Consensus sinyaline %50 ağırlıkla en doğrudan katkıyı yapar; piyasa yapısı, diverjans, likidite süpürmesi ve CMF hacim teyidini birleştirir.",
+  ]},
+  { key: "fundamental", name: "Fundamental Score",  color: "border-sky-500/30",    dot: "bg-sky-400",    lines: [
+    "Bitcoin zinciri üzerindeki on-chain metrikleri (MVRV Z-Score ve NUPL) kullanarak piyasanın gerçek değerleme durumunu ölçer.",
+    "MVRV Z < 1 = ucuz (birikim), 1–3 = makul, > 3.5 = pahalı (dağıtım); NUPL ise sahiplerin ortalama kâr/zarar oranını gösterir.",
+    "Kısa TF için birikim bölgesi analizi (momentum), uzun TF için MVRV/NUPL mutlak seviyeleri ağırlıklıdır. Şu an Glassnode key olmadığından simüle veri kullanılmaktadır.",
+  ]},
+  { key: "news",        name: "Haber Duygusu",       color: "border-amber-500/30",  dot: "bg-amber-400",  lines: [
+    "SEC, Fed, CFTC, PBOC, kripto borsaları ve küresel finans medyasından 20+ RSS kaynağındaki haberleri NLP ile analiz eder.",
+    "Her haberin kripto piyasasına potansiyel etkisini, düzenleyici baskı/destek yönünü ve güven skorunu değerlendirerek toplu bir duygu puanı üretir.",
+    "Kısa TF'de güncel haber akışı tam ağırlıkla etkilerken, uzun vadeli pozisyonlarda haberin önemi azalıp temel veriler öne çıkar (1h=%92 etki, 1w=%45).",
+  ]},
+  { key: "sentinel",    name: "Sentinel (arka plan)", color: "border-rose-500/20",   dot: "bg-rose-400",   lines: [
+    "VIX (volatilite korku endeksi), DXY (dolar endeksi), US10Y (tahvil faizi), HYG (kredi sağlığı) ve BTC funding rate gibi makro göstergeleri izler.",
+    "Bu göstergelerin bütünsel durumuna göre piyasanın rejimini (RISK_ON/OFF/NORMALIZATION) ve anlık olay riskini hesaplar.",
+    "Consensus sinyaline doğrudan girmez; bunun yerine kill switch kararlarına ve portföy dağılımındaki rejim overlay'ine girdi sağlar.",
+  ]},
+  { key: "quantum",     name: "Quantum (arka plan)",  color: "border-emerald-500/20",dot: "bg-emerald-400",lines: [
+    "Emir defteri derinliği, bid/ask dengesizliği ve slippage (kayma) gibi piyasa mikroyapısını ölçerek işlem kalitesini değerlendirir.",
+    "Yüksek skor: büyük bir emri fiyatı bozmadan çalıştırmak mümkün; düşük skor: likidite yetersiz, emirleri parçala veya bölgeyi değiştir.",
+    "Şu an gerçek veri bağlantısı bulunmadığından nötr (0.50) sabit değer göstermektedir; Binance order book entegrasyonu planlanmaktadır.",
+  ]},
+] as const;
+
+const MetricsModuleInfo: React.FC<{ open: boolean; onToggle: () => void }> = ({ open, onToggle }) => (
+  <div className="rounded-2xl border border-slate-800 bg-slate-950/40">
+    <button
+      type="button"
+      onClick={onToggle}
+      className="flex w-full items-center justify-between px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-600 transition-colors hover:text-slate-400"
+    >
+      <span>Modüller Ne Yapar?</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+        className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? "rotate-180" : ""}`}>
+        <polyline points="6 9 12 15 18 9" />
+      </svg>
+    </button>
+    {open && (
+      <div className="grid gap-3 px-4 pb-4 sm:grid-cols-2 lg:grid-cols-3">
+        {_MODULE_INFO.map(mod => (
+          <div key={mod.key} className={`rounded-xl border ${mod.color} bg-slate-900/60 p-3`}>
+            <div className="mb-2 flex items-center gap-2">
+              <span className={`h-2 w-2 shrink-0 rounded-full ${mod.dot}`} />
+              <p className="text-[10px] font-bold text-slate-300">{mod.name}</p>
+            </div>
+            <ol className="list-none space-y-1.5">
+              {mod.lines.map((line, i) => (
+                <li key={i} className="flex gap-1.5">
+                  <span className="mt-0.5 shrink-0 font-mono text-[8px] text-slate-700">{i + 1}.</span>
+                  <p className="text-[10px] leading-4 text-slate-500">{line}</p>
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
+);
+
 const TabFallback: React.FC = () => (
   <div className="flex items-center justify-center py-20">
     <div className="h-8 w-8 animate-spin rounded-full border-4 border-slate-700 border-t-emerald-400" />
@@ -119,6 +184,9 @@ const DashboardV2Inner: React.FC = () => {
 
   // ── Tab state ──────────────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = React.useState<TabId>("control");
+
+  // ── Metrikler modül açıklaması accordion ──────────────────────────────────
+  const [metricsInfoOpen, setMetricsInfoOpen] = React.useState(false);
 
   // ── Daily P&L / Kill Switch ────────────────────────────────────────────────
   const [dailyPnl, setDailyPnl] = React.useState<{
@@ -658,101 +726,7 @@ const DashboardV2Inner: React.FC = () => {
                 </div>
 
                 {/* ── Modül Açıklamaları ─────────────────────────────────── */}
-                {(() => {
-                  const [open, setOpen] = React.useState(false);
-                  const modules = [
-                    {
-                      key: "touche",
-                      name: "Touche EQS",
-                      color: "border-violet-500/30",
-                      dot: "bg-violet-400",
-                      lines: [
-                        "Varlığın fiyat hareketini teknik analiz yöntemleriyle (EMA, MACD, RSI, Bollinger, Swing, FVG) inceler; alım veya satım baskısının yönünü ölçer.",
-                        "Seçili timeframe'in sinyalini üst timeframe'lerle ağırlıklı oylamaya sokar — tüm TF'ler aynı yönde ise skor güçlenir, çelişki varsa ortaya çekilir.",
-                        "Consensus sinyaline %50 ağırlıkla en doğrudan katkıyı yapar; piyasa yapısı, diverjans, likidite süpürmesi ve CMF hacim teyidini birleştirir.",
-                      ],
-                    },
-                    {
-                      key: "fundamental",
-                      name: "Fundamental Score",
-                      color: "border-sky-500/30",
-                      dot: "bg-sky-400",
-                      lines: [
-                        "Bitcoin zinciri üzerindeki on-chain metrikleri (MVRV Z-Score ve NUPL) kullanarak piyasanın gerçek değerleme durumunu ölçer.",
-                        "MVRV Z < 1 = ucuz (birikim), 1–3 = makul, > 3.5 = pahalı (dağıtım); NUPL ise sahiplerin ortalama kâr/zarar oranını gösterir.",
-                        "Kısa TF için birikim bölgesi analizi (momentum), uzun TF için MVRV/NUPL mutlak seviyeleri ağırlıklıdır. Şu an Glassnode key olmadığından simüle veri kullanılmaktadır.",
-                      ],
-                    },
-                    {
-                      key: "news",
-                      name: "Haber Duygusu",
-                      color: "border-amber-500/30",
-                      dot: "bg-amber-400",
-                      lines: [
-                        "SEC, Fed, CFTC, PBOC, kripto borsaları ve küresel finans medyasından 20+ RSS kaynağındaki haberleri NLP ile analiz eder.",
-                        "Her haberın kripto piyasasına potansiyel etkisini, düzenleyici baskı/destek yönünü ve güven skorunu değerlendirerek toplu bir duygu puanı üretir.",
-                        "Kısa TF'de güncel haber akışı tam ağırlıkla etkilerken, uzun vadeli pozisyonlarda haberin önemi azalıp temel veriler öne çıkar (1h=%92 etki, 1w=%45).",
-                      ],
-                    },
-                    {
-                      key: "sentinel",
-                      name: "Sentinel (arka plan)",
-                      color: "border-rose-500/20",
-                      dot: "bg-rose-400",
-                      lines: [
-                        "VIX (volatilite korku endeksi), DXY (dolar endeksi), US10Y (tahvil faizi), HYG (kredi sağlığı) ve BTC funding rate gibi makro göstergeleri izler.",
-                        "Bu göstergelerin bütünsel durumuna göre piyasanın rejimini (RISK_ON/OFF/NORMALIZATION) ve anlık olay riskini hesaplar.",
-                        "Consensus sinyaline doğrudan girmez; bunun yerine kill switch kararlarına ve portföy dağılımındaki rejim overlay'ine girdi sağlar.",
-                      ],
-                    },
-                    {
-                      key: "quantum",
-                      name: "Quantum (arka plan)",
-                      color: "border-emerald-500/20",
-                      dot: "bg-emerald-400",
-                      lines: [
-                        "Emir defteri derinliği, bid/ask dengesizliği ve slippage (kayma) gibi piyasa mikroyapısını ölçerek işlem kalitesini değerlendirir.",
-                        "Yüksek skor: büyük bir emri fiyatı bozmadan çalıştırmak mümkün; düşük skor: likidite yetersiz, emirleri parçala veya bölgeyi değiştir.",
-                        "Şu an gerçek veri bağlantısı bulunmadığından nötr (0.50) sabit değer göstermektedir; Binance order book entegrasyonu planlanmaktadır.",
-                      ],
-                    },
-                  ];
-                  return (
-                    <div className="rounded-2xl border border-slate-800 bg-slate-950/40">
-                      <button
-                        type="button"
-                        onClick={() => setOpen(v => !v)}
-                        className="flex w-full items-center justify-between px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-600 transition-colors hover:text-slate-400"
-                      >
-                        <span>Modüller Ne Yapar?</span>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-                          className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? "rotate-180" : ""}`}>
-                          <polyline points="6 9 12 15 18 9" />
-                        </svg>
-                      </button>
-                      {open && (
-                        <div className="grid gap-3 px-4 pb-4 sm:grid-cols-2 lg:grid-cols-3">
-                          {modules.map(mod => (
-                            <div key={mod.key} className={`rounded-xl border ${mod.color} bg-slate-900/60 p-3`}>
-                              <div className="mb-2 flex items-center gap-2">
-                                <span className={`h-2 w-2 shrink-0 rounded-full ${mod.dot}`} />
-                                <p className="text-[10px] font-bold text-slate-300">{mod.name}</p>
-                              </div>
-                              <ol className="space-y-1.5 list-none">
-                                {mod.lines.map((line, i) => (
-                                  <li key={i} className="flex gap-1.5">
-                                    <span className="shrink-0 font-mono text-[8px] text-slate-700 mt-0.5">{i+1}.</span>
-                                    <p className="text-[10px] leading-4 text-slate-500">{line}</p>
-                                  </li>
-                                ))}
-                              </ol>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
+                <MetricsModuleInfo open={metricsInfoOpen} onToggle={() => setMetricsInfoOpen(v => !v)} />
               </div>
             ) : (
               <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-10 text-center text-sm text-slate-500">
