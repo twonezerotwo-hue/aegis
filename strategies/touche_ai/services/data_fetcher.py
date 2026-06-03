@@ -173,19 +173,29 @@ class BinanceDataFetcher:
             # ── yfinance fallback: Binance'de olmayan emtialar ─────────────
             yf_ticker = self._YFINANCE_SYMBOL_MAP.get(normalized_symbol)
             if yf_ticker:
+                # Önce Redis cache dene (yfinance ilk çekiş ~10-15s, TTL=300s)
+                yf_cache_key = f"aegis:yf:{normalized_symbol}:{interval}:{limit}"
+                cached_yf = await self._cache_get(yf_cache_key)
+                if cached_yf is not None:
+                    self._remember_meta(f"yfinance_cached_{yf_ticker}", cached_yf,
+                                        verified=True, cached=True, data_status="RECENT")
+                    return cached_yf
+
                 try:
                     df = await asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda: self._fetch_yfinance(yf_ticker, interval, limit),
                     )
+                    # Redis'e 5 dakika cache'le (emtia verisi çok hızlı değişmez)
+                    await self._cache_set(yf_cache_key, df, ttl=300)
                     self._last_fetch_meta = {
                         "source": f"yfinance_{yf_ticker}",
                         "timestamp": pd.Timestamp.now(tz="UTC").isoformat(),
                         "verified": True,
-                        "fallback_used": True,
+                        "fallback_used": False,   # yfinance = gerçek veri, fallback değil
                         "cached": False,
                         "data_status": "LIVE",
-                        "warning": f"Binance'de spot çifti yok; yfinance ({yf_ticker}) kullanıldı.",
+                        "warning": f"Binance spot yok; yfinance ({yf_ticker}) kullanıldı.",
                     }
                     return df
                 except Exception as yf_exc:
@@ -380,11 +390,11 @@ class BinanceDataFetcher:
             "warning": None,
         }
 
-    async def _cache_set(self, key: str, df: pd.DataFrame) -> None:
+    async def _cache_set(self, key: str, df: pd.DataFrame, ttl: Optional[int] = None) -> None:
         if self._redis is None:
             return
         try:
-            await self._redis.setex(key, self._cache_ttl, df.to_json())
+            await self._redis.setex(key, ttl or self._cache_ttl, df.to_json())
         except Exception as exc:
             logger.debug("[CACHE] set failed: %s", exc)
 
@@ -394,7 +404,9 @@ class BinanceDataFetcher:
         try:
             raw = await self._redis.get(key)
             if raw:
-                df = pd.read_json(raw)
+                import io as _io
+                # io.StringIO: pandas'ın string'i dosya yolu sanmasını önler
+                df = pd.read_json(_io.StringIO(raw))
                 if "timestamp" in df.columns:
                     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
                     df = df.set_index("timestamp")

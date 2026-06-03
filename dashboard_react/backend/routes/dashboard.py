@@ -23,7 +23,12 @@ SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
 VALID_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w", "1month"]
 
 # Non-crypto assets derive scores from macro indicators instead of Prometheus
-_MACRO_ASSETS = {"XAU", "XAG", "BOND", "CASH"}
+# XAU + XAG kaldırıldı: Touche artık yfinance (GC=F / SI=F) üzerinden canlı
+# analiz yapabiliyor; BOND ve CASH hâlâ makro türetmeli kalıyor.
+_MACRO_ASSETS = {"BOND", "CASH"}
+
+# Emtia için Touche timeout'u daha uzun tutulur (yfinance ilk çekiş ~8-12s)
+_TOUCHE_COMMODITY_SYMBOLS = {"XAU", "XAG", "WTI", "BRENT"}
 
 # AI service base URLs
 _TOUCHE_URL = os.environ.get("TOUCHE_URL", "http://touche-api:8001")
@@ -62,8 +67,13 @@ async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, 
     """Fetch raw live module payloads from each AI service."""
     symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"
     symbol_clean = symbol.replace("/USDT", "").replace("/", "")
+    asset_key = symbol_clean.upper()
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    # Emtia sembolleri (XAU/XAG) için Touche yfinance çekişi ~8-12s sürer.
+    # Timeout: emtia=20s, kripto=5s
+    touche_timeout = 20.0 if asset_key in _TOUCHE_COMMODITY_SYMBOLS else 5.0
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(touche_timeout, connect=5.0)) as client:
         results = await asyncio.gather(
             client.get(f"{_TOUCHE_URL}/touche/analyze", params={"symbol": symbol_binance, "timeframe": timeframe}),
             client.get(f"{_FUNDAMENTAL_URL}/fundamental/metrics", params={"symbol": symbol_clean, "timeframe": timeframe}),
@@ -114,15 +124,23 @@ def _payload_verified(payload: Optional[dict[str, Any]]) -> bool:
     return (has_standard_live or has_touche_live) and not fallback_used
 
 
-def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timeframe: str) -> dict[str, Optional[float]]:
+def _extract_live_scores(
+    payloads: dict[str, Optional[dict[str, Any]]],
+    timeframe: str,
+    symbol: str = "",
+) -> dict[str, Optional[float]]:
     """
     Servis yanıtlarından TF-duyarlı skorları çıkarır.
 
     Touche:      Multi-TF ağırlıklı konsensüs (mevcut TF ağırlık=1, uzak TF'ler yarıya düşer)
     Fundamental: Kısa TF = momentum ağırlıklı, uzun TF = seviye (MVRV/NUPL) ağırlıklı
+                 NOT: Emtia (XAU/XAG) için MVRV/NUPL geçersizdir → None döner
     News:        Exponential time decay — kısa TF'de eski haberler daha hızlı sönümlenir
     Sentinel:    BY DESIGN TF bağımsız (makro göstergeler)
     """
+    asset_key = symbol.replace("/USDT", "").replace("/", "").upper() if symbol else ""
+    is_commodity = asset_key in _TOUCHE_COMMODITY_SYMBOLS   # XAU, XAG → MVRV/NUPL yok
+
     scores: dict[str, Optional[float]] = {
         "touche": None, "fundamental": None,
         "news": None, "sentinel": None, "quantum": None,
@@ -154,8 +172,9 @@ def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timefram
             scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
 
     # ── FUNDAMENTAL: TF-duyarlı MVRV/NUPL yorumu ─────────────────────────────
+    # Emtia (XAU/XAG) için MVRV/NUPL zincir verisi anlamsız → atla
     fundamental = payloads.get("fundamental")
-    if fundamental:
+    if fundamental and not is_commodity:
         nupl = fundamental.get("nupl")
         mvrv = fundamental.get("mvrv_z_score")
         if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
@@ -212,7 +231,66 @@ def _extract_live_scores(payloads: dict[str, Optional[dict[str, Any]]], timefram
 
 
 async def _fetch_live_scores(symbol: str, timeframe: str) -> dict[str, Optional[float]]:
-    return _extract_live_scores(await _fetch_live_module_payloads(symbol, timeframe), timeframe)
+    return _extract_live_scores(await _fetch_live_module_payloads(symbol, timeframe), timeframe, symbol)
+
+
+def _compute_mtf_alignment(tf_signals: dict, current_tf: str) -> dict:
+    """
+    Farklı zaman dilimlerindeki sinyallerin hizalanma skorunu hesapla.
+
+    tf_signals: {"1h": "BUY", "4h": "SELL", "1d": "HOLD", ...}
+    Döner:
+      score: 0-1  (1.0 = tam hizalanmış, 0.5 = karışık/nötr)
+      direction: "BULLISH" | "BEARISH" | "NEUTRAL"
+      aligned_count: kaç TF aynı yönde
+      total_count: toplam TF sayısı
+    """
+    if not tf_signals:
+        return {"score": 0.5, "direction": "NEUTRAL", "aligned_count": 0, "total_count": 0}
+
+    signal_vals = {
+        "BUY": 1, "BULLISH": 1, "STRONG_BUY": 1,
+        "SELL": -1, "BEARISH": -1, "STRONG_SELL": -1,
+        "HOLD": 0, "NEUTRAL": 0, "UNAVAILABLE": 0,
+    }
+
+    votes: list[int] = []
+    for tf, sig in tf_signals.items():
+        v = signal_vals.get(str(sig).upper(), 0)
+        votes.append(v)
+
+    if not votes:
+        return {"score": 0.5, "direction": "NEUTRAL", "aligned_count": 0, "total_count": 0}
+
+    buy_count  = sum(1 for v in votes if v > 0)
+    sell_count = sum(1 for v in votes if v < 0)
+    total      = len(votes)
+
+    # Dominant yön
+    if buy_count > sell_count:
+        dominant = "BULLISH"
+        aligned  = buy_count
+    elif sell_count > buy_count:
+        dominant = "BEARISH"
+        aligned  = sell_count
+    else:
+        dominant = "NEUTRAL"
+        aligned  = 0
+
+    # Hizalanma oranı: 0.5 (nötr) → 1.0 (tam hizalı)
+    alignment_ratio = aligned / total if total > 0 else 0.0
+    score = 0.5 + alignment_ratio * 0.5
+    if dominant == "BEARISH":
+        score = 0.5 - alignment_ratio * 0.5
+
+    return {
+        "score":          round(score, 4),
+        "direction":      dominant,
+        "aligned_count":  aligned,
+        "total_count":    total,
+        "buy_count":      buy_count,
+        "sell_count":     sell_count,
+    }
 
 
 async def _fetch_module_details(symbol: str, timeframe: str) -> dict:
@@ -497,7 +575,16 @@ def _latest_timestamp(*timestamps: str | None) -> str | None:
     valid = [ts for ts in timestamps if isinstance(ts, str) and ts.strip()]
     if not valid:
         return None
-    return max(valid, key=lambda value: datetime.fromisoformat(value.replace("Z", "+00:00")))
+
+    def _parse(value: str):
+        # "Z" → "+00:00", ardından naive timestamp'ı da UTC'ye bağla
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            from datetime import timezone as _tz
+            dt = dt.replace(tzinfo=_tz.utc)
+        return dt
+
+    return max(valid, key=_parse)
 
 
 def _aggregate_status(statuses: list[str]) -> str:
@@ -1052,7 +1139,7 @@ async def get_consensus(
             }
         else:
             live_payloads = await _fetch_live_module_payloads(symbol, timeframe)
-            live = _extract_live_scores(live_payloads, timeframe)
+            live = _extract_live_scores(live_payloads, timeframe, symbol)
 
             def _module_payload_source(
                 payload_key: str,
