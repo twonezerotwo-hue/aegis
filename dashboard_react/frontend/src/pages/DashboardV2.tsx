@@ -271,8 +271,8 @@ const DashboardV2Inner: React.FC = () => {
   // ── Tab state ──────────────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = React.useState<TabId>("control");
 
-  // ── Metrikler modül açıklaması accordion ──────────────────────────────────
-  const [metricsInfoOpen, setMetricsInfoOpen] = React.useState(false);
+  // ── Metrikler modül açıklaması accordion — varsayılan açık ───────────────
+  const [metricsInfoOpen, setMetricsInfoOpen] = React.useState(true);
 
   // ── Daily P&L / Kill Switch ────────────────────────────────────────────────
   const [dailyPnl, setDailyPnl] = React.useState<{
