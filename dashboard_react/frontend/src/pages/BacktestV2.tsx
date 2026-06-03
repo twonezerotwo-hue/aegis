@@ -653,10 +653,12 @@ export const BacktestV2: React.FC = () => {
               </div>
             )}
 
-            {/* ═══ AEGIS v7.5 — Advanced Lead-Lag Analytics ═══ */}
-            {macroData?.correlation?.lead_lag && (
-              <AdvancedAnalytics leadLag={macroData.correlation.lead_lag} />
-            )}
+            {/* ═══ AEGIS Masterclass Analytics ═══ */}
+            <AdvancedAnalytics
+              backtestId={result?.backtest_id}
+              metrics={result?.metrics as any}
+              leadLag={macroData?.correlation?.lead_lag}
+            />
 
             {/* Win Rate Progress - original */}
             <div className="rounded-xl border border-slate-700/50 bg-slate-900/80 p-5">

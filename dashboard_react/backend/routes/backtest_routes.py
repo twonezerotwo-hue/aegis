@@ -443,7 +443,8 @@ async def run_ai_backtest(
             "portfolio_allocation": portfolio_allocation,
             "regime": _last_regime,
             "total_trades": len(trades),
-            "trades": trades[:20],  # Last 20 trades
+            "all_trades": trades,          # Monte Carlo + advanced analysis için
+            "trades":     trades[-20:],   # UI'da son 20 işlem
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "data_points": len(df),
             "initial_capital": initial_capital,
@@ -840,7 +841,6 @@ def add_ai_scores(
             _bt_feats = build_features(df)
             _bt_model, _bt_le, _bt_cols = _models[_bt_model_key]
             _bt_x = _bt_feats.reindex(columns=_bt_cols, fill_value=0.0).values
-            import numpy as np
             _bt_x = np.where(np.isfinite(_bt_x), _bt_x, 0.0)
             _bt_proba = _bt_model.predict_proba(_bt_x)  # shape (N, n_classes)
             # Sınıf: buy=1 class index
@@ -1472,23 +1472,26 @@ def execute_ai_driven_trades(
     Z_EXIT_SHORT    = float(z_exit_short)     # from request param
 
     def _record_trade(exit_price, exit_ts, exit_z, exit_regime, exit_reason):
-        pnl_raw = (exit_price - entry_price) * (1 if position == "LONG" else -1)
-        commission = (entry_price + exit_price) * 0.001
-        pnl_net = pnl_raw - commission
+        pnl_raw    = (exit_price - entry_price) * (1 if position == "LONG" else -1)
+        # Gerçekçi maliyet: sabit komisyon + slippage modeli
+        slippage   = _apply_slippage_model(entry_price, exit_price, entry_z)
+        commission = (entry_price + exit_price) * 0.001   # 0.1% taker her iki taraf
+        pnl_net    = pnl_raw - commission - slippage
+        # İşlem süresi (bar sayısı değil gerçek süre)
+        duration_h = (exit_ts - entry_time).total_seconds() / 3600 if hasattr(exit_ts - entry_time, "total_seconds") else 0
         trades.append({
-            "entry_time": entry_time.isoformat(),
-            "exit_time":  exit_ts.isoformat(),
+            "entry_time":  entry_time.isoformat(),
+            "exit_time":   exit_ts.isoformat(),
             "entry_price": round(entry_price, 2),
             "exit_price":  round(exit_price, 2),
-            "position": position,
-            "pnl":     round(pnl_net, 2),
-            "pnl_pct": round(pnl_net / entry_price * 100, 2),
-            # FIX: use ENTRY z-score and ENTRY confluence for sizing — not exit bar values.
-            # Using exit bar's z/conf caused position sizes of ~2% on z-reversion exits
-            # (exit z≈0.25 → base_kelly=0.2, confluence=0.1 default → effective=2%).
-            # Entry z is always >threshold (e.g. 1.0+) → proper sizing (15-25%).
-            "z_score": float(entry_z),
-            "regime":  entry_regime,
+            "position":    position,
+            "pnl":         round(pnl_net, 2),
+            "pnl_pct":     round(pnl_net / entry_price * 100, 4),
+            "pnl_gross_pct": round(pnl_raw / entry_price * 100, 4),
+            "slippage_pct":  round(slippage / entry_price * 100, 4),
+            "duration_h":    round(duration_h, 1),
+            "z_score":  float(entry_z),
+            "regime":   entry_regime,
             "confluence_multiplier": float(entry_conf),
             "exit_reason": exit_reason,
         })
@@ -1536,6 +1539,251 @@ def execute_ai_driven_trades(
             entry_regime  = regime
 
     return trades
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MASTERCLASS BACKTEST UTILITIES
+# ═══════════════════════════════════════════════════════════════════
+
+def _apply_slippage_model(entry_price: float, exit_price: float, z_score: float) -> float:
+    """
+    Freqtrade/Nautilus'tan ilham: gerçekçi slippage hesabı.
+
+    Bileşenler:
+    1. Spread maliyeti — kripto tipik bid-ask spread: 0.03%
+    2. Piyasa etkisi — büyük z-score = güçlü sinyal = daha agresif giriş
+       Impact = 0.01% × |z| (küçük hesaplar için basitleştirilmiş)
+
+    Gerçek sistemlerde: sqrt(trade_notional / avg_daily_volume) × volatility
+    Burada: z-score proxy olarak kullanılır (yüksek z = daha hızlı dolum isteği)
+    """
+    spread_cost  = (entry_price + exit_price) * 0.0003          # 0.03% her iki yanda
+    impact_cost  = entry_price * 0.0001 * min(abs(z_score), 3)  # maks 0.03% etki
+    return spread_cost + impact_cost
+
+
+def _build_equity_curve(trades: List[Dict], initial_capital: float, kelly_cap: float) -> np.ndarray:
+    """Equity curve hesapla (vectorized)."""
+    if not trades:
+        return np.array([initial_capital])
+    regime_conf_map = {"LIQ_EXPANSION": 1.0, "NORMALIZATION": 0.9, "RECOVERY": 0.8, "RISK_OFF": 0.6}
+    curve = [initial_capital]
+    running = initial_capital
+    for t in trades:
+        z        = float(t.get("z_score", 0.5))
+        regime   = str(t.get("regime", "NORMALIZATION"))
+        rc       = regime_conf_map.get(regime, 0.8)
+        conf     = float(t.get("confluence_multiplier", 1.0))
+        pos_size = calculate_position_size(z, rc, confluence_multiplier=conf, kelly_cap=kelly_cap)
+        running *= (1.0 + (t["pnl_pct"] / 100.0) * pos_size)
+        curve.append(running)
+    return np.array(curve)
+
+
+def calculate_advanced_metrics(
+    trades: List[Dict],
+    equity_curve: np.ndarray,
+    initial_capital: float,
+    benchmark_returns: np.ndarray | None = None,
+    risk_free_rate: float = 0.05,     # yıllık %5
+    bars_per_year: int = 252,
+) -> Dict:
+    """
+    Masterclass risk/performans metrikleri.
+
+    VectorBT + QuantStats + Zipline'dan ilham:
+    - Calmar  = yıllıklandırılmış getiri / maksimum drawdown
+    - Omega   = kazanç toplamı / kayıp toplamı (eşik üzeri/altı)
+    - VaR 95% = en kötü %5 günlük kayıp
+    - CVaR 95% = VaR'ın ötesindeki ortalama kayıp (beklenen kayıp)
+    - Alpha/Beta = benchmark'a göre artı değer
+    """
+    result: Dict = {}
+    if len(equity_curve) < 2:
+        return result
+
+    returns = np.diff(equity_curve) / np.maximum(equity_curve[:-1], 1e-10)
+    total_return = (equity_curve[-1] / equity_curve[0]) - 1.0
+    n_bars = len(returns)
+
+    # ── Calmar Ratio ────────────────────────────────────────────────
+    running_max = np.maximum.accumulate(equity_curve)
+    drawdowns   = (equity_curve - running_max) / np.maximum(running_max, 1e-10)
+    max_dd      = float(np.min(drawdowns))  # negatif sayı
+
+    # drawdown süre (consecutive bars)
+    in_dd       = drawdowns < -0.001
+    dd_groups   = np.diff(np.concatenate([[0], in_dd.astype(int), [0]]))
+    dd_starts   = np.where(dd_groups == 1)[0]
+    dd_ends     = np.where(dd_groups == -1)[0]
+    max_dd_dur  = int(np.max(dd_ends - dd_starts)) if len(dd_starts) > 0 else 0
+
+    ann_factor  = bars_per_year / max(n_bars, 1)
+    ann_return  = (1 + total_return) ** ann_factor - 1
+    calmar      = ann_return / abs(max_dd) if max_dd < -0.001 else 0.0
+
+    # ── Omega Ratio ─────────────────────────────────────────────────
+    # Eşik: risk-free günlük
+    rf_daily    = (1 + risk_free_rate) ** (1 / bars_per_year) - 1
+    gains       = np.sum(np.maximum(returns - rf_daily, 0))
+    losses      = np.sum(np.maximum(rf_daily - returns, 0))
+    omega       = gains / losses if losses > 0 else 999.0
+
+    # ── VaR / CVaR (Historical Simulation) ──────────────────────────
+    # QuantStats yaklaşımı: geçmişe dayalı simülasyon
+    sorted_ret  = np.sort(returns)
+    var_idx     = int(len(sorted_ret) * 0.05)      # %5 alt kuyruk
+    var_95      = float(sorted_ret[var_idx]) if var_idx < len(sorted_ret) else 0.0
+    cvar_95     = float(np.mean(sorted_ret[:max(var_idx, 1)]))  # CVaR = VaR'ın ötesi ortalama
+
+    # Günlük VaR → pozisyon bazlı (initial_capital × VaR)
+    var_dollar  = initial_capital * abs(var_95)
+    cvar_dollar = initial_capital * abs(cvar_95)
+
+    # ── Benchmark Alpha / Beta ───────────────────────────────────────
+    alpha, beta, info_ratio, tracking_err = 0.0, 1.0, 0.0, 0.0
+    bm_return = 0.0
+    if benchmark_returns is not None and len(benchmark_returns) >= 2:
+        # Boyutları eşitle
+        min_len = min(len(returns), len(benchmark_returns))
+        s_ret   = returns[-min_len:]
+        b_ret   = benchmark_returns[-min_len:]
+
+        cov_mat = np.cov(s_ret, b_ret)
+        var_bm  = cov_mat[1, 1]
+        beta    = float(cov_mat[0, 1] / var_bm) if var_bm > 1e-12 else 1.0
+        alpha   = float(ann_return - (risk_free_rate + beta * (
+            (1 + float(np.mean(b_ret))) ** bars_per_year - 1 - risk_free_rate
+        )))
+        excess  = s_ret - b_ret
+        tracking_err = float(np.std(excess) * np.sqrt(bars_per_year))
+        info_ratio   = float(np.mean(excess) / np.std(excess) * np.sqrt(bars_per_year)) if np.std(excess) > 0 else 0.0
+        bm_return    = float((1 + float(np.mean(b_ret))) ** bars_per_year - 1)
+
+    # ── İşlem istatistikleri ────────────────────────────────────────
+    durations = [float(t.get("duration_h", 0)) for t in trades if t.get("duration_h")]
+    avg_duration_h = float(np.mean(durations)) if durations else 0.0
+    slippages = [float(t.get("slippage_pct", 0)) for t in trades]
+    total_slippage_pct = float(np.sum(slippages))
+
+    result.update({
+        "calmar_ratio":     round(calmar, 3),
+        "omega_ratio":      round(min(omega, 99.9), 3),
+        "var_95_pct":       round(var_95 * 100, 3),
+        "cvar_95_pct":      round(cvar_95 * 100, 3),
+        "var_95_dollar":    round(var_dollar, 2),
+        "cvar_95_dollar":   round(cvar_dollar, 2),
+        "max_drawdown_duration_bars": max_dd_dur,
+        "annualized_return_pct": round(ann_return * 100, 2),
+        "alpha":            round(alpha * 100, 2),
+        "beta":             round(beta, 3),
+        "information_ratio": round(info_ratio, 3),
+        "tracking_error_pct": round(tracking_err * 100, 3),
+        "benchmark_ann_return_pct": round(bm_return * 100, 2),
+        "avg_trade_duration_h": round(avg_duration_h, 1),
+        "total_slippage_pct": round(total_slippage_pct, 4),
+    })
+    return result
+
+
+def run_monte_carlo(
+    trades: List[Dict],
+    initial_capital: float,
+    kelly_cap: float = 0.15,
+    n_sims: int = 1000,
+    seed: int = 42,
+) -> Dict:
+    """
+    QuantStats Monte Carlo Bootstrap — backtesting.py walk-forward'dan ilham.
+
+    İşlem sırasını N kez karıştır → metrik dağılımı = strateji güven aralığı.
+    Yüksek varyans = kârlılık şansa bağlı (güvensiz).
+    Düşük varyans   = tutarlı edge (güvenli).
+
+    Döner:
+      percentiles: p5/p25/p50/p75/p95 için win_rate, total_return, max_drawdown
+      original: gerçek backtest değerleri
+      n_sims: simülasyon sayısı
+    """
+    if not trades or len(trades) < 5:
+        return {"error": "En az 5 işlem gerekli", "n_sims": 0}
+
+    rng = np.random.default_rng(seed)
+    regime_conf_map = {"LIQ_EXPANSION": 1.0, "NORMALIZATION": 0.9, "RECOVERY": 0.8, "RISK_OFF": 0.6}
+
+    sim_returns    = []
+    sim_win_rates  = []
+    sim_drawdowns  = []
+    sim_sharpes    = []
+
+    for _ in range(n_sims):
+        shuffled = rng.permutation(trades).tolist()
+        eq = _build_equity_curve(shuffled, initial_capital, kelly_cap)
+        ret = (eq[-1] / eq[0] - 1) * 100
+
+        wins = [t for t in shuffled if t["pnl"] > 0]
+        wr   = len(wins) / len(shuffled) * 100
+
+        running_max = np.maximum.accumulate(eq)
+        dd          = float(np.min((eq - running_max) / np.maximum(running_max, 1e-10))) * 100
+
+        rets = np.diff(eq) / np.maximum(eq[:-1], 1e-10)
+        sharpe = float(np.mean(rets) / np.std(rets) * np.sqrt(252)) if np.std(rets) > 1e-10 else 0.0
+
+        sim_returns.append(ret)
+        sim_win_rates.append(wr)
+        sim_drawdowns.append(dd)
+        sim_sharpes.append(sharpe)
+
+    def _pcts(arr):
+        a = np.array(arr)
+        return {
+            "p5":  round(float(np.percentile(a, 5)), 2),
+            "p25": round(float(np.percentile(a, 25)), 2),
+            "p50": round(float(np.percentile(a, 50)), 2),
+            "p75": round(float(np.percentile(a, 75)), 2),
+            "p95": round(float(np.percentile(a, 95)), 2),
+            "mean": round(float(np.mean(a)), 2),
+            "std":  round(float(np.std(a)), 2),
+        }
+
+    # Orijinal değerler (karıştırılmamış)
+    orig_eq = _build_equity_curve(trades, initial_capital, kelly_cap)
+    orig_return = round((orig_eq[-1] / orig_eq[0] - 1) * 100, 2)
+    orig_wins   = [t for t in trades if t["pnl"] > 0]
+    orig_wr     = round(len(orig_wins) / len(trades) * 100, 1)
+    orig_rm     = np.maximum.accumulate(orig_eq)
+    orig_dd     = round(float(np.min((orig_eq - orig_rm) / np.maximum(orig_rm, 1e-10))) * 100, 2)
+
+    # Strateji güven skoru: orijinal değerin simülasyon dağılımındaki yüzdelik konumu
+    conf_return = float(np.mean(np.array(sim_returns) <= orig_return) * 100)
+    conf_wr     = float(np.mean(np.array(sim_win_rates) <= orig_wr) * 100)
+
+    return {
+        "n_sims":   n_sims,
+        "n_trades": len(trades),
+        "total_return": _pcts(sim_returns),
+        "win_rate":     _pcts(sim_win_rates),
+        "max_drawdown": _pcts(sim_drawdowns),
+        "sharpe_ratio": _pcts(sim_sharpes),
+        "original": {
+            "total_return": orig_return,
+            "win_rate":     orig_wr,
+            "max_drawdown": orig_dd,
+        },
+        "confidence": {
+            "return_percentile": round(conf_return, 1),
+            "winrate_percentile": round(conf_wr, 1),
+            "edge_real": conf_return > 50,  # orijinal > medyan mı?
+            "interpretation": (
+                "Güçlü edge — simülasyonların üst yarısında"
+                if conf_return > 60 else
+                "Orta edge — sıra bağımlı kâr"
+                if conf_return > 40 else
+                "Zayıf edge — sonuçlar büyük ölçüde şansa bağlı"
+            ),
+        },
+    }
 
 
 def calculate_backtest_metrics(trades: List[Dict], initial_capital: float, kelly_cap: float = 0.15) -> Dict:
@@ -1608,37 +1856,55 @@ def calculate_backtest_metrics(trades: List[Dict], initial_capital: float, kelly
             max_drawdown = drawdown
             max_drawdown_pct = (drawdown / max_equity) * 100 if max_equity > 0 else 0
 
-    # Sharpe Ratio (simplified)
-    returns = np.diff(equity_curve) / np.array(equity_curve[:-1])
-    sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if len(returns) > 1 and np.std(returns) > 0 else 0
+    # Sharpe Ratio
+    returns = np.diff(equity_curve) / np.maximum(np.array(equity_curve[:-1]), 1e-10)
+    sharpe_ratio = float(np.mean(returns) / np.std(returns) * np.sqrt(252)) if len(returns) > 1 and np.std(returns) > 1e-10 else 0.0
 
     # Sortino Ratio
     downside_returns = returns[returns < 0]
-    downside_std = np.std(downside_returns) if len(downside_returns) > 0 else 1
-    sortino_ratio = np.mean(returns) / downside_std * np.sqrt(252) if downside_std > 0 else 0
+    downside_std = float(np.std(downside_returns)) if len(downside_returns) > 0 else 1e-10
+    sortino_ratio = float(np.mean(returns) / downside_std * np.sqrt(252)) if downside_std > 1e-10 else 0.0
+
+    # Gelişmiş metrikler (masterclass)
+    adv = calculate_advanced_metrics(trades, np.array(equity_curve), initial_capital)
+
+    # Avg trade duration
+    durations = [float(t.get("duration_h", 0)) for t in trades if t.get("duration_h")]
+    avg_dur_h = round(float(np.mean(durations)), 1) if durations else 0.0
 
     return {
         "pnl": {
-            "total_pnl": round(total_pnl, 2),
+            "total_pnl":     round(total_pnl, 2),
             "total_pnl_pct": round(total_pnl_pct, 2),
-            "num_trades": len(trades),
+            "num_trades":    len(trades),
         },
         "win_loss": {
-            "win_rate": round(win_rate, 1),
-            "win_count": win_count,
-            "loss_count": loss_count,
-            "avg_win": round(avg_win, 2),
-            "avg_loss": round(avg_loss, 2),
+            "win_rate":     round(win_rate, 1),
+            "win_count":    win_count,
+            "loss_count":   loss_count,
+            "avg_win":      round(avg_win, 2),
+            "avg_loss":     round(avg_loss, 2),
             "profit_factor": round(profit_factor, 2),
+            "avg_trade_duration_h": avg_dur_h,
         },
         "drawdown": {
-            "max_drawdown": round(max_drawdown, 2),
+            "max_drawdown":     round(max_drawdown, 2),
             "max_drawdown_pct": round(max_drawdown_pct, 2),
+            "max_drawdown_duration_bars": adv.get("max_drawdown_duration_bars", 0),
         },
-        "sharpe_ratio": round(float(sharpe_ratio), 2),
-        "sortino_ratio": round(float(sortino_ratio), 2),
+        "sharpe_ratio":  round(sharpe_ratio, 2),
+        "sortino_ratio": round(sortino_ratio, 2),
+        "calmar_ratio":  adv.get("calmar_ratio", 0),
+        "omega_ratio":   adv.get("omega_ratio", 0),
+        "var_95_pct":    adv.get("var_95_pct", 0),
+        "cvar_95_pct":   adv.get("cvar_95_pct", 0),
+        "var_95_dollar":  adv.get("var_95_dollar", 0),
+        "cvar_95_dollar": adv.get("cvar_95_dollar", 0),
+        "annualized_return_pct": adv.get("annualized_return_pct", round(total_pnl_pct, 2)),
+        "total_slippage_pct": adv.get("total_slippage_pct", 0),
         "initial_capital": initial_capital,
-        "final_capital": round(final_capital, 2),
+        "final_capital":   round(final_capital, 2),
+        "equity_curve":    [round(v, 2) for v in equity_curve],
     }
 
 
@@ -1974,3 +2240,126 @@ async def export_html(symbol: str = "BTC/USDT", timeframe: str = "1h"):
 </html>"""
 
     return HTMLResponse(content=html_content)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MASTERCLASS ENDPOINTLERİ
+# ═══════════════════════════════════════════════════════════════════
+
+@router.post("/monte_carlo")
+async def monte_carlo_analysis(
+    body: Dict = Body(...),
+):
+    """
+    Monte Carlo Bootstrap Simülasyonu — QuantStats yaklaşımı.
+
+    İşlem sırasını N kez karıştır → strateji güven aralığı hesapla.
+
+    İstek: { "backtest_id": "...", "n_sims": 1000 }
+    veya:  { "trades": [...], "initial_capital": 100000, "n_sims": 1000 }
+    """
+    n_sims        = int(body.get("n_sims", 1000))
+    initial_cap   = float(body.get("initial_capital", 100000))
+    kelly_cap_val = float(body.get("kelly_cap", 0.15))
+
+    # Trades: önce backtest_id'den al, yoksa direkt listeden
+    trades = body.get("trades")
+    backtest_id = body.get("backtest_id")
+
+    if not trades and backtest_id:
+        run = backtest_runs.get(backtest_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Backtest ID bulunamadı")
+        result = run.get("result", {})
+        # Tüm trades'i al (sadece son 20 değil)
+        trades = result.get("all_trades") or result.get("trades", [])
+        initial_cap   = float(result.get("initial_capital", initial_cap))
+        kelly_cap_val = float(result.get("effective_kelly_cap", kelly_cap_val))
+
+    if not trades:
+        raise HTTPException(status_code=400, detail="İşlem verisi yok — önce backtest çalıştırın")
+
+    # CPU-yoğun: sync fonksiyon, FastAPI thread pool'unda çalıştır
+    import asyncio
+    loop = asyncio.get_event_loop()
+    mc_result = await loop.run_in_executor(
+        None,
+        lambda: run_monte_carlo(trades, initial_cap, kelly_cap_val, n_sims),
+    )
+    return mc_result
+
+
+@router.get("/advanced/{backtest_id}")
+async def get_advanced_metrics(backtest_id: str, n_mc_sims: int = 500):
+    """
+    Tam masterclass analiz paketi:
+    - VaR/CVaR, Calmar, Omega (metrics'ten)
+    - Monte Carlo güven aralıkları
+    - Benchmark vs BTC buy & hold karşılaştırması
+
+    GET /backtest/advanced/{backtest_id}?n_mc_sims=500
+    """
+    run = backtest_runs.get(backtest_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Backtest ID bulunamadı")
+
+    result     = run.get("result", {})
+    metrics    = result.get("metrics", {})
+    all_trades = result.get("all_trades") or result.get("trades", [])
+    symbol     = result.get("symbol", "BTC/USDT")
+    initial_cap= float(result.get("initial_capital", 100000))
+    kelly_cap_val = float(result.get("effective_kelly_cap", 0.15))
+
+    # Monte Carlo
+    import asyncio
+    loop = asyncio.get_event_loop()
+    mc = await loop.run_in_executor(
+        None,
+        lambda: run_monte_carlo(all_trades, initial_cap, kelly_cap_val, n_mc_sims),
+    )
+
+    # Benchmark: BTC/USDT fiyatından hesapla
+    bm_ann_return = None
+    bm_total_return = None
+    try:
+        if CCXT_AVAILABLE:
+            import ccxt
+            ex = ccxt.binance({"enableRateLimit": True})
+            bm_sym = "BTC/USDT"
+            date_range = result.get("date_range", {})
+            since_ms = None
+            if date_range.get("start"):
+                import calendar
+                dt = datetime.fromisoformat(date_range["start"].replace("Z", "+00:00"))
+                since_ms = int(dt.timestamp() * 1000)
+            bars = ex.fetch_ohlcv(bm_sym, "1d", since=since_ms, limit=365)
+            if bars and len(bars) >= 2:
+                bm_prices = np.array([b[4] for b in bars])
+                bm_daily  = np.diff(bm_prices) / bm_prices[:-1]
+                bm_total_return = round((bm_prices[-1] / bm_prices[0] - 1) * 100, 2)
+                bm_ann_return   = round(((1 + bm_total_return / 100) ** (365 / max(len(bars), 1)) - 1) * 100, 2)
+
+                # Alpha/Beta hesapla
+                eq_curve    = _build_equity_curve(all_trades, initial_cap, kelly_cap_val)
+                adv_with_bm = calculate_advanced_metrics(
+                    all_trades, eq_curve, initial_cap, benchmark_returns=bm_daily
+                )
+                metrics.update(adv_with_bm)
+    except Exception as bm_err:
+        logger.debug("Benchmark fetch failed: %s", bm_err)
+
+    return {
+        "backtest_id":    backtest_id,
+        "symbol":         symbol,
+        "metrics":        metrics,
+        "monte_carlo":    mc,
+        "benchmark": {
+            "symbol":           "BTC/USDT",
+            "ann_return_pct":   bm_ann_return,
+            "total_return_pct": bm_total_return,
+            "strategy_alpha":   metrics.get("alpha"),
+            "strategy_beta":    metrics.get("beta"),
+            "information_ratio": metrics.get("information_ratio"),
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
