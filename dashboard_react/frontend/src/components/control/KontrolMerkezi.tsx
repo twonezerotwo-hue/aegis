@@ -474,6 +474,20 @@ export const KontrolMerkezi: React.FC<KontrolProps> = ({
     return () => clearInterval(id);
   }, []);
 
+  // Sinyal değişince otomatik gerekçe üret (action + confidence değişimini izle)
+  const prevActionRef = React.useRef<string>("");
+  React.useEffect(() => {
+    if (!btcConsensus) return;
+    const key = `${btcConsensus.action}-${Math.round(btcConsensus.confidence * 100)}`;
+    if (key !== prevActionRef.current && !rationale.loading) {
+      prevActionRef.current = key;
+      // 2 saniye gecikme — veri oturaksın, sonra üret
+      const tid = setTimeout(() => fetchRationale(), 2000);
+      return () => clearTimeout(tid);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [btcConsensus?.action, btcConsensus?.confidence]);
+
   const fetchRationale = React.useCallback(async () => {
     if (!btcConsensus || rationale.loading) return;
     setRationale(r => ({ ...r, loading: true }));
@@ -587,14 +601,27 @@ export const KontrolMerkezi: React.FC<KontrolProps> = ({
         </button>
       </div>
 
+      {rationale.loading && !rationale.text && (
+        <div className="mt-3 flex items-center gap-2 text-[10px] text-slate-600">
+          <span className="h-1.5 w-1.5 rounded-full bg-violet-400 animate-pulse" />
+          Sinyal değişti, gerekçe üretiliyor…
+        </div>
+      )}
       {rationale.text ? (
         <p className="mt-3 text-[12px] leading-6 text-slate-300">
           {rationale.text}
+          {rationale.source && (
+            <span className={`ml-2 text-[9px] font-mono ${SOURCE_BADGE[rationale.source] ?? "text-slate-600"}`}>
+              [{SOURCE_LABEL[rationale.source] ?? rationale.source}]
+            </span>
+          )}
         </p>
       ) : (
-        <p className="mt-2 text-[10px] italic text-slate-700">
-          Mevcut sinyal için Groq veya Ollama'dan Türkçe gerekçe almak için butona bas.
-        </p>
+        !rationale.loading && (
+          <p className="mt-2 text-[10px] italic text-slate-700">
+            Sinyal değişince otomatik üretilir. Manuel üretmek için butona bas.
+          </p>
+        )
       )}
     </div>
     </div>

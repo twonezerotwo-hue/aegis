@@ -306,6 +306,23 @@ class ToucheOrchestrator:
         # ── 6. Recommendation ────────────────────────────────────────────────
         recommendation = self._map_recommendation(eqs.dominant_signal, eqs.signal_strength)
 
+        # ── Phase Hit-Rate Kaydı ──────────────────────────────────────────────
+        # Her faz için: signal yönü, skor, passed durumu loglanır.
+        # Gelecekte paper trade sonuçlarıyla ilişkilendirilerek hangi fazın
+        # gerçekten doğru sinyal verdiği hesaplanabilir.
+        phase_summary = {
+            f"p{r.phase_id}_{r.phase_name}": {
+                "signal":  r.signal,
+                "score":   round(r.score, 2),
+                "passed":  r.passed,
+            }
+            for r in phase_results
+        }
+        logger.info("phase_hit_rate_snapshot",
+                    symbol=self.symbol,
+                    dominant=eqs.dominant_signal,
+                    phases=phase_summary)
+
         signal = ToucheSignal(
             symbol=self.symbol,
             timeframe=self.timeframe,
@@ -319,7 +336,10 @@ class ToucheOrchestrator:
             take_profit=take_profit,
             position_size=position_size,
             phase_results=[r.model_dump() for r in phase_results],
-            metadata={"weighted_scores": eqs.weighted_scores},
+            metadata={
+                "weighted_scores": eqs.weighted_scores,
+                "phase_summary": phase_summary,
+            },
         )
 
         logger.info(

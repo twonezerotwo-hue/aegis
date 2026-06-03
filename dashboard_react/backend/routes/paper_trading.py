@@ -242,6 +242,31 @@ async def place_sell_order(request_data: Dict):
         }
     )
 
+    # ── UnifiedOptimizer gerçek bağlantı ─────────────────────────────────────
+    # Paper trade kapanışından (SELL) gelen PnL'i optimizer'a kaydet.
+    # Bu bilgi Touche EQS fazlarının gelecekteki ağırlıklarını öğrenmesini sağlar.
+    try:
+        from ..main import unified_optimizer  # type: ignore[import]
+        if unified_optimizer is not None and pnl is not None:
+            from strategies.touche_ai.src.engine.unified_optimizer import TradeRecord
+            entry_p = float(next((p["entry_price"] for p in session["positions"]
+                                  if p["symbol"] == symbol), price))
+            record = TradeRecord(
+                entry_price=entry_p,
+                exit_price=float(price),
+                pnl=float(pnl),
+                winning_phases=[1, 2, 3] if pnl > 0 else [],
+                losing_phases=[1, 2, 3]  if pnl < 0 else [],
+                rsi_at_entry=50.0,
+                macd_at_entry=0.0,
+                volatility=0.0,
+                fibonacci_level=0.618,
+            )
+            unified_optimizer.record_trade(record)
+            logger.info(f"OPTIMIZER_FEED: pnl={pnl:.2f} symbol={symbol}")
+    except Exception as opt_exc:
+        logger.debug(f"optimizer_feed_skip: {opt_exc}")
+
     return trade
 
 

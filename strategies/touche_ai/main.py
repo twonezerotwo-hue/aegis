@@ -695,6 +695,64 @@ async def touche_exit_signal(
     }
 
 
+# ── Phase Hit-Rate İzleme ────────────────────────────────────────────────────
+# Son N sinyal analizinin faz özeti → hangi faz ne sıklıkla hangi yönde oy kullandı
+
+_phase_snapshot_log: list[dict] = []  # son 100 snapshot
+_MAX_SNAPSHOTS = 100
+
+
+@app.post("/touche/phase_snapshot")
+async def record_phase_snapshot(body: dict):
+    """
+    Orchestrator'dan gelen faz özetini kaydeder.
+    dashboard_backend → her /touche/analyze çağrısı sonrası POST eder.
+    """
+    _phase_snapshot_log.append({**body, "recorded_at": __import__("time").time()})
+    if len(_phase_snapshot_log) > _MAX_SNAPSHOTS:
+        _phase_snapshot_log.pop(0)
+    return {"stored": True, "total": len(_phase_snapshot_log)}
+
+
+@app.get("/touche/phase_hit_rate")
+async def get_phase_hit_rate():
+    """
+    Son N sinyal analizinden faz bazlı BULLISH/BEARISH/NEUTRAL oy dağılımı.
+    Hangi faz daha tutarlı sinyal veriyor?
+    """
+    if not _phase_snapshot_log:
+        return {"total_snapshots": 0, "phases": {}, "message": "Henüz snapshot yok"}
+
+    agg: dict[str, dict[str, int]] = {}
+    for snap in _phase_snapshot_log:
+        for phase_key, info in (snap.get("phases") or {}).items():
+            if phase_key not in agg:
+                agg[phase_key] = {"BULLISH": 0, "BEARISH": 0, "NEUTRAL": 0, "total": 0}
+            sig = str(info.get("signal", "NEUTRAL")).upper()
+            agg[phase_key][sig] = agg[phase_key].get(sig, 0) + 1
+            agg[phase_key]["total"] += 1
+
+    result = {}
+    for phase_key, counts in agg.items():
+        total = counts["total"]
+        bull = counts.get("BULLISH", 0)
+        bear = counts.get("BEARISH", 0)
+        neut = counts.get("NEUTRAL", 0)
+        result[phase_key] = {
+            "BULLISH_pct": round(bull / total * 100, 1) if total else 0,
+            "BEARISH_pct": round(bear / total * 100, 1) if total else 0,
+            "NEUTRAL_pct": round(neut / total * 100, 1) if total else 0,
+            "total_signals": total,
+            "dominant": max({"B": bull, "E": bear, "N": neut}, key={"B": bull, "E": bear, "N": neut}.get),
+        }
+
+    return {
+        "total_snapshots": len(_phase_snapshot_log),
+        "window": f"son {_MAX_SNAPSHOTS} analiz",
+        "phases": result,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
