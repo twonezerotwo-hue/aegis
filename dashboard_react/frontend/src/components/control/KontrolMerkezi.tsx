@@ -76,6 +76,11 @@ const pnlColor = (v: number) => v >= 0 ? "text-emerald-400" : "text-rose-400";
 const MODULE_COLORS: Record<string, string> = {
   touche: "bg-violet-400", fundamental: "bg-sky-400",
   news: "bg-amber-400", sentinel: "bg-rose-400", quantum: "bg-emerald-400",
+  ml: "bg-indigo-400",
+};
+const MODULE_SHORT: Record<string, string> = {
+  touche: "T", fundamental: "F", news: "N",
+  sentinel: "S", quantum: "Q", ml: "ML",
 };
 
 // ── Zone 1: Karar Paneli ─────────────────────────────────────────────────────
@@ -136,8 +141,8 @@ const KararPaneli: React.FC<{ consensus: ConsensusResponse | null; loading: bool
           const pct = Math.min(100, Math.max(0, Math.round((val as number) * 100)));
           return (
             <div key={mod} className="flex items-center gap-2">
-              <span className="w-3 shrink-0 font-mono text-[9px] font-bold uppercase text-slate-500">
-                {mod[0].toUpperCase()}
+              <span className="w-5 shrink-0 font-mono text-[9px] font-bold uppercase text-slate-500">
+                {MODULE_SHORT[mod] ?? mod[0].toUpperCase()}
               </span>
               <div className="h-1.5 flex-1 rounded-full bg-slate-700/60">
                 <div

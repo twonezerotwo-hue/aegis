@@ -818,32 +818,82 @@ def add_ai_scores(
         df['news_score'] = normalize_score(0.5 + news_raw.clip(-1.0, 1.0) * 0.42)
         logger.info("News: 30d+7d cumulative return proxy (medium-term sentiment)")
 
-    # ── CONSENSUS — Trend is a GATE, NOT a score component ───────────────────
-    # Key insight: adding a stable trend score (e.g. 0.77 throughout a bull market)
-    # to the consensus shifts the entire series up → z-score has no room to
-    # oscillate → no signals generated. Trend must be an external gate only.
-    # Consensus = Touche (momentum) + Fundamental (quality) + News (direction)
+    # ── ML Backtest Skoru ─────────────────────────────────────────────────────
+    # Backtest sırasında ML modelini her bar için çalıştır.
+    # Model eğitilmişse: FeatureEngineering → predict → ml_score sütunu
+    # Eğitilmemişse: 0.5 (nötr), ML ağırlığı sıfır
+    _ml_trained_bt = False
+    df['ml_score'] = 0.5  # varsayılan nötr
+
+    try:
+        from routes.ml_model import _models, build_features, predict as _ml_predict_raw
+        _bt_key = f"{symbol}|{timeframe}"
+        # En yakın eğitilmiş model: önce symbol|tf, sonra BTC/USDT|4h fallback
+        _bt_model_key = None
+        for _try_key in [_bt_key, f"BTC/USDT|{timeframe}", "BTC/USDT|4h"]:
+            if _try_key in _models:
+                _bt_model_key = _try_key
+                break
+
+        if _bt_model_key:
+            # Tüm barlar için özellik üret ve tahmin yap
+            _bt_feats = build_features(df)
+            _bt_model, _bt_le, _bt_cols = _models[_bt_model_key]
+            _bt_x = _bt_feats.reindex(columns=_bt_cols, fill_value=0.0).values
+            import numpy as np
+            _bt_x = np.where(np.isfinite(_bt_x), _bt_x, 0.0)
+            _bt_proba = _bt_model.predict_proba(_bt_x)  # shape (N, n_classes)
+            # Sınıf: buy=1 class index
+            _bt_classes = _bt_le.classes_.tolist()
+            _buy_idx = _bt_classes.index(1) if 1 in _bt_classes else -1
+            _sell_idx = _bt_classes.index(-1) if -1 in _bt_classes else -1
+            if _buy_idx >= 0 and _sell_idx >= 0:
+                _bt_ml_scores = 0.5 + (
+                    _bt_proba[:, _buy_idx] - _bt_proba[:, _sell_idx]
+                ) * 0.5
+                # feats index ile df'i hizala
+                df.loc[_bt_feats.index, 'ml_score'] = np.clip(_bt_ml_scores, 0.05, 0.95)
+            _ml_trained_bt = True
+            logger.info("Backtest ML scoring: %s → %d bars", _bt_model_key, len(_bt_feats))
+    except Exception as _ml_exc:
+        logger.debug("Backtest ML scoring skipped: %s", _ml_exc)
+
+    df['ml_score'] = df['ml_score'].fillna(0.5)
+
+    # ── CONSENSUS — Trend GATE, ML dahil ────────────────────────────────────
     _w = module_weights or {}
-    _w = {
-        'touche':      float(_w.get('touche',      0.45)),
-        'fundamental': float(_w.get('fundamental', 0.30)),
-        'news':        float(_w.get('news',        0.25)),
-        'sentinel':    float(_w.get('sentinel',    0.00)),
-        'quantum':     float(_w.get('quantum',     0.00)),
-    }
+    if _ml_trained_bt:
+        _w = {
+            'touche':      float(_w.get('touche',      0.35)),
+            'fundamental': float(_w.get('fundamental', 0.23)),
+            'news':        float(_w.get('news',        0.17)),
+            'ml':          float(_w.get('ml',          0.25)),
+            'sentinel':    float(_w.get('sentinel',    0.00)),
+            'quantum':     float(_w.get('quantum',     0.00)),
+        }
+    else:
+        _w = {
+            'touche':      float(_w.get('touche',      0.45)),
+            'fundamental': float(_w.get('fundamental', 0.30)),
+            'news':        float(_w.get('news',        0.25)),
+            'ml':          0.0,
+            'sentinel':    float(_w.get('sentinel',    0.00)),
+            'quantum':     float(_w.get('quantum',     0.00)),
+        }
     _w = get_event_aware_weights(_w, event_hint)
-    w_total = sum(v for k, v in _w.items() if k not in ('trend',))
+    w_total = sum(v for k, v in _w.items())
     if w_total > 0:
-        _w = {k: (v / w_total if k not in ('trend',) else v) for k, v in _w.items()}
+        _w = {k: v / w_total for k, v in _w.items()}
 
     df['consensus_score'] = (
         df['touche_score']      * _w['touche']      +
         df['fundamental_score'] * _w['fundamental'] +
         df['news_score']        * _w['news']        +
+        df['ml_score']          * _w.get('ml', 0.0) +
         df['sentinel_score']    * _w['sentinel']    +
         df['quantum_score']     * _w['quantum']
     )
-    # trend_score is stored in df for reporting but does NOT enter the oscillating signal
+    # trend_score stored for reporting, does NOT enter oscillating signal
 
     # Multi-TF confluence: scale 1h consensus by 4h/1d alignment
     if timeframe == "1h":

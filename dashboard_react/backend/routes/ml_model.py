@@ -46,6 +46,41 @@ _ohlcv_cache: dict[str, pd.DataFrame] = {}
 _ml_pred_cache: dict[str, dict]   = {}  # son ML tahmini önbelleği (dashboard okur)
 
 
+def get_ml_score(symbol: str, timeframe: str) -> float:
+    """
+    Sistem geneli ML skoru erişimi — sync, her modülden çağrılabilir.
+    Model eğitilmemişse 0.5 (nötr) döner.
+    """
+    key = f"{symbol}|{timeframe}"
+    cached = _ml_pred_cache.get(key)
+    if cached:
+        return float(cached.get("ml_score", 0.5))
+    # Birleşik BTC tahmini yok, BTC/USDT|4h dene
+    for fallback_key in [f"BTC/USDT|{timeframe}", "BTC/USDT|4h", "BTC/USDT|1d"]:
+        if fallback_key in _ml_pred_cache:
+            return float(_ml_pred_cache[fallback_key].get("ml_score", 0.5))
+    return 0.5  # eğitilmemiş → nötr
+
+
+def get_ml_signal(symbol: str, timeframe: str) -> str:
+    """BUY / SELL / HOLD — model yoksa NEUTRAL"""
+    key = f"{symbol}|{timeframe}"
+    cached = _ml_pred_cache.get(key)
+    if cached:
+        return cached.get("signal", "HOLD")
+    return "NEUTRAL"
+
+
+def is_ml_trained(symbol: str, timeframe: str) -> bool:
+    key = f"{symbol}|{timeframe}"
+    if key in _ml_pred_cache:
+        return True
+    for k in _ml_pred_cache:
+        if k.startswith("BTC/USDT|"):
+            return True
+    return False
+
+
 # ── Özellik Mühendisliği ──────────────────────────────────────────────────────
 
 def _ema(s: pd.Series, n: int) -> pd.Series:

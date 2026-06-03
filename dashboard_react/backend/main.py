@@ -894,12 +894,24 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
         sentinel_score = min(max(float(sentinel_score), 0.0), 1.0)
         news_score = min(max(float(news_score), 0.0), 1.0)
 
-        # 3-way weighted consensus
-        weights = {"touche": 0.50, "fundamental": 0.35, "news": 0.15}
+        # ── ML skoru sisteme dahil ───────────────────────────────────────────
+        from routes.ml_model import get_ml_score, is_ml_trained
+        ml_trained  = is_ml_trained(symbol, timeframe)
+        ml_score_raw = get_ml_score(symbol, timeframe)
+        ml_score    = min(max(float(ml_score_raw), 0.0), 1.0)
+
+        # ML eğitilmişse ağırlıkları yeniden dağıt (0.25 ML, gerisi eşit oranla azalır)
+        # Eğitilmemişse orijinal 3-modül ağırlıkları korunur
+        if ml_trained:
+            weights = {"touche": 0.38, "fundamental": 0.27, "news": 0.10, "ml": 0.25}
+        else:
+            weights = {"touche": 0.50, "fundamental": 0.35, "news": 0.15, "ml": 0.00}
+
         weighted_score = (
-            touche_score * weights["touche"] +
-            fundamental_score * weights["fundamental"] +
-            news_score * weights["news"]
+            touche_score       * weights["touche"] +
+            fundamental_score  * weights["fundamental"] +
+            news_score         * weights["news"] +
+            ml_score           * weights["ml"]
         )
 
         # Determine action
@@ -1056,9 +1068,10 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
                 "confidence": round(confidence, 4),
                 "weights": weights,
                 "components": {
-                    "touche": {"score": round(touche_score, 4), "weight": 0.50},
-                    "fundamental": {"score": round(fundamental_score, 4), "weight": 0.35},
-                    "news": {"score": round(news_score, 4), "weight": 0.15},
+                    "touche":      {"score": round(touche_score, 4),      "weight": weights["touche"]},
+                    "fundamental": {"score": round(fundamental_score, 4), "weight": weights["fundamental"]},
+                    "news":        {"score": round(news_score, 4),        "weight": weights["news"]},
+                    **({"ml": {"score": round(ml_score, 4), "weight": weights["ml"]}} if ml_trained else {}),
                 },
                 "symbol": symbol,
                 "timeframe": timeframe,

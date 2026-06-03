@@ -333,10 +333,22 @@ def _apply_ai_signal_overlay(
     news      = float(module_scores.get("news", 0.5))
     sentinel  = float(module_scores.get("sentinel", 0.5))  # high = low risk
 
-    # ── BTC signal: Touche 50%, Fundamental 30%, Sentinel risk 20% ────────────
-    btc_signal = touche * 0.50 + fundamental * 0.30 + sentinel * 0.20
-    btc_dev = btc_signal - 0.5          # −0.5 to +0.5
-    # Scale: ±0.5 deviation → ±6pp for long, ±4pp for short
+    # ML skoru dahil et (eğitilmişse ağırlıklı, değilse 0.5 nötr katkı)
+    try:
+        from routes.ml_model import get_ml_score as _gml, is_ml_trained as _iml
+        ml_score   = _gml("BTC/USDT", "4h")
+        ml_trained = _iml("BTC/USDT", "4h")
+    except Exception:
+        ml_score   = 0.5
+        ml_trained = False
+
+    # ── BTC signal: ML dahil edildi ───────────────────────────────────────────
+    if ml_trained:
+        # ML 30%, Touche 40%, Fundamental 20%, Sentinel 10%
+        btc_signal = ml_score * 0.30 + touche * 0.40 + fundamental * 0.20 + sentinel * 0.10
+    else:
+        btc_signal = touche * 0.50 + fundamental * 0.30 + sentinel * 0.20
+    btc_dev = btc_signal - 0.5
     btc_scale = {"short": 0.08, "medium": 0.10, "long": 0.12}.get(horizon, 0.10)
     btc_delta = round(btc_dev * btc_scale, 4)
 
@@ -355,8 +367,9 @@ def _apply_ai_signal_overlay(
         "bond":      round(-(btc_delta + gold_delta + cash_delta + commodity_delta), 4),
     }
 
+    ml_label = f",ML={ml_score:.2f}" if ml_trained else ""
     _apply_overlay(weights, overlay, basis,
-                   f"ai_signal:T={touche:.2f},F={fundamental:.2f},N={news:.2f},S={sentinel:.2f}")
+                   f"ai_signal:T={touche:.2f},F={fundamental:.2f},N={news:.2f},S={sentinel:.2f}{ml_label}")
 
     if abs(btc_delta) >= 0.02:
         direction = "artırıldı" if btc_delta > 0 else "azaltıldı"

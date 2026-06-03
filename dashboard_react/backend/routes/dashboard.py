@@ -1136,23 +1136,59 @@ async def get_consensus(
         tf_signals_map = touche_payload.get("tf_signals") or {}
         mtf = _compute_mtf_alignment(tf_signals_map, timeframe)
 
-        # MTF hizalanma skoru Touche ağırlığını modüle eder:
-        # Üst TF'ler onaylıyorsa Touche etkisi artar (0.50→0.60),
-        # çelişiyorsa azalır (0.50→0.40)
-        mtf_touche_boost = (mtf["score"] - 0.5) * 0.20   # ±0.10 aralığında
-        touche_w_adj = max(0.30, min(0.70, 0.50 + mtf_touche_boost))
-        remain = 1.0 - touche_w_adj
-        fundamental_w_adj = remain * 0.70
-        news_w_adj        = remain * 0.30
+        # ── ML skoru consensus'a dahil ────────────────────────────────────
+        try:
+            from routes.ml_model import get_ml_score as _get_ml_score, is_ml_trained as _is_ml_trained
+            _ml_trained = _is_ml_trained(symbol, timeframe)
+            _ml_score   = _get_ml_score(symbol, timeframe)
+        except Exception:
+            _ml_trained = False
+            _ml_score   = 0.5
+
+        # MTF + ML ağırlık hesabı
+        mtf_touche_boost = (mtf["score"] - 0.5) * 0.20
+        if _ml_trained:
+            # ML var: Touche 0.35±MTF, Fundamental 0.22, News 0.08, ML 0.25
+            touche_w_adj = max(0.25, min(0.50, 0.35 + mtf_touche_boost))
+            ml_w_adj     = 0.25
+            remain       = 1.0 - touche_w_adj - ml_w_adj
+            fundamental_w_adj = remain * 0.73
+            news_w_adj        = remain * 0.27
+        else:
+            # ML yok: orijinal ağırlıklar (MTF ayarlamalı)
+            touche_w_adj = max(0.30, min(0.70, 0.50 + mtf_touche_boost))
+            remain = 1.0 - touche_w_adj
+            fundamental_w_adj = remain * 0.70
+            news_w_adj        = remain * 0.30
+            ml_w_adj          = 0.0
 
         weights = {"touche": round(touche_w_adj, 3),
                    "fundamental": round(fundamental_w_adj, 3),
-                   "news": round(news_w_adj, 3)}
+                   "news": round(news_w_adj, 3),
+                   "ml": round(ml_w_adj, 3)}
         weighted_score = (
             touche_score      * weights["touche"] +
             fundamental_score * weights["fundamental"] +
-            news_score        * weights["news"]
+            news_score        * weights["news"] +
+            _ml_score         * weights["ml"]
         )
+
+        # ML module_sources'a ekle
+        if _ml_trained:
+            module_sources["ml"] = _build_module_source(
+                module="ml",
+                service="ml-predictor",
+                source="xgboost_cached",
+                source_data="3bar_forward_return_classifier",
+                timestamp=None,
+                timestamp_source="none",
+                data_status="LIVE",
+                fallback_used=False,
+                asset_specific=True,
+                shared_score=False,
+                warnings=[],
+                value=_ml_score,
+            )
 
         # Determine action
         if weighted_score > 0.65:
