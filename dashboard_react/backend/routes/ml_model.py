@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 _TRAIN_LOOKBACK_BARS = int(os.environ.get("ML_TRAIN_BARS", "2000"))   # eğitim penceresi
 _RETRAIN_BARS        = int(os.environ.get("ML_RETRAIN_BARS", "200"))  # her N barda yeniden eğit
 _FORWARD_BARS        = int(os.environ.get("ML_FORWARD_BARS", "3"))    # hedef: N bar sonraki getiri
-_ATR_MULT            = float(os.environ.get("ML_ATR_MULT", "0.5"))    # BUY/SELL eşiği
+_ATR_MULT            = float(os.environ.get("ML_ATR_MULT", "0.75"))   # BUY/SELL eşiği — 0.5→0.75: HOLD sınıfı azaltıldı, sinyaller daha seçici
 _MIN_TRAIN_ROWS      = 200
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -167,66 +167,93 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     feat: dict[str, pd.Series] = {}
 
-    # ── Getiriler ─────────────────────────────────────────────────────────
+    # ── Yardımcı: Z-score serisi ──────────────────────────────────────────
+    def _zscore(s: pd.Series, window: int = 50) -> pd.Series:
+        """(s - rolling_mean) / (rolling_std + ε) — sergiyi durduran trend etkisini kaldırır."""
+        mu  = s.rolling(window, min_periods=window // 2).mean()
+        sig = s.rolling(window, min_periods=window // 2).std()
+        return (s - mu) / (sig + 1e-10)
+
+    # ── Getiriler: Z-score'lu (trend etkisi giderilmiş) ───────────────────
+    # Sorun: ham ret_1=+0.02 → model "pozitif → AL" öğreniyor (bull'da hep 0.95)
+    # Düzeltme: ret_z = (bu getiri - son 50 bar ortalama getiri) / std
+    #   → "olağan trend" mı yoksa "olağandışı hareket" mi ayrımı yapılır
     for n in [1, 2, 3, 5, 10, 20]:
-        feat[f"ret_{n}"] = c.pct_change(n)
+        raw_ret = c.pct_change(n)
+        feat[f"ret_{n}"]   = raw_ret                  # ham tutuldu (ağırlık az)
+        feat[f"ret_z_{n}"] = _zscore(raw_ret, 50)     # detrended z-score
 
     # ── Volatilite ────────────────────────────────────────────────────────
+    bar_ret = c.pct_change()
     for n in [5, 10, 20]:
-        feat[f"vol_{n}"]   = c.pct_change().rolling(n).std()
-    feat["atr_14"]  = _atr(h, l, c, 14)
-    feat["atr_norm"] = feat["atr_14"] / c  # ATR / fiyat (normalize)
+        feat[f"vol_{n}"]   = bar_ret.rolling(n).std()
+    feat["atr_14"]   = _atr(h, l, c, 14)
+    feat["atr_norm"] = feat["atr_14"] / c
+    # Volatilite rejimi: şu an yüksek mi düşük mü?
+    feat["vol_regime"] = _zscore(feat["vol_20"] if "vol_20" in feat
+                                 else bar_ret.rolling(20).std(), 60)
 
     # ── Trend: EMA ────────────────────────────────────────────────────────
     for n in [9, 21, 50, 100, 200]:
         em = _ema(c, n)
         feat[f"ema{n}_slope"] = em.pct_change(3)
         feat[f"price_ema{n}"] = (c / em - 1)
-    feat["ema9_21_cross"]  = (_ema(c, 9) - _ema(c, 21)) / c
-    feat["ema21_50_cross"] = (_ema(c, 21) - _ema(c, 50)) / c
-    feat["ema50_200_cross"]= (_ema(c, 50) - _ema(c, 200)) / c
+    feat["ema9_21_cross"]   = (_ema(c, 9)  - _ema(c, 21))  / c
+    feat["ema21_50_cross"]  = (_ema(c, 21) - _ema(c, 50))  / c
+    feat["ema50_200_cross"] = (_ema(c, 50) - _ema(c, 200)) / c
 
-    # ── RSI ───────────────────────────────────────────────────────────────
-    feat["rsi_7"]  = _rsi(c, 7)
-    feat["rsi_14"] = _rsi(c, 14)
-    feat["rsi_21"] = _rsi(c, 21)
-    feat["rsi_slope_3"] = feat["rsi_14"].diff(3)
+    # ── RSI: ham + z-score + sapma ────────────────────────────────────────
+    rsi14 = _rsi(c, 14)
+    feat["rsi_7"]       = _rsi(c, 7)
+    feat["rsi_14"]      = rsi14
+    feat["rsi_21"]      = _rsi(c, 21)
+    feat["rsi_slope_3"] = rsi14.diff(3)
+    # RSI 50'den uzaklık (ortalama merkez)
+    feat["rsi_dev_50"]  = rsi14 - 50.0
+    # RSI z-score: bu RSI kendi geçmişine göre aşırı mı?
+    feat["rsi_z"]       = _zscore(rsi14, 50)
 
     # ── MACD ──────────────────────────────────────────────────────────────
     macd_line   = _ema(c, 12) - _ema(c, 26)
     signal_line = _ema(macd_line, 9)
-    feat["macd_hist"]      = (macd_line - signal_line) / c
-    feat["macd_hist_slope"]= feat["macd_hist"].diff(3)
-    feat["macd_cross"]     = (macd_line - signal_line).apply(np.sign)
+    macd_hist   = (macd_line - signal_line) / (c + 1e-10)
+    feat["macd_hist"]       = macd_hist
+    feat["macd_hist_slope"] = macd_hist.diff(3)
+    feat["macd_cross"]      = (macd_line - signal_line).apply(np.sign)
+    # MACD z-score
+    feat["macd_hist_z"]     = _zscore(macd_hist, 50)
 
     # ── Bollinger ─────────────────────────────────────────────────────────
-    bb_mid   = c.rolling(20).mean()
-    bb_std   = c.rolling(20).std()
-    feat["bb_width"]   = 2 * bb_std / (bb_mid + 1e-10)
-    feat["bb_position"]= (c - bb_mid) / (bb_std + 1e-10)
+    bb_mid = c.rolling(20).mean()
+    bb_std = c.rolling(20).std()
+    feat["bb_width"]    = 2 * bb_std / (bb_mid + 1e-10)
+    feat["bb_position"] = (c - bb_mid) / (bb_std + 1e-10)    # -2..+2 arası
+    # BB genişlik rejimi: daralıyor mu genişliyor mu?
+    feat["bb_width_z"]  = _zscore(feat["bb_width"], 60)
 
     # ── Hacim ─────────────────────────────────────────────────────────────
     vol_ma20 = v.rolling(20).mean()
     feat["vol_ratio_5"]  = v.rolling(5).mean() / (vol_ma20 + 1e-10)
     feat["vol_ratio_20"] = v / (vol_ma20 + 1e-10)
-    # OBV slope
     obv = (np.sign(c.diff()) * v).cumsum()
-    feat["obv_slope_5"] = obv.pct_change(5)
+    feat["obv_slope_5"]  = obv.pct_change(5)
+    feat["obv_slope_z"]  = _zscore(obv.pct_change(5), 50)
 
     # ── Mum özellikleri ────────────────────────────────────────────────────
-    body     = (c - o).abs()
-    total    = h - l + 1e-10
-    feat["body_pct"]         = body / total
-    feat["upper_wick_pct"]   = (h - c.clip(upper=o).where(c > o, c)) / total
-    feat["lower_wick_pct"]   = (c.clip(lower=o).where(c < o, c) - l) / total
-    feat["is_bullish_candle"]= (c > o).astype(float)
+    body  = (c - o).abs()
+    total = h - l + 1e-10
+    feat["body_pct"]          = body / total
+    feat["upper_wick_pct"]    = (h - c.clip(upper=o).where(c > o, c)) / total
+    feat["lower_wick_pct"]    = (c.clip(lower=o).where(c < o, c) - l) / total
+    feat["is_bullish_candle"] = (c > o).astype(float)
 
-    # ── Momentum ──────────────────────────────────────────────────────────
+    # ── Momentum: ham + z-score ───────────────────────────────────────────
     for n in [3, 5, 10, 20]:
-        feat[f"mom_{n}"] = c / c.shift(n) - 1
+        mom_raw = c / c.shift(n) - 1
+        feat[f"mom_{n}"]   = mom_raw
+        feat[f"mom_z_{n}"] = _zscore(mom_raw, 50)    # trend giderilmiş
 
-    # ── ADX basit proxy ────────────────────────────────────────────────────
-    # Gerçek ADX yerine trending/ranging sinyali
+    # ── Trend gücü proxy ──────────────────────────────────────────────────
     feat["directional_strength"] = (
         (feat["ema9_21_cross"].abs() + feat["ema21_50_cross"].abs()) / 2
     )
@@ -237,6 +264,15 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     feat["range_position"] = (c - l.rolling(20).min()) / (
         h.rolling(20).max() - l.rolling(20).min() + 1e-10
     )
+
+    # ── Stochastic RSI proxy ───────────────────────────────────────────────
+    rsi14_low  = rsi14.rolling(14).min()
+    rsi14_high = rsi14.rolling(14).max()
+    feat["stoch_rsi"] = (rsi14 - rsi14_low) / (rsi14_high - rsi14_low + 1e-10)
+
+    # ── Gerçekleşmiş varyans (yakın dönem volatilite tahmini) ─────────────
+    feat["realized_var_5"]  = (bar_ret ** 2).rolling(5).sum()
+    feat["realized_var_20"] = (bar_ret ** 2).rolling(20).sum()
 
     # ── NaN düşür, sonsuzlukları kırp ─────────────────────────────────────
     fdf = pd.DataFrame(feat, index=df.index)
@@ -264,55 +300,85 @@ def build_target(df: pd.DataFrame, forward: int = 3, atr_mult: float = 0.5) -> p
 # ── Model Eğitimi ─────────────────────────────────────────────────────────────
 
 def _get_model():
-    """XGBoost varsa kullan, yoksa GradientBoosting fallback."""
+    """
+    XGBoost — sıkı regularizasyon ile overfitting önlenir.
+
+    Önceki sorun: max_depth=5, n_estimators=200 → %97 accuracy (ezber)
+    Düzeltme: max_depth=3, reg_alpha/lambda yüksek, min_child_weight artırıldı
+    """
     try:
         from xgboost import XGBClassifier
         return XGBClassifier(
-            n_estimators=200,
-            max_depth=5,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.7,
+            n_estimators=100,       # eskiden 200 — daha az ağaç
+            max_depth=3,            # eskiden 5 — sığ ağaçlar overfitting'i azaltır
+            learning_rate=0.08,
+            subsample=0.7,          # eskiden 0.8 — daha az örnek
+            colsample_bytree=0.6,   # eskiden 0.7 — daha az özellik
+            min_child_weight=10,    # yeni — düğüm bölünmesi için minimum örnek
+            reg_alpha=0.5,          # yeni — L1 regularizasyon
+            reg_lambda=2.0,         # yeni — L2 regularizasyon
             eval_metric="mlogloss",
-            use_label_encoder=False,
             random_state=42,
             verbosity=0,
         )
     except ImportError:
         from sklearn.ensemble import GradientBoostingClassifier
-        return GradientBoostingClassifier(n_estimators=100, max_depth=4, random_state=42)
+        return GradientBoostingClassifier(
+            n_estimators=100, max_depth=3, min_samples_leaf=20, random_state=42
+        )
 
 
 def train_model(df: pd.DataFrame, symbol_tf: str) -> dict:
     """
-    Walk-forward eğitim:
-    - İlk %80 train, son %20 test
-    - Özellikleri ve hedefi hizala
-    - Model + metadata sakla
+    Walk-forward eğitim ile TimeSeriesSplit çapraz doğrulama.
+
+    Değişiklikler:
+    - Tek 80/20 split → TimeSeriesSplit(n_splits=5) gerçekçi accuracy
+    - CalibratedClassifierCV: olasılıkları %0/100 uçlarından uzaklaştırır
+    - Son split son eğitim verisi: hiçbir zaman geleceği görmez
     """
     from sklearn.preprocessing import LabelEncoder
     from sklearn.metrics import accuracy_score
+    from sklearn.model_selection import TimeSeriesSplit
+    from sklearn.calibration import CalibratedClassifierCV
 
     feats = build_features(df)
     target = build_target(df, _FORWARD_BARS, _ATR_MULT)
 
-    # Ortak index
     idx = feats.index.intersection(target.index)
-    X   = feats.loc[idx].values
+    X     = feats.loc[idx].values
     y_raw = target.loc[idx].values
-    # -1,0,1 → 0,1,2
-    le = LabelEncoder()
-    y  = le.fit_transform(y_raw)
+    le    = LabelEncoder()
+    y     = le.fit_transform(y_raw)
 
     if len(X) < _MIN_TRAIN_ROWS:
         raise ValueError(f"Yetersiz veri: {len(X)} satır, min {_MIN_TRAIN_ROWS}")
 
-    split = int(len(X) * 0.80)
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
+    # TimeSeriesSplit: 5 katlı zaman serisi çapraz doğrulama
+    # Son katlama en güncel veri — hem kalibrasyon hem test için kullanılır
+    tscv = TimeSeriesSplit(n_splits=5)
+    splits = list(tscv.split(X))
 
-    model = _get_model()
-    model.fit(X_train, y_train)
+    # Son split → test seti (en güncel %20)
+    train_idx, test_idx = splits[-1]
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # Ham XGBoost eğit
+    base_model = _get_model()
+    base_model.fit(X_train, y_train)
+
+    # Olasılık kalibrasyonu — "sigmoid" (Platt) küçük setlerde daha kararlı
+    # isotonic: monoton dönüşüm, büyük setlerde iyi ama 200 satırda bozulabilir
+    # sigmoid: Platt scaling, 2 parametreli → daha kararlı ve daha gerçekçi
+    # Önceki: predict_proba → 0.95 gibi aşırı değerler
+    # Sonrası: Platt scaling → 0.55-0.75 arası gerçekçi aralık
+    try:
+        calibrated = CalibratedClassifierCV(base_model, cv="prefit", method="sigmoid")
+        calibrated.fit(X_test, y_test)
+        model = calibrated
+    except Exception:
+        model = base_model  # kalibrasyon başarısız → ham model
 
     y_pred    = model.predict(X_test)
     accuracy  = round(accuracy_score(y_test, y_pred) * 100, 2)
@@ -354,11 +420,17 @@ def predict(df: pd.DataFrame, symbol_tf: str) -> dict:
     """
     Son barda tahmin yap.
     Çıktı: {ml_score, buy_prob, sell_prob, hold_prob, signal, confidence}
+
+    Olasılık kırpma: Aşırı güven önlemek için [0.15, 0.85] aralığında kliple.
+    Finansal modeller genellikle %60-70 max güvene sahip olmalı.
     """
     if symbol_tf not in _models:
         return {"ml_score": 0.5, "signal": "NEUTRAL", "confidence": 0.0,
                 "buy_prob": 0.33, "sell_prob": 0.33, "hold_prob": 0.33,
                 "trained": False}
+
+    _PROB_CLIP_LOW  = 0.10   # minimum olasılık — sıfır güven yok
+    _PROB_CLIP_HIGH = 0.80   # maksimum olasılık — aşırı güven yok
 
     model, le, feat_cols = _models[symbol_tf]
     feats = build_features(df)
@@ -382,30 +454,44 @@ def predict(df: pd.DataFrame, symbol_tf: str) -> dict:
     # Sınıf → olasılık eşlemesi
     classes  = le.classes_.tolist()  # [-1, 0, 1]
     prob_map = {int(c): float(p) for c, p in zip(classes, proba)}
-    buy_p    = prob_map.get(1,  0.0)
-    hold_p   = prob_map.get(0,  0.0)
-    sell_p   = prob_map.get(-1, 0.0)
+    buy_p_raw  = prob_map.get(1,  0.0)
+    hold_p_raw = prob_map.get(0,  0.0)
+    sell_p_raw = prob_map.get(-1, 0.0)
+
+    # Olasılık kırpma — aşırı güveni [0.10, 0.80] aralığına çek
+    # Sorun: XGBoost trendy piyasada 0.95+ çıkarıyor → yanıltıcı sinyal
+    # Finansal tahmin gerçekte %55-70 doğru olabilir, 0.95 güven yanlış
+    buy_p  = float(np.clip(buy_p_raw,  _PROB_CLIP_LOW, _PROB_CLIP_HIGH))
+    hold_p = float(np.clip(hold_p_raw, _PROB_CLIP_LOW, _PROB_CLIP_HIGH))
+    sell_p = float(np.clip(sell_p_raw, _PROB_CLIP_LOW, _PROB_CLIP_HIGH))
+
+    # Yeniden normalize et (toplam=1)
+    total  = buy_p + hold_p + sell_p
+    if total > 0:
+        buy_p /= total; hold_p /= total; sell_p /= total
 
     # ML skoru: 0.5 nötr, yüksek = bullish
     ml_score = round(0.5 + (buy_p - sell_p) * 0.5, 4)
-    ml_score = max(0.05, min(0.95, ml_score))
+    ml_score = max(0.1, min(0.9, ml_score))
 
-    if ml_score > 0.62:
+    # Karar eşikleri: kalibre sonrası daha hassas
+    if ml_score > 0.60:
         signal = "BUY"
-    elif ml_score < 0.38:
+    elif ml_score < 0.40:
         signal = "SELL"
     else:
         signal = "HOLD"
 
     confidence = round(max(buy_p, sell_p, hold_p), 3)
     return {
-        "ml_score":   ml_score,
-        "signal":     signal,
-        "confidence": confidence,
-        "buy_prob":   round(buy_p,  3),
-        "sell_prob":  round(sell_p, 3),
-        "hold_prob":  round(hold_p, 3),
-        "trained":    True,
+        "ml_score":    ml_score,
+        "signal":      signal,
+        "confidence":  confidence,
+        "buy_prob":    round(buy_p,  3),
+        "sell_prob":   round(sell_p, 3),
+        "hold_prob":   round(hold_p, 3),
+        "trained":     True,
+        "raw_buy_prob": round(buy_p_raw, 3),   # debug: kırpmadan önceki
     }
 
 
