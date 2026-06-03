@@ -16,6 +16,33 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
+# ── Fear & Greed Index (gerçek veri, ücretsiz, key gerektirmez) ────────────────
+# alternative.me crypto Fear & Greed — 5 dakika önbellekli
+_FNG_CACHE: dict[str, Any] = {"value": None, "ts": 0.0, "classification": ""}
+_FNG_TTL = 300.0  # 5 dakika
+
+async def _fetch_fear_greed() -> dict:
+    """
+    Crypto Fear & Greed Index çek (0-100, gerçek piyasa duygusu).
+    0-25: Aşırı Korku (dip fırsatı) · 75-100: Aşırı Açgözlülük (tepe riski)
+    """
+    import time as _t
+    now = _t.time()
+    if _FNG_CACHE["value"] is not None and (now - _FNG_CACHE["ts"]) < _FNG_TTL:
+        return {"value": _FNG_CACHE["value"], "classification": _FNG_CACHE["classification"], "cached": True}
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.get("https://api.alternative.me/fng/?limit=1")
+        if r.status_code == 200:
+            data = (r.json().get("data") or [{}])[0]
+            val = int(data.get("value", 50))
+            cls = data.get("value_classification", "Neutral")
+            _FNG_CACHE.update({"value": val, "ts": now, "classification": cls})
+            return {"value": val, "classification": cls, "cached": False}
+    except Exception as exc:
+        logger.debug("Fear&Greed fetch failed: %s", exc)
+    return {"value": _FNG_CACHE["value"] or 50, "classification": _FNG_CACHE["classification"] or "Neutral", "cached": True}
+
 # Available symbols
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
 
@@ -97,6 +124,18 @@ async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, 
                 payloads[key] = data if isinstance(data, dict) else None
         except Exception as exc:  # noqa: BLE001
             logger.debug("live payload %s error: %s", key, exc)
+
+    # ── Fundamental'a gerçek Fear & Greed Index enjekte et ─────────────────────
+    # MVRV/NUPL mock olsa bile F&G GERÇEK veri (alternative.me, ücretsiz)
+    try:
+        fng = await _fetch_fear_greed()
+        if payloads.get("fundamental") is None:
+            payloads["fundamental"] = {}
+        payloads["fundamental"]["fear_greed_value"] = fng["value"]
+        payloads["fundamental"]["fear_greed_class"] = fng["classification"]
+    except Exception as exc:
+        logger.debug("F&G enrich failed: %s", exc)
+
     return payloads
 
 
@@ -171,28 +210,39 @@ def _extract_live_scores(
             eqs = float(touche.get("eqs") or touche.get("eqs_score") or 50.0)
             scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
 
-    # ── FUNDAMENTAL: TF-duyarlı MVRV/NUPL yorumu ─────────────────────────────
+    # ── FUNDAMENTAL: MVRV/NUPL (mock) + Fear&Greed (GERÇEK) harmanı ──────────
     # Emtia (XAU/XAG) için MVRV/NUPL zincir verisi anlamsız → atla
     fundamental = payloads.get("fundamental")
     if fundamental and not is_commodity:
         nupl = fundamental.get("nupl")
         mvrv = fundamental.get("mvrv_z_score")
+        onchain_score = None
         if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
             nupl_f = float(nupl); mvrv_f = float(mvrv)
-
-            # Seviye skoru (uzun TF için — mutlak değerler önemli)
             nupl_level = min(max((nupl_f + 0.5) / 1.5, 0.0), 1.0)
             mvrv_level = min(max((4.0 - mvrv_f) / 4.0, 0.0), 1.0)
             level_score = nupl_level * 0.6 + mvrv_level * 0.4
-
-            # Momentum skoru (kısa TF için — birikim bölgesinde mi?)
-            mvrv_healthy = 1.0 - min(1.0, abs(mvrv_f - 1.5) / 3.0)  # peak at MVRV=1.5
+            mvrv_healthy = 1.0 - min(1.0, abs(mvrv_f - 1.5) / 3.0)
             nupl_pos     = min(max((nupl_f + 0.1) / 0.8, 0.0), 1.0)
             momentum_score = nupl_pos * 0.65 + mvrv_healthy * 0.35
-
             lw = _TF_FUNDAMENTAL_LEVEL_W.get(timeframe, 0.55)
             mw = 1.0 - lw
-            scores["fundamental"] = round(level_score * lw + momentum_score * mw, 4)
+            onchain_score = level_score * lw + momentum_score * mw
+
+        # Fear & Greed (GERÇEK veri): kontrarian — aşırı korku=bullish, açgözlülük=bearish
+        fng_val = fundamental.get("fear_greed_value")
+        fng_score = None
+        if isinstance(fng_val, (int, float)):
+            # F&G 0 (aşırı korku) → 0.85 (al), F&G 100 (açgözlülük) → 0.15 (sat)
+            fng_score = 0.85 - (float(fng_val) / 100.0) * 0.70
+
+        # Harman: mock on-chain %40, gerçek F&G %60 (gerçek veriye ağırlık ver)
+        if onchain_score is not None and fng_score is not None:
+            scores["fundamental"] = round(onchain_score * 0.40 + fng_score * 0.60, 4)
+        elif fng_score is not None:
+            scores["fundamental"] = round(fng_score, 4)        # sadece gerçek veri
+        elif onchain_score is not None:
+            scores["fundamental"] = round(onchain_score, 4)
 
     # ── NEWS: TF Relevance Decay ──────────────────────────────────────────────
     # News servisi tek bir ANLIK agregasyon üretiyor (timestamp=NOW).
@@ -221,11 +271,38 @@ def _extract_live_scores(
         scores["sentinel"] = round(1.0 - min(max(risk, 0.0), 1.0), 4)
 
     # ── QUANTUM ───────────────────────────────────────────────────────────────
+    # FIX: 'modifier' bir ÇARPAN (1.0 = nötr), skor değil. Direkt kullanmak
+    # nötr durumu %100 gösteriyordu. Gerçek futures verisinden skor üret:
+    #   funding_rate: pozitif aşırı → long kalabalık (bearish), negatif → short kalabalık (bullish)
+    #   long_short_ratio: >1 long ağırlıklı, <1 short ağırlıklı
     quantum = payloads.get("quantum")
-    if quantum and "modifier" in quantum:
-        modifier = quantum.get("modifier")
+    if quantum:
+        funding   = quantum.get("funding_rate_pct")
+        ls_ratio  = quantum.get("long_short_ratio")
+        modifier  = quantum.get("modifier")
+
+        q_components: list[float] = []
+
+        # Funding rate sinyali: aşırı pozitif funding = kontrarian bearish
+        # Tipik aralık ±0.05% → 0.01% nötr. Pozitif aşırı → düşük skor
+        if isinstance(funding, (int, float)):
+            # funding +0.05% → 0.2 (bearish), -0.05% → 0.8 (bullish), 0 → 0.5
+            f_score = 0.5 - (float(funding) / 0.10) * 0.5
+            q_components.append(min(max(f_score, 0.0), 1.0))
+
+        # Long/short ratio: aşırı long = kontrarian bearish
+        if isinstance(ls_ratio, (int, float)) and ls_ratio > 0:
+            # ratio 1.0 → 0.5, ratio 2.0 → 0.25 (aşırı long), ratio 0.5 → 0.75 (aşırı short)
+            ls_score = 0.5 / float(ls_ratio) if ls_ratio >= 1 else 1.0 - (float(ls_ratio) * 0.5)
+            q_components.append(min(max(ls_score, 0.0), 1.0))
+
+        # Modifier'ı nötr-merkezli skora çevir (0.8-1.2 → 0-1)
         if isinstance(modifier, (int, float)):
-            scores["quantum"] = min(max(float(modifier), 0.0), 1.0)
+            m_score = 0.5 + (float(modifier) - 1.0) * 2.5
+            q_components.append(min(max(m_score, 0.0), 1.0))
+
+        if q_components:
+            scores["quantum"] = round(sum(q_components) / len(q_components), 4)
 
     return scores
 
@@ -344,8 +421,32 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
 
         buy_count  = sum(1 for v in tf.values() if str(v).upper() == "BUY")
         sell_count = sum(1 for v in tf.values() if str(v).upper() == "SELL")
-        bias = "Çoğunluk AL" if buy_count > sell_count else "Çoğunluk SAT" if sell_count > buy_count else "Karışık sinyal"
-        return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}.{indicator_hint}"
+        hold_count = sum(1 for v in tf.values() if str(v).upper() in ("HOLD", "NEUTRAL"))
+        # FIX: buy==sell==0 (hepsi HOLD) "Karışık" değil "Tümü Nötr"
+        if buy_count > sell_count:
+            bias = "Çoğunluk AL"
+        elif sell_count > buy_count:
+            bias = "Çoğunluk SAT"
+        elif hold_count > 0 and buy_count == 0 and sell_count == 0:
+            bias = "Tümü Nötr (Bekleme)"
+        else:
+            bias = "Karışık sinyal"
+
+        # Çelişki tespiti: RSI aşırı uçta ama sinyal HOLD → uyarı ekle
+        contradiction = ""
+        if td:
+            for tf_k, tf_d in td.items():
+                if isinstance(tf_d, dict):
+                    r = tf_d.get("rsi", 50)
+                    sig_tf = str(tf.get(tf_k, "")).upper()
+                    if r < 20 and sig_tf in ("HOLD", "NEUTRAL", ""):
+                        contradiction = f" ⚠ {tf_k.upper()} RSI={r:.0f} aşırı satım ama sinyal nötr — dip fırsatı olabilir"
+                        break
+                    if r > 80 and sig_tf in ("HOLD", "NEUTRAL", ""):
+                        contradiction = f" ⚠ {tf_k.upper()} RSI={r:.0f} aşırı alım ama sinyal nötr — tepe riski"
+                        break
+
+        return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}.{indicator_hint}{contradiction}"
 
     if module == "fundamental":
         mvrv = raw.get("mvrv_z_score")
@@ -368,9 +469,17 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
                 parts.append("(kapitülasyon)")
             else:
                 parts.append("(ılımlı kâr)")
+        # Fear & Greed Index — GERÇEK veri (alternative.me)
+        fng_val = raw.get("fear_greed_value")
+        fng_cls = raw.get("fear_greed_class", "")
+        if isinstance(fng_val, (int, float)):
+            fng_tr = {
+                "Extreme Fear": "Aşırı Korku", "Fear": "Korku", "Neutral": "Nötr",
+                "Greed": "Açgözlülük", "Extreme Greed": "Aşırı Açgözlülük",
+            }.get(fng_cls, fng_cls)
+            parts.append(f"✓ Korku&Açgözlülük: {int(fng_val)} ({fng_tr})")
         if quality == "mock":
-            parts.append("⚠ Veri kaynağı: simüle")
-        # On-chain metrics are inherently timeframe-independent
+            parts.append("⚠ MVRV/NUPL simüle")
         parts.append("📊 TF bağımsız")
         return " · ".join(parts) + "." if parts else "On-chain veri bekleniyor."
 
@@ -383,10 +492,12 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
         reg = (raw.get("impact_factors") or {}).get("regulatory_score", 0)
         sent_str = "pozitif" if sentiment > 0.1 else "negatif" if sentiment < -0.1 else "nötr"
         country_str = f" · Ülkeler: {', '.join(countries)}" if countries else ""
+        # FIX: "TF bağımsız" yanlıştı — haber TF-relevance decay uygulanıyor
+        # Kısa TF'de haber tam etkili, uzun TF'de sönümlenir
         return (
             f"{count} haber analizi · Etki: {impact:.0f} · "
             f"Güven: {conf:.0f}% · Regulatory: {reg:.0f} · "
-            f"Genel duygu: {sent_str}{country_str} · 📊 TF bağımsız."
+            f"Genel duygu: {sent_str}{country_str} · ⏱ TF-duyarlı (kısa vadede etkili)."
         )
 
     if module == "sentinel":
@@ -406,7 +517,19 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
         )
 
     if module == "quantum":
-        return f"Likidite & tahmin skoru: {score*100:.0f}% — piyasa derinliği verisi henüz bağlanmadı, nötr varsayılan. 📊 TF bağımsız."
+        funding  = raw.get("funding_rate_pct")
+        ls_ratio = raw.get("long_short_ratio")
+        oi       = raw.get("open_interest_usdt")
+        parts = [f"Futures skoru: {score*100:.0f}%"]
+        if isinstance(funding, (int, float)):
+            f_bias = "long kalabalık" if funding > 0.01 else "short kalabalık" if funding < -0.01 else "dengeli"
+            parts.append(f"Funding: {funding:+.3f}% ({f_bias})")
+        if isinstance(ls_ratio, (int, float)) and ls_ratio > 0:
+            ls_bias = "aşırı long" if ls_ratio > 1.5 else "aşırı short" if ls_ratio < 0.67 else "dengeli"
+            parts.append(f"L/S: {ls_ratio:.2f} ({ls_bias})")
+        if isinstance(oi, (int, float)) and oi > 0:
+            parts.append(f"OI: ${oi/1e9:.1f}B")
+        return " · ".join(parts) + " · ⚡ Kontrarian sinyal · 📊 TF bağımsız."
 
     return ""
 

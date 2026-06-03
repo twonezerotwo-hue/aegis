@@ -110,6 +110,47 @@ const VADE_OPTIONS: { value: Vade; label: string; sub: string }[] = [
   { value: "long",   label: "Uzun",  sub: "6 Ay+" },
 ];
 
+// ── Sparkline: son N skor noktası mini SVG grafiği ──────────────────────────
+const Sparkline: React.FC<{ data: number[]; color: string }> = ({ data, color }) => {
+  if (!data || data.length < 2) {
+    return <span className="text-[8px] text-slate-700">geçmiş yok</span>;
+  }
+  const W = 48, H = 14;
+  const min = Math.min(...data), max = Math.max(...data);
+  const range = max - min || 0.01;
+  const pts = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * W;
+    const y = H - ((v - min) / range) * H;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  const trend = data[data.length - 1] - data[0];
+  const strokeCls = trend > 0.02 ? "stroke-emerald-400" : trend < -0.02 ? "stroke-rose-400" : "stroke-slate-500";
+  return (
+    <svg width={W} height={H} className="shrink-0" aria-label="trend">
+      <polyline points={pts} fill="none" className={strokeCls} strokeWidth="1.2" strokeLinejoin="round" />
+    </svg>
+  );
+};
+
+// ── Veri kaynağı tipi: gerçek mi simüle mi? ─────────────────────────────────
+function dataSourceKind(summary: string): { real: boolean; label: string } {
+  const s = (summary || "").toLowerCase();
+  if (s.includes("simüle") || s.includes("mock") || s.includes("simule")) {
+    return { real: false, label: "kısmi simüle" };
+  }
+  if (s.includes("veri yok") || s.includes("bağlanmadı") || s.includes("ulaşılamadı")) {
+    return { real: false, label: "veri yok" };
+  }
+  return { real: true, label: "canlı" };
+}
+
+// ── Çelişki uyarısı: summary içindeki ⚠ işaretini ayıkla ────────────────────
+function extractWarning(summary: string): string | null {
+  const idx = (summary || "").indexOf("⚠");
+  if (idx < 0) return null;
+  return summary.slice(idx + 1).trim().split("·")[0].trim() || null;
+}
+
 // ── "Bu skoru neden verdi?" — dinamik açıklama üreteci ───────────────────────
 type MetricRaw = { score: number; summary?: string; health?: string; source?: string; data_status?: string };
 
@@ -336,6 +377,31 @@ const DashboardV2Inner: React.FC = () => {
     metricsTimeframe,
     metricsRefreshMs
   );
+
+  // ── Metrik geçmişi (24s sparkline için ring buffer) ───────────────────────
+  const [metricHistory, setMetricHistory] = React.useState<Record<string, number[]>>({});
+  const lastHistTs = React.useRef<number>(0);
+  React.useEffect(() => {
+    if (!metricsData?.metrics) return;
+    const now = Date.now();
+    // En fazla 30 saniyede bir nokta ekle (spam önle)
+    if (now - lastHistTs.current < 25_000) return;
+    lastHistTs.current = now;
+    setMetricHistory((prev) => {
+      const next = { ...prev };
+      (["touche", "fundamental", "news", "ml", "sentinel", "quantum"] as const).forEach((k) => {
+        const sc = (metricsData.metrics as any)[k]?.score;
+        if (typeof sc === "number") {
+          const arr = [...(next[k] ?? []), sc];
+          next[k] = arr.slice(-40);   // son 40 nokta (~20 dk @30s)
+        }
+      });
+      return next;
+    });
+  }, [metricsData]);
+
+  // Sembol/TF değişince geçmişi sıfırla
+  React.useEffect(() => { setMetricHistory({}); lastHistTs.current = 0; }, [metricsSymbol, metricsTimeframe]);
 
   // ── Toast ──────────────────────────────────────────────────────────────────
   const [toasts, setToasts] = React.useState<ToastItem[]>([]);
@@ -809,61 +875,111 @@ const DashboardV2Inner: React.FC = () => {
                   })()}
 
                   {/* Modül satırları */}
+                  {(() => {
+                    // Consensus ağırlıkları (her modülün karara katkısı)
+                    const cw = (metricsData.consensus as any)?.weights ?? {};
+                    const wMap: Record<string, number> = {
+                      touche: cw.touche ?? 0, fundamental: cw.fundamental ?? 0,
+                      news: cw.news ?? 0, ml: cw.ml ?? 0,
+                    };
+                    // Konsensüs katkısı: ağırlık × (skor - 0.5) × 100 → +/- puan
+                    const contrib = (key: string, score: number) => {
+                      const w = wMap[key] ?? 0;
+                      if (w <= 0) return null;
+                      const c = w * (score - 0.5) * 200;  // -100..+100 ölçek
+                      return c;
+                    };
+                    return (
                   <div className="space-y-1">
-                    {/* Consensus'a giren modüller */}
+                    {/* Consensus başlık */}
+                    <div className="mb-1 flex items-center gap-2 px-3">
+                      <span className="text-[8px] font-bold uppercase tracking-wider text-emerald-600">● Consensus'a giren</span>
+                      <div className="h-px flex-1 bg-slate-800" />
+                    </div>
+
+                    {/* Consensus'a giren modüller: touche, fundamental, news */}
                     {(["touche", "fundamental", "news"] as const).map((key) => {
                       const m   = metricsData.metrics[key];
                       const pct = Math.round(m.score * 100);
                       const BAR: Record<string, string> = { touche: "bg-violet-400", fundamental: "bg-sky-400", news: "bg-amber-400" };
                       const NAME: Record<string, string> = { touche: "Touche EQS", fundamental: "Fundamental", news: "Haber" };
                       const sc  = m.score > 0.65 ? "text-emerald-400" : m.score < 0.35 ? "text-rose-400" : "text-slate-300";
+                      const src = dataSourceKind(m.summary ?? "");
+                      const warn = extractWarning(m.summary ?? "");
+                      const c = contrib(key, m.score);
+                      const hist = metricHistory[key] ?? [];
                       return (
                         <div key={key} className="group rounded-xl px-3 py-2.5 hover:bg-slate-800/40 transition-colors">
                           <div className="mb-1.5 flex items-center gap-2">
-                            <span className="w-20 shrink-0 text-[10px] font-semibold text-slate-400">{NAME[key]}</span>
+                            {/* Gerçek/simüle veri noktası */}
+                            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${src.real ? "bg-emerald-400" : "bg-amber-400"}`}
+                                  title={src.real ? "Canlı veri" : src.label} />
+                            <span className="w-16 shrink-0 text-[10px] font-semibold text-slate-400">{NAME[key]}</span>
                             <div className="h-1.5 flex-1 rounded-full bg-slate-700/60">
                               <div className={`h-1.5 rounded-full ${BAR[key]} transition-all duration-500`} style={{ width: `${pct}%` }} />
                             </div>
-                            <span className={`w-8 shrink-0 text-right font-mono text-[11px] font-bold ${sc}`}>{pct}</span>
+                            <Sparkline data={hist} color={BAR[key]} />
+                            <span className={`w-7 shrink-0 text-right font-mono text-[11px] font-bold ${sc}`}>{pct}</span>
+                            {/* Consensus katkısı */}
+                            {c !== null && (
+                              <span className={`w-12 shrink-0 text-right font-mono text-[9px] font-semibold ${c > 1 ? "text-emerald-500" : c < -1 ? "text-rose-500" : "text-slate-600"}`}
+                                    title="Bu modülün consensus'a katkısı">
+                                {c > 0 ? "+" : ""}{c.toFixed(0)}p
+                              </span>
+                            )}
                           </div>
-                          <p className="pl-[5.5rem] text-[9px] leading-4 text-slate-600">{m.summary}</p>
+                          {/* Çelişki uyarısı */}
+                          {warn && (
+                            <div className="mb-1 ml-[1.4rem] rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[9px] text-amber-400">
+                              ⚠ {warn}
+                            </div>
+                          )}
+                          <p className="ml-[1.4rem] text-[9px] leading-4 text-slate-600">{m.summary}</p>
                         </div>
                       );
                     })}
 
-                    {/* ML Predictor satırı */}
+                    {/* ML Predictor — consensus'a girer (ağırlık %{ml}) */}
                     {metricsData.metrics.ml && (() => {
                       const ml = metricsData.metrics.ml as unknown as { score: number; summary: string; ml_detail?: { signal?: string; buy_prob?: number; sell_prob?: number; confidence?: number; trained?: boolean } };
                       const pct = Math.round(ml.score * 100);
                       const sc  = ml.score > 0.65 ? "text-emerald-400" : ml.score < 0.35 ? "text-rose-400" : "text-slate-300";
                       const detail = ml.ml_detail;
+                      const c = detail?.trained ? contrib("ml", ml.score) : null;
+                      const hist = metricHistory.ml ?? [];
                       const sigBadge = detail?.signal === "BUY" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/5"
                                      : detail?.signal === "SELL" ? "text-rose-400 border-rose-500/30 bg-rose-500/5"
                                      : "text-amber-400 border-amber-500/30 bg-amber-500/5";
                       return (
                         <div className="group rounded-xl border border-indigo-500/20 bg-indigo-500/5 px-3 py-2.5 hover:bg-indigo-500/10 transition-colors">
                           <div className="mb-1.5 flex items-center gap-2">
-                            <span className="w-20 shrink-0 text-[10px] font-semibold text-indigo-400">ML Predictor</span>
+                            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${detail?.trained ? "bg-emerald-400" : "bg-slate-600"}`} />
+                            <span className="w-16 shrink-0 text-[10px] font-semibold text-indigo-400">ML Predictor</span>
                             <div className="h-1.5 flex-1 rounded-full bg-slate-700/60">
                               <div className="h-1.5 rounded-full bg-indigo-400 transition-all duration-500" style={{ width: `${pct}%` }} />
                             </div>
-                            <span className={`w-8 shrink-0 text-right font-mono text-[11px] font-bold ${sc}`}>{pct}</span>
-                            {detail?.signal && detail.trained && (
-                              <span className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[8px] font-bold ${sigBadge}`}>
-                                {detail.signal === "BUY" ? "AL" : detail.signal === "SELL" ? "SAT" : "TUT"}
+                            <Sparkline data={hist} color="bg-indigo-400" />
+                            <span className={`w-7 shrink-0 text-right font-mono text-[11px] font-bold ${sc}`}>{pct}</span>
+                            {c !== null ? (
+                              <span className={`w-12 shrink-0 text-right font-mono text-[9px] font-semibold ${c > 1 ? "text-emerald-500" : c < -1 ? "text-rose-500" : "text-slate-600"}`}>
+                                {c > 0 ? "+" : ""}{c.toFixed(0)}p
                               </span>
-                            )}
+                            ) : <span className="w-12 shrink-0" />}
                           </div>
                           {detail?.trained ? (
-                            <div className="pl-[5.5rem] flex items-center gap-2 text-[9px] text-slate-600">
+                            <div className="ml-[1.4rem] flex items-center gap-2 text-[9px] text-slate-600">
+                              {detail?.signal && (
+                                <span className={`rounded border px-1.5 py-0.5 font-mono text-[8px] font-bold ${sigBadge}`}>
+                                  {detail.signal === "BUY" ? "AL" : detail.signal === "SELL" ? "SAT" : "TUT"}
+                                </span>
+                              )}
                               <span>AL {Math.round((detail.buy_prob ?? 0) * 100)}%</span>
-                              <span>TUT {Math.round((1 - (detail.buy_prob ?? 0) - (detail.sell_prob ?? 0)) * 100)}%</span>
                               <span>SAT {Math.round((detail.sell_prob ?? 0) * 100)}%</span>
                               <span className="text-slate-700">· güven %{Math.round((detail.confidence ?? 0) * 100)}</span>
-                              <span className="text-indigo-700">· XGBoost 3-bar tahmin</span>
+                              <span className="text-indigo-700">· XGBoost · consensus ağırlık %{Math.round((wMap.ml ?? 0) * 100)}</span>
                             </div>
                           ) : (
-                            <p className="pl-[5.5rem] text-[9px] italic text-slate-700">Model egitilmedi — POST /api/ml/train</p>
+                            <p className="ml-[1.4rem] text-[9px] italic text-slate-700">Model eğitiliyor — birazdan hazır</p>
                           )}
                         </div>
                       );
@@ -871,17 +987,18 @@ const DashboardV2Inner: React.FC = () => {
 
                     {/* Ayırıcı */}
                     <div className="my-2 flex items-center gap-2 px-3">
-                      <div className="h-px flex-1 bg-slate-800" />
-                      <span className="text-[8px] uppercase tracking-wider text-slate-700">arka plan (consensus dışı)</span>
+                      <span className="text-[8px] font-bold uppercase tracking-wider text-slate-600">○ Arka plan (uyarı üretir, consensus'a girmez)</span>
                       <div className="h-px flex-1 bg-slate-800" />
                     </div>
 
-                    {/* Arka plan modülleri */}
+                    {/* Arka plan modülleri: sentinel, quantum */}
                     {(["sentinel", "quantum"] as const).map((key) => {
                       const m   = metricsData.metrics[key];
                       const pct = Math.round(m.score * 100);
                       const BAR: Record<string, string> = { sentinel: "bg-rose-400", quantum: "bg-emerald-400" };
                       const NAME: Record<string, string> = { sentinel: "Sentinel", quantum: "Quantum" };
+                      const src = dataSourceKind(m.summary ?? "");
+                      const hist = metricHistory[key] ?? [];
                       const badge: Record<string, { label: string; cls: string }> = {
                         sentinel: m.score >= 0.55 ? { label: "✓ Düşük Risk", cls: "text-emerald-500" }
                                 : m.score >= 0.45 ? { label: "~ Orta Risk",  cls: "text-amber-500"  }
@@ -889,27 +1006,46 @@ const DashboardV2Inner: React.FC = () => {
                         quantum:  Math.abs(m.score - 0.5) < 0.01
                                 ? { label: "~ Veri Yok",     cls: "text-slate-600" }
                                 : m.score >= 0.55 ? { label: "✓ Likidite İyi", cls: "text-emerald-500" }
-                                : { label: "✗ Düşük Likidite", cls: "text-rose-500" },
+                                : m.score >= 0.45 ? { label: "~ Nötr", cls: "text-amber-500" }
+                                : { label: "✗ Aşırı Pozisyon", cls: "text-rose-500" },
                       };
                       return (
-                        <div key={key} className="rounded-xl px-3 py-2 opacity-60 hover:opacity-90 transition-opacity">
+                        <div key={key} className="rounded-xl px-3 py-2 hover:bg-slate-800/30 transition-colors">
                           <div className="flex items-center gap-2">
-                            <span className="w-20 shrink-0 text-[10px] text-slate-500">{NAME[key]}</span>
+                            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${src.real ? "bg-emerald-400/70" : "bg-amber-400/70"}`} />
+                            <span className="w-16 shrink-0 text-[10px] text-slate-500">{NAME[key]}</span>
                             <div className="h-1 flex-1 rounded-full bg-slate-800">
-                              <div className={`h-1 rounded-full ${BAR[key]} opacity-50`} style={{ width: `${pct}%` }} />
+                              <div className={`h-1 rounded-full ${BAR[key]} opacity-60`} style={{ width: `${pct}%` }} />
                             </div>
-                            <span className="w-8 shrink-0 text-right font-mono text-[10px] text-slate-600">{pct}</span>
-                            <span className={`text-[9px] font-semibold ${badge[key].cls}`}>{badge[key].label}</span>
+                            <Sparkline data={hist} color={BAR[key]} />
+                            <span className="w-7 shrink-0 text-right font-mono text-[10px] text-slate-500">{pct}</span>
+                            <span className={`w-24 shrink-0 text-right text-[9px] font-semibold ${badge[key].cls}`}>{badge[key].label}</span>
                           </div>
+                          <p className="ml-[1.4rem] mt-0.5 text-[9px] leading-4 text-slate-600">{m.summary}</p>
                         </div>
                       );
                     })}
                   </div>
+                    );
+                  })()}
 
-                  {/* Footer: son güncelleme */}
-                  <p className="mt-2 text-right font-mono text-[9px] text-slate-700">
-                    {metricsData.last_updated ?? metricsData.timestamp ?? "—"}
-                  </p>
+                  {/* Footer: tazelik rozeti + son güncelleme */}
+                  <div className="mt-3 flex items-center justify-between border-t border-slate-800 pt-2">
+                    <div className="flex items-center gap-3 text-[9px]">
+                      <span className="flex items-center gap-1 text-slate-500">
+                        <span className={`h-1.5 w-1.5 rounded-full ${metricsLoading ? "bg-amber-400 animate-pulse" : "bg-emerald-400"}`} />
+                        {metricsLoading ? "güncelleniyor" : "canlı"}
+                      </span>
+                      <span className="flex items-center gap-1 text-slate-600">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> gerçek veri
+                        <span className="ml-1 h-1.5 w-1.5 rounded-full bg-amber-400" /> simüle
+                      </span>
+                      <span className="text-slate-600">· yenileme {metricsRefreshMs / 1000}s</span>
+                    </div>
+                    <p className="font-mono text-[9px] text-slate-700">
+                      {(metricsData.last_updated ?? metricsData.timestamp ?? "—").toString().slice(11, 19)}
+                    </p>
+                  </div>
                 </div>
 
                 {/* ── Modül Açıklamaları ─────────────────────────────────── */}
