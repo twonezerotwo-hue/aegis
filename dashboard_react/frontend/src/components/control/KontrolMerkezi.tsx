@@ -19,6 +19,13 @@ interface DailyPnL {
   message: string;
 }
 
+interface PendingSignal {
+  id: string; symbol: string; action: string; timeframe: string;
+  quantity: number; price: number | null; confidence: number;
+  reason: string; queued_at: string; expires_at: string;
+}
+interface ExecutionMode { mode: string; description: string; pending_signals: number; }
+
 interface EquityPoint { timestamp: string; balance: number; }
 interface OpenPosition { symbol: string; quantity: number; entry_price: number; current_price?: number; pnl?: number; }
 interface PaperSession {
@@ -328,6 +335,71 @@ const RiskPaneli: React.FC<{ macro: MacroViewModel | null; pnl: DailyPnL | null 
 
 // ── Ana Bileşen ───────────────────────────────────────────────────────────────
 
+// ── Onay Paneli ───────────────────────────────────────────────────────────────
+
+const ACTION_COLOR: Record<string, string> = {
+  BUY:  "border-emerald-500/60 bg-emerald-500/10 text-emerald-300",
+  SELL: "border-rose-500/60    bg-rose-500/10    text-rose-300",
+};
+
+const ApprovalPanel: React.FC<{
+  signals: PendingSignal[];
+  mode: string;
+  onApprove: (id: string) => void;
+  onReject:  (id: string) => void;
+}> = ({ signals, mode, onApprove, onReject }) => {
+  if (mode !== "MANUAL_APPROVAL" || signals.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-amber-500/40 bg-amber-500/5 p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+        <p className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+          {signals.length} Sinyal Onay Bekliyor
+        </p>
+        <span className="ml-auto text-[9px] text-slate-600">MANUAL_APPROVAL modu</span>
+      </div>
+      <div className="space-y-2">
+        {signals.map(sig => (
+          <div key={sig.id} className={`rounded-xl border p-3 ${ACTION_COLOR[sig.action] ?? "border-slate-700 bg-slate-900"}`}>
+            <div className="mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-sm font-extrabold">{sig.action}</span>
+                <span className="text-[10px] text-slate-400">{sig.symbol} · {sig.timeframe}</span>
+                <span className="font-mono text-[9px] text-slate-500">#{sig.id}</span>
+              </div>
+              <span className="text-[9px] text-slate-600">
+                {new Date(sig.expires_at).toLocaleTimeString("tr-TR")}'e kadar
+              </span>
+            </div>
+            <p className="mb-2 text-[9px] text-slate-400">
+              Miktar: <span className="font-mono font-semibold text-white">{sig.quantity}</span>
+              {sig.price && <> · Fiyat: <span className="font-mono text-white">${sig.price.toFixed(2)}</span></>}
+            </p>
+            {sig.reason && sig.reason !== "Manuel onay bekleniyor" && (
+              <p className="mb-2 text-[9px] italic text-slate-500">{sig.reason}</p>
+            )}
+            <div className="flex gap-2">
+              <button
+                onClick={() => onApprove(sig.id)}
+                className="flex-1 rounded-lg border border-emerald-500/50 bg-emerald-500/10 py-1.5 text-[10px] font-bold text-emerald-300 transition-colors hover:bg-emerald-500/20"
+              >
+                ✓ ONAYLA
+              </button>
+              <button
+                onClick={() => onReject(sig.id)}
+                className="flex-1 rounded-lg border border-rose-500/50 bg-rose-500/10 py-1.5 text-[10px] font-bold text-rose-300 transition-colors hover:bg-rose-500/20"
+              >
+                ✗ REDDET
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const SOURCE_BADGE: Record<string, string> = {
   groq:       "text-violet-400",
   ollama:     "text-emerald-400",
@@ -345,6 +417,48 @@ export const KontrolMerkezi: React.FC<KontrolProps> = ({
   const [rationale, setRationale] = React.useState<RationaleState>({
     text: "", source: null, loading: false,
   });
+
+  // Execution mode + pending signals — 10s polling
+  const [execMode, setExecMode] = React.useState<ExecutionMode | null>(null);
+  const [pendingSignals, setPendingSignals] = React.useState<PendingSignal[]>([]);
+
+  React.useEffect(() => {
+    const API = (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:8502";
+    const fetchSignals = async () => {
+      try {
+        const [modeRes, sigRes] = await Promise.all([
+          fetch(`${API}/api/signals/mode`),
+          fetch(`${API}/api/signals/pending`),
+        ]);
+        if (modeRes.ok) setExecMode(await modeRes.json());
+        if (sigRes.ok) {
+          const d = await sigRes.json();
+          setPendingSignals(d.signals ?? []);
+        }
+      } catch {}
+    };
+    fetchSignals();
+    const id = setInterval(fetchSignals, 10_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const handleApprove = React.useCallback(async (sigId: string) => {
+    const API = (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:8502";
+    try {
+      const r = await fetch(`${API}/api/signals/${sigId}/approve`, { method: "POST" });
+      const d = await r.json();
+      if (d.success) setPendingSignals(prev => prev.filter(s => s.id !== sigId));
+    } catch {}
+  }, []);
+
+  const handleReject = React.useCallback(async (sigId: string) => {
+    const API = (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:8502";
+    try {
+      const r = await fetch(`${API}/api/signals/${sigId}/reject`, { method: "POST" });
+      const d = await r.json();
+      if (d.success) setPendingSignals(prev => prev.filter(s => s.id !== sigId));
+    } catch {}
+  }, []);
 
   // Paper trading session — 30s polling
   const [paper, setPaper] = React.useState<PaperSession | null>(null);
@@ -395,6 +509,29 @@ export const KontrolMerkezi: React.FC<KontrolProps> = ({
 
   return (
     <div className="space-y-4">
+
+    {/* Onay Paneli — MANUAL_APPROVAL modunda bekleyen sinyaller */}
+    <ApprovalPanel
+      signals={pendingSignals}
+      mode={execMode?.mode ?? "DRY_RUN"}
+      onApprove={handleApprove}
+      onReject={handleReject}
+    />
+
+    {/* Execution Mode göstergesi */}
+    {execMode && execMode.mode !== "DRY_RUN" && (
+      <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-[10px] ${
+        execMode.mode === "MANUAL_APPROVAL"
+          ? "border-amber-500/30 bg-amber-500/5 text-amber-300"
+          : "border-emerald-500/30 bg-emerald-500/5 text-emerald-300"
+      }`}>
+        <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
+        <span className="font-semibold">{execMode.mode}</span>
+        <span className="text-slate-500">—</span>
+        <span className="text-slate-400">{execMode.description}</span>
+      </div>
+    )}
+
     <div className="grid gap-4 lg:grid-cols-3">
 
       {/* Zone 1: Karar */}

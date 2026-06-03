@@ -307,6 +307,67 @@ ANALYZER_URL = os.getenv("ANALYZER_URL", "http://localhost:8007")
 # Valid timeframes
 VALID_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w", "1month"]
 
+# ── Execution Mode ────────────────────────────────────────────────────────────
+# DRY_RUN       → Sadece log, Binance'e bağlanmaz (varsayılan güvenli mod)
+# MANUAL_APPROVAL → Sinyal kuyruğa alınır, kullanıcı onayı beklenir
+# AUTO_LIMITED  → Otomatik çalıştırır (LIVE_TIMEFRAMES kısıtıyla)
+EXECUTION_MODE = os.getenv("EXECUTION_MODE", "DRY_RUN").upper()
+_SIGNAL_TTL_MINUTES = int(os.getenv("SIGNAL_TTL_MINUTES", "10"))  # onay süresi
+
+import uuid as _uuid
+from dataclasses import dataclass, field, asdict
+
+
+@dataclass
+class PendingSignal:
+    """Onay bekleyen sinyal."""
+    id: str
+    symbol: str
+    action: str        # BUY | SELL
+    timeframe: str
+    quantity: float
+    price: Optional[float]
+    risk_pct: float
+    confidence: float
+    reason: str        # LLM veya kural tabanlı gerekçe
+    queued_at: str
+    expires_at: str
+    source: str = "manual"  # "auto_signal" | "manual"
+
+
+class _SignalQueue:
+    """
+    MANUAL_APPROVAL modunda sinyal kuyruğu.
+    TTL geçen sinyaller otomatik temizlenir.
+    """
+    def __init__(self):
+        self._queue: Dict[str, PendingSignal] = {}
+
+    def push(self, sig: PendingSignal) -> None:
+        self._queue[sig.id] = sig
+        logger.info(f"SIGNAL_QUEUED: id={sig.id} {sig.action} {sig.symbol} "
+                    f"qty={sig.quantity} confidence={sig.confidence:.2f}")
+
+    def pending(self) -> list[PendingSignal]:
+        now = datetime.now(timezone.utc)
+        return [s for s in self._queue.values()
+                if datetime.fromisoformat(s.expires_at) > now]
+
+    def pop(self, signal_id: str) -> Optional[PendingSignal]:
+        return self._queue.pop(signal_id, None)
+
+    def cleanup(self) -> int:
+        now = datetime.now(timezone.utc)
+        expired = [k for k, v in self._queue.items()
+                   if datetime.fromisoformat(v.expires_at) <= now]
+        for k in expired:
+            del self._queue[k]
+            logger.info(f"SIGNAL_EXPIRED: id={k}")
+        return len(expired)
+
+
+_signal_queue = _SignalQueue()
+
 # Initialize Prometheus client
 prometheus_client = PrometheusClient(PROMETHEUS_URL)
 sentinel_client = SentinelClient(SENTINEL_URL)
@@ -477,6 +538,88 @@ async def llm_status():
     }
 
 
+# ── Sinyal Onay Endpoint'leri (MANUAL_APPROVAL modu) ─────────────────────────
+
+@app.get("/api/signals/pending")
+async def get_pending_signals():
+    """Onay bekleyen sinyalleri listele."""
+    _signal_queue.cleanup()
+    pending = _signal_queue.pending()
+    return {
+        "execution_mode": EXECUTION_MODE,
+        "count": len(pending),
+        "signals": [asdict(s) for s in pending],
+        "ttl_minutes": _SIGNAL_TTL_MINUTES,
+    }
+
+
+@app.get("/api/signals/mode")
+async def get_execution_mode():
+    """Mevcut execution modunu döndür."""
+    return {
+        "mode": EXECUTION_MODE,
+        "description": {
+            "DRY_RUN": "Güvenli mod — işlem açılmaz, sadece loglanır",
+            "MANUAL_APPROVAL": "Her sinyal onay bekler — gerçek para için önerilen",
+            "AUTO_LIMITED": "Otomatik — sadece izin verilen TF'lerde çalışır",
+        }.get(EXECUTION_MODE, "Bilinmiyor"),
+        "live_timeframes": os.getenv("LIVE_TIMEFRAMES", "4h,1d"),
+        "kill_switch_threshold": float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.10")),
+        "pending_signals": len(_signal_queue.pending()),
+    }
+
+
+@app.post("/api/signals/{signal_id}/approve")
+async def approve_signal(signal_id: str):
+    """Bekleyen sinyali onayla ve çalıştır."""
+    sig = _signal_queue.pop(signal_id)
+    if not sig:
+        return {"success": False, "reason": f"Sinyal bulunamadı veya süresi dolmuş: {signal_id}"}
+
+    logger.info(f"SIGNAL_APPROVED: id={signal_id} {sig.action} {sig.symbol}")
+
+    # Executor'ü çalıştır
+    try:
+        from strategies.execution_engine import BinanceTestnetExecutor
+        executor = BinanceTestnetExecutor(
+            api_key=os.getenv("BINANCE_API_KEY", ""),
+            api_secret=os.getenv("BINANCE_API_SECRET", ""),
+            base_url=os.getenv("BINANCE_BASE_URL", "https://testnet.binance.vision"),
+            dry_run=os.getenv("DRY_RUN", "true").lower() == "true",
+        )
+        try:
+            result = await executor.place_order(
+                symbol=sig.symbol,
+                side=sig.action,
+                qty=sig.quantity,
+                price=sig.price,
+                order_type="LIMIT",
+            )
+        finally:
+            await executor.close()
+
+        if isinstance(result, dict) and result.get("pnl") is not None:
+            _pnl_tracker.record(float(result["pnl"]))
+
+        logger.info(f"SIGNAL_EXECUTED: id={signal_id} result={result}")
+        return {"success": True, "signal_id": signal_id, "executed": result}
+
+    except Exception as e:
+        logger.error(f"SIGNAL_EXECUTE_FAILED: id={signal_id} error={e}")
+        return {"success": False, "signal_id": signal_id, "reason": str(e)}
+
+
+@app.post("/api/signals/{signal_id}/reject")
+async def reject_signal(signal_id: str, body: Dict = Body(default={})):
+    """Bekleyen sinyali reddet."""
+    sig = _signal_queue.pop(signal_id)
+    if not sig:
+        return {"success": False, "reason": f"Sinyal bulunamadı: {signal_id}"}
+    reason = body.get("reason", "Kullanıcı tarafından reddedildi")
+    logger.info(f"SIGNAL_REJECTED: id={signal_id} reason={reason}")
+    return {"success": True, "signal_id": signal_id, "rejected": True, "reason": reason}
+
+
 @app.get("/api/pnl/daily")
 async def get_daily_pnl():
     """Günlük P&L durumu ve kill switch eşiği."""
@@ -507,12 +650,55 @@ async def execute_signal(request: SignalRequest):
     if request.risk_pct > max_risk:
         return {"success": False, "reason": "Risk exceeds MAX_RISK_PER_TRADE"}
 
-    # ── Gerçek kill switch kontrolü ───────────────────────────────────────────
+    # ── Kill switch kontrolü ──────────────────────────────────────────────────
     kill_switch_dd = float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.10"))
     triggered, kill_msg = _pnl_tracker.is_kill_switch_active(kill_switch_dd)
     if triggered:
         logger.warning(f"KILL_SWITCH_BLOCKED: {kill_msg}")
         return {"success": False, "reason": kill_msg, "kill_switch": True}
+
+    # ── Execution mode kontrolü ───────────────────────────────────────────────
+    _signal_queue.cleanup()  # süresi geçenleri temizle
+
+    if EXECUTION_MODE == "MANUAL_APPROVAL":
+        # Sinyali kuyruğa al, kullanıcı onayı bekle
+        now = datetime.now(timezone.utc)
+        expires = now.replace(minute=now.minute + _SIGNAL_TTL_MINUTES
+                              if now.minute + _SIGNAL_TTL_MINUTES < 60
+                              else (now.minute + _SIGNAL_TTL_MINUTES) % 60,
+                              hour=now.hour + (now.minute + _SIGNAL_TTL_MINUTES) // 60)
+        from datetime import timedelta as _td
+        sig = PendingSignal(
+            id=str(_uuid.uuid4())[:8],
+            symbol=request.symbol,
+            action=request.action,
+            timeframe=request.timeframe,
+            quantity=request.quantity,
+            price=request.price,
+            risk_pct=request.risk_pct,
+            confidence=0.0,
+            reason="Manuel onay bekleniyor",
+            queued_at=now.isoformat(),
+            expires_at=(now + _td(minutes=_SIGNAL_TTL_MINUTES)).isoformat(),
+        )
+        _signal_queue.push(sig)
+        logger.info(f"MANUAL_APPROVAL: signal queued id={sig.id}")
+        return {
+            "success": True,
+            "mode": "MANUAL_APPROVAL",
+            "signal_id": sig.id,
+            "reason": f"Sinyal kuyruğa alındı (ID: {sig.id}). Onay için /api/signals/pending kontrol edin.",
+            "expires_minutes": _SIGNAL_TTL_MINUTES,
+        }
+
+    if EXECUTION_MODE == "DRY_RUN":
+        logger.info(f"DRY_RUN: {request.action} {request.symbol} qty={request.quantity}")
+        return {
+            "success": True,
+            "mode": "DRY_RUN",
+            "reason": "DRY_RUN modunda — gerçek işlem açılmadı. AUTO_LIMITED veya MANUAL_APPROVAL kullanın.",
+            "simulated": True,
+        }
 
     try:
         from strategies.execution_engine import BinanceTestnetExecutor
