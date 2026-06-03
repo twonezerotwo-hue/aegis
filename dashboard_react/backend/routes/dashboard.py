@@ -156,6 +156,67 @@ async def _fetch_module_details(symbol: str, timeframe: str) -> dict:
     return details
 
 
+def _compute_mtf_alignment(tf_signals: dict[str, str], current_tf: str) -> dict:
+    """
+    Multi-timeframe hizalanma skoru — Touche tf_signals'dan hesaplanır.
+
+    Mantık: İşlem yaptığımız timeframe (current_tf) ile daha yüksek timeframe'ler
+    aynı yönde mi? Üst TF'ler ONAY veriyorsa güven artar, çelişiyorsa düşer.
+
+    TF hiyerarşisi (düşükten yükseğe): 15m < 1h < 4h < 1d < 1w
+    """
+    TF_ORDER = {"15m": 1, "1h": 2, "4h": 3, "1d": 4, "1w": 5}
+    SIGNAL_VAL = {"BUY": 1, "SELL": -1, "NEUTRAL": 0, "HOLD": 0}
+
+    if not tf_signals or current_tf.lower() not in TF_ORDER:
+        return {"score": 0.5, "aligned": False, "direction": "NEUTRAL",
+                "confirming_tfs": [], "conflicting_tfs": [], "method": "unavailable"}
+
+    current_order = TF_ORDER.get(current_tf.lower(), 2)
+    current_signal = tf_signals.get(current_tf.lower(), "NEUTRAL").upper()
+    current_val = SIGNAL_VAL.get(current_signal, 0)
+
+    if current_val == 0:  # Mevcut TF nötr → hizalama anlamlı değil
+        return {"score": 0.5, "aligned": False, "direction": "NEUTRAL",
+                "confirming_tfs": [], "conflicting_tfs": [], "method": "neutral_base"}
+
+    confirming, conflicting = [], []
+    for tf, sig in tf_signals.items():
+        tf_order = TF_ORDER.get(tf.lower(), 0)
+        if tf_order <= current_order or tf_order == 0:
+            continue  # sadece üst TF'lere bak
+        sig_val = SIGNAL_VAL.get(sig.upper(), 0)
+        if sig_val == 0:
+            continue
+        if sig_val == current_val:
+            confirming.append(tf)
+        else:
+            conflicting.append(tf)
+
+    total_higher = len(confirming) + len(conflicting)
+    if total_higher == 0:
+        # Üst TF verisi yok → mütevazı güven
+        return {"score": 0.55 if current_val > 0 else 0.45,
+                "aligned": False, "direction": current_signal,
+                "confirming_tfs": [], "conflicting_tfs": [], "method": "no_higher_tf"}
+
+    alignment_ratio = len(confirming) / total_higher
+    # Tüm üst TF'ler onaylıyorsa 0.85, tümü çelişiyorsa 0.25
+    base = 0.5 + current_val * 0.35 * alignment_ratio
+    score = max(0.10, min(0.90, base))
+
+    return {
+        "score": round(score, 3),
+        "aligned": len(confirming) > len(conflicting),
+        "direction": current_signal,
+        "alignment_ratio": round(alignment_ratio, 2),
+        "confirming_tfs": confirming,
+        "conflicting_tfs": conflicting,
+        "higher_tf_count": total_higher,
+        "method": "tf_signals",
+    }
+
+
 async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, Optional[dict[str, Any]]]:
     """Fetch raw live module payloads from each AI service."""
     symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"
@@ -1175,12 +1236,27 @@ async def get_consensus(
         fundamental_score = min(max(float(fundamental_score), 0.0), 1.0)
         news_score = min(max(float(news_score), 0.0), 1.0)
 
-        # 3-way weighted consensus
-        weights = {"touche": 0.50, "fundamental": 0.35, "news": 0.15}
+        # ── Multi-timeframe hizalanma ─────────────────────────────────────
+        touche_payload = live_payloads.get("touche") or {}
+        tf_signals_map = touche_payload.get("tf_signals") or {}
+        mtf = _compute_mtf_alignment(tf_signals_map, timeframe)
+
+        # MTF hizalanma skoru Touche ağırlığını modüle eder:
+        # Üst TF'ler onaylıyorsa Touche etkisi artar (0.50→0.60),
+        # çelişiyorsa azalır (0.50→0.40)
+        mtf_touche_boost = (mtf["score"] - 0.5) * 0.20   # ±0.10 aralığında
+        touche_w_adj = max(0.30, min(0.70, 0.50 + mtf_touche_boost))
+        remain = 1.0 - touche_w_adj
+        fundamental_w_adj = remain * 0.70
+        news_w_adj        = remain * 0.30
+
+        weights = {"touche": round(touche_w_adj, 3),
+                   "fundamental": round(fundamental_w_adj, 3),
+                   "news": round(news_w_adj, 3)}
         weighted_score = (
-            touche_score * weights["touche"] +
+            touche_score      * weights["touche"] +
             fundamental_score * weights["fundamental"] +
-            news_score * weights["news"]
+            news_score        * weights["news"]
         )
 
         # Determine action
@@ -1243,6 +1319,7 @@ async def get_consensus(
             "verified": verified,
             "data_status": data_status,
             "module_sources": module_sources,
+            "mtf_alignment": mtf,
             "warnings": warnings,
         }
 
