@@ -553,6 +553,16 @@ async def get_pending_signals():
     }
 
 
+@app.get("/api/price/validate/{symbol}")
+async def validate_price_endpoint(symbol: str):
+    """İki kaynaktan fiyat çap, sapma analizi döndür.
+    Örnek: GET /api/price/validate/BTC%2FUSDT
+    """
+    from services.price_validator import validate_price
+    vld = await validate_price(symbol.replace("%2F", "/").replace("%2f", "/"))
+    return vld.to_dict()
+
+
 @app.get("/api/signals/mode")
 async def get_execution_mode():
     """Mevcut execution modunu döndür."""
@@ -659,6 +669,26 @@ async def execute_signal(request: SignalRequest):
 
     # ── Execution mode kontrolü ───────────────────────────────────────────────
     _signal_queue.cleanup()  # süresi geçenleri temizle
+
+    # ── Çapraz fiyat doğrulaması ──────────────────────────────────────────────
+    # Execution'dan önce Binance vs CoinGecko/yfinance karşılaştırır.
+    # >%1 sapma varsa işlem bloke edilir — tek kaynakta hata/manipülasyon önlemi.
+    try:
+        from services.price_validator import validate_price
+        price_vld = await validate_price(request.symbol)
+        if price_vld.error:
+            logger.warning(f"PRICE_VALIDATION_BLOCKED: {price_vld.to_dict()}")
+            return {
+                "success": False,
+                "reason": (f"Fiyat doğrulaması başarısız: %{price_vld.deviation_pct*100:.2f} "
+                           f"sapma ({price_vld.source1} vs {price_vld.source2}). "
+                           f"Güvenlik engeli — işlem yapılmadı."),
+                "price_validation": price_vld.to_dict(),
+            }
+        elif price_vld.warning:
+            logger.info(f"PRICE_WARNING: {price_vld.deviation_pct*100:.2f}% sapma — devam ediyor")
+    except Exception as pv_exc:
+        logger.warning(f"price_validator_unavailable: {pv_exc} — doğrulama atlanıyor")
 
     if EXECUTION_MODE == "MANUAL_APPROVAL":
         # Sinyali kuyruğa al, kullanıcı onayı bekle
