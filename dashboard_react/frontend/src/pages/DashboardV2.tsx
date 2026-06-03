@@ -99,43 +99,117 @@ const VADE_OPTIONS: { value: Vade; label: string; sub: string }[] = [
   { value: "long",   label: "Uzun",  sub: "6 Ay+" },
 ];
 
-// ── Modül açıklamaları — proper component (hooks kuralı: sadece burada) ──────
-const _MODULE_INFO = [
-  { key: "touche",      name: "Touche EQS",         color: "border-violet-500/30", dot: "bg-violet-400", lines: [
-    "Varlığın fiyat hareketini teknik analiz yöntemleriyle (EMA, MACD, RSI, Bollinger, Swing, FVG) inceler; alım veya satım baskısının yönünü ölçer.",
-    "Seçili timeframe'in sinyalini üst timeframe'lerle ağırlıklı oylamaya sokar — tüm TF'ler aynı yönde ise skor güçlenir, çelişki varsa ortaya çekilir.",
-    "Consensus sinyaline %50 ağırlıkla en doğrudan katkıyı yapar; piyasa yapısı, diverjans, likidite süpürmesi ve CMF hacim teyidini birleştirir.",
-  ]},
-  { key: "fundamental", name: "Fundamental Score",  color: "border-sky-500/30",    dot: "bg-sky-400",    lines: [
-    "Bitcoin zinciri üzerindeki on-chain metrikleri (MVRV Z-Score ve NUPL) kullanarak piyasanın gerçek değerleme durumunu ölçer.",
-    "MVRV Z < 1 = ucuz (birikim), 1–3 = makul, > 3.5 = pahalı (dağıtım); NUPL ise sahiplerin ortalama kâr/zarar oranını gösterir.",
-    "Kısa TF için birikim bölgesi analizi (momentum), uzun TF için MVRV/NUPL mutlak seviyeleri ağırlıklıdır. Şu an Glassnode key olmadığından simüle veri kullanılmaktadır.",
-  ]},
-  { key: "news",        name: "Haber Duygusu",       color: "border-amber-500/30",  dot: "bg-amber-400",  lines: [
-    "SEC, Fed, CFTC, PBOC, kripto borsaları ve küresel finans medyasından 20+ RSS kaynağındaki haberleri NLP ile analiz eder.",
-    "Her haberin kripto piyasasına potansiyel etkisini, düzenleyici baskı/destek yönünü ve güven skorunu değerlendirerek toplu bir duygu puanı üretir.",
-    "Kısa TF'de güncel haber akışı tam ağırlıkla etkilerken, uzun vadeli pozisyonlarda haberin önemi azalıp temel veriler öne çıkar (1h=%92 etki, 1w=%45).",
-  ]},
-  { key: "sentinel",    name: "Sentinel (arka plan)", color: "border-rose-500/20",   dot: "bg-rose-400",   lines: [
-    "VIX (volatilite korku endeksi), DXY (dolar endeksi), US10Y (tahvil faizi), HYG (kredi sağlığı) ve BTC funding rate gibi makro göstergeleri izler.",
-    "Bu göstergelerin bütünsel durumuna göre piyasanın rejimini (RISK_ON/OFF/NORMALIZATION) ve anlık olay riskini hesaplar.",
-    "Consensus sinyaline doğrudan girmez; bunun yerine kill switch kararlarına ve portföy dağılımındaki rejim overlay'ine girdi sağlar.",
-  ]},
-  { key: "quantum",     name: "Quantum (arka plan)",  color: "border-emerald-500/20",dot: "bg-emerald-400",lines: [
-    "Emir defteri derinliği, bid/ask dengesizliği ve slippage (kayma) gibi piyasa mikroyapısını ölçerek işlem kalitesini değerlendirir.",
-    "Yüksek skor: büyük bir emri fiyatı bozmadan çalıştırmak mümkün; düşük skor: likidite yetersiz, emirleri parçala veya bölgeyi değiştir.",
-    "Şu an gerçek veri bağlantısı bulunmadığından nötr (0.50) sabit değer göstermektedir; Binance order book entegrasyonu planlanmaktadır.",
-  ]},
-] as const;
+// ── "Bu skoru neden verdi?" — dinamik açıklama üreteci ───────────────────────
+type MetricRaw = { score: number; summary?: string; health?: string; source?: string; data_status?: string };
 
-const MetricsModuleInfo: React.FC<{ open: boolean; onToggle: () => void }> = ({ open, onToggle }) => (
+function whyLines(key: string, m: MetricRaw, tf: string): string[] {
+  const pct = Math.round(m.score * 100);
+  const summary = m.summary ?? "";
+
+  if (key === "touche") {
+    // summary: "EQS 17.1 (küresel) · 15m: BUY · 1h: NEUTRAL · 4h: SELL · 1d: SELL · Çoğunluk SAT."
+    const tfMatches = summary.matchAll(/(\d+[mhd]+):\s*(BUY|SELL|NEUTRAL)/gi);
+    const tfs: { tf: string; sig: string }[] = [];
+    for (const m2 of tfMatches) tfs.push({ tf: m2[1].toLowerCase(), sig: m2[2].toUpperCase() });
+    const eqsMatch = summary.match(/EQS\s*([\d.]+)/);
+    const eqs = eqsMatch ? eqsMatch[1] : "—";
+    const current = tfs.find(t => t.tf === tf.toLowerCase());
+    const higher  = tfs.filter(t => ["4h","1d","1w"].includes(t.tf));
+    const conflict = higher.filter(t => current && t.sig !== current.sig && current.sig !== "NEUTRAL");
+
+    const l1 = tfs.length
+      ? `Teknik analiz ${tfs.map(t => `${t.tf}=${t.sig}`).join(", ")} sinyali üretti; küresel EQS ${eqs}.`
+      : `Teknik analiz skoru ${eqs} ile hesaplandı.`;
+    const l2 = current
+      ? `Seçili ${tf.toUpperCase()} timeframe'de sinyal ${current.sig}${conflict.length ? `; ancak üst TF'ler (${conflict.map(t=>t.tf.toUpperCase()).join(", ")}) çelişiyor` : "; üst TF'ler de aynı yönde"}.`
+      : `Seçili TF (${tf}) için sinyal verisi yok, küresel EQS kullanıldı.`;
+    const l3 = conflict.length
+      ? `Çelişki yüzünden ağırlıklı oy ortaya çekildi → nihai skor %${pct}.`
+      : `TF'ler uyumlu olduğundan skor ${pct >= 65 ? "güçlü" : pct >= 45 ? "nötr" : "zayıf"} kaldı → %${pct}.`;
+    return [l1, l2, l3];
+  }
+
+  if (key === "fundamental") {
+    const mvrvM = summary.match(/MVRV Z[^:]*:\s*([\d.]+)/);
+    const nuplM = summary.match(/NUPL[^:]*:\s*([\d.]+)/);
+    const mvrv = mvrvM ? parseFloat(mvrvM[1]) : null;
+    const nupl = nuplM ? parseFloat(nuplM[1]) : null;
+    const isMock = summary.includes("simüle");
+    const l1 = mvrv != null
+      ? `MVRV Z-Score ${mvrv}: ${mvrv < 1 ? "piyasa ucuz bölgede (birikim fırsatı)" : mvrv > 3.5 ? "piyasa pahalı (dağıtım riski yüksek)" : "değerleme makul — ne çok pahalı ne çok ucuz"}.`
+      : "MVRV Z-Score verisi alınamadı.";
+    const l2 = nupl != null
+      ? `NUPL ${nupl}: ${nupl < 0 ? "sahiplerin çoğu zararda — kapitülasyon bölgesi" : nupl > 0.75 ? "piyasa öfori aşamasında — dikkat" : "sahiplerin ortalaması kârda, istikrarlı ortam"}.`
+      : "NUPL verisi alınamadı.";
+    const l3 = isMock
+      ? `Glassnode API key olmadığından simüle veri kullanıldı; bu iki değerin bileşimi %${pct} skoru üretti.`
+      : `Bu iki göstergenin bileşimi, seçili ${tf.toUpperCase()} TF ağırlığıyla %${pct} skoru üretti.`;
+    return [l1, l2, l3];
+  }
+
+  if (key === "news") {
+    const countM  = summary.match(/(\d+)\s*haber/);
+    const impactM = summary.match(/Etki[:\s]*([\d.]+)/);
+    const confM   = summary.match(/Güven[:\s]*([\d.]+)/i);
+    const sentM   = summary.match(/duygu[:\s]*([\w]+)/i);
+    const count   = countM  ? countM[1]  : "?";
+    const impact  = impactM ? impactM[1] : "?";
+    const conf    = confM   ? confM[1]   : "?";
+    const sent    = sentM   ? sentM[1]   : "belirsiz";
+    const relevMap: Record<string,number> = {"5m":100,"15m":98,"1h":92,"4h":80,"1d":65,"1w":45,"1month":25};
+    const relev = relevMap[tf] ?? 80;
+    return [
+      `${count} haber NLP ile analiz edildi: kripto etki skoru ${impact}/100, güven %${conf}.`,
+      `Haberların genel duygusu "${sent}" — düzenleyici, ekonomik ve kripto sektörü haberleri bir arada değerlendirildi.`,
+      `${tf.toUpperCase()} timeframe için haber ağırlığı %${relev}'e düşürüldü (uzun vadede haber etkisi azalır) → nihai %${pct}.`,
+    ];
+  }
+
+  if (key === "sentinel") {
+    const riskM  = summary.match(/Olay riski[:\s]*([\d.]+)%/i);
+    const liqM   = summary.match(/Likidite[:\s]*([\d.]+)/i);
+    const volM   = summary.match(/Oynaklık[:\s]*([\d.]+)/i);
+    const regM   = summary.match(/Rejim[:\s]*([^·.]+)/i);
+    const risk   = riskM ? riskM[1] : "?";
+    const liq    = liqM  ? liqM[1]  : "?";
+    const reg    = regM  ? regM[1].trim() : "?";
+    return [
+      `Olay riski %${risk} (${parseFloat(risk||"50") < 30 ? "düşük — kritik makro tetikleyici yok" : parseFloat(risk||"50") < 55 ? "orta — dikkat gerekiyor" : "yüksek — pozisyon küçült"}). Piyasa likiditesi ${liq}/100.`,
+      `Makro rejim: ${reg}. VIX, DXY, US10Y, HYG ve BTC funding rate bütünü bu rejimi işaret etti.`,
+      `Ters çevirme (%100 − %${risk} = %${Math.round(100 - parseFloat(risk||"50"))}) ile Sentinel skoru %${pct} oldu. Consensus'a girmez; kill switch ve portföy overlay'e katkı sağlar.`,
+    ];
+  }
+
+  // quantum
+  return [
+    `Skor %${pct} — ${Math.abs(pct - 50) < 2 ? "sabit nötr değer: gerçek order book verisi henüz bağlanmadı" : pct > 55 ? "likidite uygun görünüyor" : "likidite zayıf uyarısı"}.`,
+    "Binance emir defteri derinliği, bid/ask dengesizliği ve slippage ölçülür; yüksek skor büyük emri fiyatı bozmadan çalıştırmayı, düşük skor parçalı emir açmayı önerir.",
+    "Veri bağlantısı kurulduğunda bu skor her TF ve varlık için gerçek zamanlı değişecektir.",
+  ];
+}
+
+// ── MetricsModuleInfo bileşeni ────────────────────────────────────────────────
+const _MOD_META: Record<string, { name: string; color: string; dot: string }> = {
+  touche:      { name: "Touche EQS",         color: "border-violet-500/30", dot: "bg-violet-400" },
+  fundamental: { name: "Fundamental Score",  color: "border-sky-500/30",   dot: "bg-sky-400"    },
+  news:        { name: "Haber Duygusu",      color: "border-amber-500/30",  dot: "bg-amber-400"  },
+  sentinel:    { name: "Sentinel",           color: "border-rose-500/20",   dot: "bg-rose-400"   },
+  quantum:     { name: "Quantum",            color: "border-emerald-500/20",dot: "bg-emerald-400"},
+};
+
+const MetricsModuleInfo: React.FC<{
+  open: boolean;
+  onToggle: () => void;
+  metrics: Record<string, MetricRaw>;
+  timeframe: string;
+}> = ({ open, onToggle, metrics, timeframe }) => (
   <div className="rounded-2xl border border-slate-800 bg-slate-950/40">
     <button
       type="button"
       onClick={onToggle}
       className="flex w-full items-center justify-between px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-600 transition-colors hover:text-slate-400"
     >
-      <span>Modüller Ne Yapar?</span>
+      <span>Bu skoru neden verdi?</span>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
         className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? "rotate-180" : ""}`}>
         <polyline points="6 9 12 15 18 9" />
@@ -143,22 +217,32 @@ const MetricsModuleInfo: React.FC<{ open: boolean; onToggle: () => void }> = ({ 
     </button>
     {open && (
       <div className="grid gap-3 px-4 pb-4 sm:grid-cols-2 lg:grid-cols-3">
-        {_MODULE_INFO.map(mod => (
-          <div key={mod.key} className={`rounded-xl border ${mod.color} bg-slate-900/60 p-3`}>
-            <div className="mb-2 flex items-center gap-2">
-              <span className={`h-2 w-2 shrink-0 rounded-full ${mod.dot}`} />
-              <p className="text-[10px] font-bold text-slate-300">{mod.name}</p>
+        {Object.entries(_MOD_META).map(([key, meta]) => {
+          const m = metrics[key];
+          if (!m) return null;
+          const lines = whyLines(key, m, timeframe);
+          const pct   = Math.round(m.score * 100);
+          const sc    = m.score > 0.65 ? "text-emerald-400" : m.score < 0.35 ? "text-rose-400" : "text-slate-300";
+          return (
+            <div key={key} className={`rounded-xl border ${meta.color} bg-slate-900/60 p-3`}>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${meta.dot}`} />
+                  <p className="text-[10px] font-bold text-slate-300">{meta.name}</p>
+                </div>
+                <span className={`font-mono text-[11px] font-bold ${sc}`}>{pct}%</span>
+              </div>
+              <ol className="list-none space-y-1.5">
+                {lines.map((line, i) => (
+                  <li key={i} className="flex gap-1.5">
+                    <span className="mt-0.5 shrink-0 font-mono text-[8px] text-slate-700">{i + 1}.</span>
+                    <p className="text-[10px] leading-4 text-slate-500">{line}</p>
+                  </li>
+                ))}
+              </ol>
             </div>
-            <ol className="list-none space-y-1.5">
-              {mod.lines.map((line, i) => (
-                <li key={i} className="flex gap-1.5">
-                  <span className="mt-0.5 shrink-0 font-mono text-[8px] text-slate-700">{i + 1}.</span>
-                  <p className="text-[10px] leading-4 text-slate-500">{line}</p>
-                </li>
-              ))}
-            </ol>
-          </div>
-        ))}
+          );
+        })}
       </div>
     )}
   </div>
@@ -726,7 +810,12 @@ const DashboardV2Inner: React.FC = () => {
                 </div>
 
                 {/* ── Modül Açıklamaları ─────────────────────────────────── */}
-                <MetricsModuleInfo open={metricsInfoOpen} onToggle={() => setMetricsInfoOpen(v => !v)} />
+                <MetricsModuleInfo
+                  open={metricsInfoOpen}
+                  onToggle={() => setMetricsInfoOpen(v => !v)}
+                  metrics={metricsData.metrics as unknown as Record<string, MetricRaw>}
+                  timeframe={metricsTimeframe}
+                />
               </div>
             ) : (
               <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-10 text-center text-sm text-slate-500">
