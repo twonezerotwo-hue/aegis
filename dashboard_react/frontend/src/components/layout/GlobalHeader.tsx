@@ -8,13 +8,10 @@
 
 import React, { useEffect, useState } from "react";
 
-type DashboardMode = "legacy" | "v2";
-
 interface GlobalHeaderProps {
   regime: string;
   systemHealth: string;
   lastUpdated: string | null;
-  currentMode: DashboardMode;
   liveStatus: "live" | "reconnecting" | "fallback";
   liveMessage?: string | null;
   alertCount?: number;
@@ -22,12 +19,6 @@ interface GlobalHeaderProps {
   dailyPnl?: number | null;
   dailyTradeCount?: number;
 }
-
-const navigateTo = (path: string) => {
-  if (window.location.pathname === path) return;
-  window.history.pushState({}, "", path);
-  window.dispatchEvent(new Event("aegis:navigate"));
-};
 
 const getLiveConfig = (
   status: GlobalHeaderProps["liveStatus"],
@@ -60,7 +51,6 @@ export const GlobalHeader: React.FC<GlobalHeaderProps> = ({
   regime,
   systemHealth,
   lastUpdated,
-  currentMode,
   liveStatus,
   liveMessage,
   alertCount = 0,
@@ -162,40 +152,6 @@ export const GlobalHeader: React.FC<GlobalHeaderProps> = ({
           </div>
         </div>
 
-        {/* Right controls */}
-        <div className="flex items-center gap-3">
-          {/* Mode toggle */}
-          <div
-            className="flex rounded-xl border border-slate-700 bg-slate-800 p-1"
-            role="group"
-            aria-label="Dashboard modu"
-          >
-            <button
-              type="button"
-              onClick={() => navigateTo("/")}
-              aria-pressed={currentMode === "legacy"}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wider transition-all duration-200 ${
-                currentMode === "legacy"
-                  ? "bg-amber-500 text-slate-900 shadow-sm"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Legacy
-            </button>
-            <button
-              type="button"
-              onClick={() => navigateTo("/v2")}
-              aria-pressed={currentMode === "v2"}
-              className={`rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wider transition-all duration-200 ${
-                currentMode === "v2"
-                  ? "bg-emerald-500 text-slate-900 shadow-sm"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              V2
-            </button>
-          </div>
-        </div>
       </div>
     </header>
   );

@@ -1,16 +1,8 @@
-import React, { useEffect, useState, Suspense } from "react";
+import React, { Suspense } from "react";
 import { DashboardV2 } from "./pages/DashboardV2";
 import { ConsensusStoreProvider } from "./store/consensusStore";
 import { SkeletonLoader } from "./components/ui/SkeletonLoader";
 import { ThemeProvider } from "./components/ui/ThemeToggle";
-
-const getActivePath = (): string => window.location.pathname;
-
-/** Navigate within the SPA without full reload */
-export function navigateTo(path: string) {
-  window.history.pushState(null, "", path);
-  window.dispatchEvent(new CustomEvent("aegis:navigate"));
-}
 
 const PageFallback: React.FC = () => (
   <div className="min-h-screen bg-slate-950 p-4">
@@ -25,29 +17,14 @@ const PageFallback: React.FC = () => (
   </div>
 );
 
-const App: React.FC = () => {
-  const [path, setPath] = useState<string>(getActivePath);
-
-  useEffect(() => {
-    const handleLocationChange = () => setPath(getActivePath());
-    window.addEventListener("popstate", handleLocationChange);
-    window.addEventListener("aegis:navigate", handleLocationChange as EventListener);
-    return () => {
-      window.removeEventListener("popstate", handleLocationChange);
-      window.removeEventListener("aegis:navigate", handleLocationChange as EventListener);
-    };
-  }, []);
-
-  // All routes render DashboardV2 (tabs handle sub-navigation)
-  return (
-    <ThemeProvider>
-      <ConsensusStoreProvider>
-        <Suspense fallback={<PageFallback />}>
-          <DashboardV2 />
-        </Suspense>
-      </ConsensusStoreProvider>
-    </ThemeProvider>
-  );
-};
+const App: React.FC = () => (
+  <ThemeProvider>
+    <ConsensusStoreProvider>
+      <Suspense fallback={<PageFallback />}>
+        <DashboardV2 />
+      </Suspense>
+    </ConsensusStoreProvider>
+  </ThemeProvider>
+);
 
 export default App;

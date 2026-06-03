@@ -1,6 +1,6 @@
 /**
  * DashboardV2 — AEGIS unified dashboard.
- * Tabs: Portföy | Metrikler | AI Analiz | Backtest | Paper Trading
+ * Tabs: Kontrol | Analiz | Metrikler | Backtest | Paper Trading
  */
 
 import React, { Suspense, lazy } from "react";
@@ -389,7 +389,6 @@ const DashboardV2Inner: React.FC = () => {
             regime={regime}
             systemHealth={systemHealth || derivedHealth}
             lastUpdated={effectiveMacro ? macroTimestamp : lastSuccessfulUpdate ?? null}
-            currentMode="v2"
             liveStatus={effectiveLiveStatus}
             liveMessage={effectiveLiveMessage}
             alertCount={latestAlert ? 1 : 0}
