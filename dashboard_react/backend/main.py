@@ -1003,38 +1003,62 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
 
         # ── ML Predictor skoru — son önbelleklenmiş tahmin ──────────────────
         def _get_ml_metric(sym: str, tf: str) -> dict:
-            """ML önbelleğinden son tahmini döndür. Arka planda güncellenir."""
-            key = f"{sym}|{tf}"
-            from routes.ml_model import _models, _metadata, _ml_pred_cache
-            cached = _ml_pred_cache.get(key)
-            meta   = _metadata.get(key, {})
+            """
+            ML önbelleğinden son tahmini döndür.
+            Model yoksa: arka planda eğitim tetikle + fallback sonuç döndür.
+            """
+            from routes.ml_model import (
+                _models, _metadata, _ml_pred_cache, _training_queue,
+                _get_fallback_cache, trigger_background_train, get_ml_status,
+            )
+            key    = f"{sym}|{tf}"
+            status = get_ml_status(sym, tf)
+
+            # Model bu TF için yok → arka planda eğitim başlat
+            if status["status"] == "untrained":
+                trigger_background_train(sym, tf)
+
+            # Fallback veya mevcut önbellekten sonuç al
+            cached = _get_fallback_cache(sym, tf)
+            is_training = key in _training_queue
+            fb_from = cached.get("_fallback_from") if cached else None
+            is_fallback = fb_from is not None and fb_from != key
+
             if not cached:
+                summary = f"Egitim basladi ({tf}) — 30-60 sn sonra hazir."
                 return {"ml": {
                     "name": "ML Predictor", "score": 0.5,
                     "health": "warning", "color": "#818cf8",
-                    "summary": "Model egitilmedi — POST /api/ml/train ile baslat.",
-                    "timeframe": tf, "source": "ml_not_trained",
+                    "summary": summary,
+                    "timeframe": tf, "source": "ml_training",
                     "fallback_used": True, "data_status": "MISSING",
                     "symbol": sym, "timestamp": None, "last_updated": None,
-                    "ml_detail": {"trained": False},
+                    "ml_detail": {"trained": False, "training": True},
                 }}
+
             score  = cached["ml_score"]
             sig    = cached["signal"]
             health = "healthy" if score > 0.62 or score < 0.38 else "warning"
+            meta_key = fb_from or key
+            meta   = _metadata.get(meta_key, {})
+
+            fb_note = f" [fallback: {fb_from.split('|')[1] if fb_from else ''}]" if is_fallback else ""
+            train_note = " | egitiliyor..." if is_training else ""
             detail = (
-                f"Tahmin: {sig} | "
+                f"Tahmin: {sig}{fb_note} | "
                 f"AL=%{round(cached['buy_prob']*100,0):.0f} "
                 f"TUT=%{round(cached['hold_prob']*100,0):.0f} "
                 f"SAT=%{round(cached['sell_prob']*100,0):.0f} | "
                 f"Guven: %{round(cached['confidence']*100,1)} | "
-                f"acc=%{meta.get('accuracy','?')}"
+                f"acc=%{meta.get('accuracy','?')}{train_note}"
             )
             return {"ml": {
                 "name": "ML Predictor", "score": round(score, 4),
                 "health": health, "color": "#818cf8",
                 "summary": detail,
-                "timeframe": tf, "source": f"ml_{meta.get('model_type','model').lower()}",
-                "fallback_used": False, "data_status": "LIVE",
+                "timeframe": tf,
+                "source": f"ml_{meta.get('model_type','model').lower()}" + ("_fallback" if is_fallback else ""),
+                "fallback_used": is_fallback, "data_status": "LIVE" if not is_fallback else "PARTIAL_FALLBACK",
                 "symbol": sym, "timestamp": None, "last_updated": None,
                 "ml_detail": {
                     "trained": True, "signal": sig,
@@ -1043,6 +1067,8 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
                     "confidence": cached["confidence"],
                     "accuracy": meta.get("accuracy"),
                     "top_features": meta.get("top_features", [])[:3],
+                    "fallback_from": fb_from,
+                    "training": is_training,
                 },
             }}
 

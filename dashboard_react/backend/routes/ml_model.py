@@ -44,41 +44,97 @@ _metadata:  dict[str, dict]       = {}   # eğitim meta
 _bar_count: dict[str, int]        = {}   # son eğitimden bu yana bar sayısı
 _ohlcv_cache: dict[str, pd.DataFrame] = {}
 _ml_pred_cache: dict[str, dict]   = {}  # son ML tahmini önbelleği (dashboard okur)
+_training_queue: set[str]         = set()  # şu an eğitilen TF'ler
+
+# Fallback öncelik sırası — model yokken hangi TF kullanılsın
+_TF_FALLBACK_ORDER = ["BTC/USDT|4h", "BTC/USDT|1d", "BTC/USDT|1h", "BTC/USDT|4h"]
+
+
+def _get_fallback_cache(symbol: str, timeframe: str) -> dict | None:
+    """Belirtilen TF için önbellekte model yoksa en yakın mevcut modeli döndür."""
+    key = f"{symbol}|{timeframe}"
+    if key in _ml_pred_cache:
+        return _ml_pred_cache[key]
+    # Aynı sembol farklı TF
+    for fallback_key in _TF_FALLBACK_ORDER:
+        if fallback_key in _ml_pred_cache:
+            cached = dict(_ml_pred_cache[fallback_key])
+            cached["_fallback_from"] = fallback_key  # bilgi ekle
+            return cached
+    return None
+
+
+async def _background_train_task(symbol: str, timeframe: str) -> None:
+    """Arka planda model eğit, tamamlanınca _training_queue'dan çıkar."""
+    key = f"{symbol}|{timeframe}"
+    try:
+        logger.info("ML_BG_TRAIN start: %s", key)
+        df = await _fetch_ohlcv_for_ml(symbol, timeframe, limit=_TRAIN_LOOKBACK_BARS + 50)
+        meta = train_model(df, key)
+        # Tahmin yap ve önbelleğe yaz
+        result = predict(df, key)
+        _ml_pred_cache[key] = result
+        logger.info("ML_BG_TRAIN done: %s acc=%.1f%%", key, meta.get("accuracy", 0))
+    except Exception as exc:
+        logger.warning("ML_BG_TRAIN failed %s: %s", key, exc)
+    finally:
+        _training_queue.discard(key)
+
+
+def trigger_background_train(symbol: str, timeframe: str) -> bool:
+    """
+    Arka planda eğitim başlat (non-blocking).
+    Zaten eğitiliyorsa False döner.
+    """
+    key = f"{symbol}|{timeframe}"
+    if key in _training_queue or key in _models:
+        return False
+    _training_queue.add(key)
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_background_train_task(symbol, timeframe))
+        logger.info("ML_BG_TRAIN queued: %s", key)
+        return True
+    except RuntimeError:
+        # Event loop yok veya çalışmıyor
+        _training_queue.discard(key)
+        return False
 
 
 def get_ml_score(symbol: str, timeframe: str) -> float:
-    """
-    Sistem geneli ML skoru erişimi — sync, her modülden çağrılabilir.
-    Model eğitilmemişse 0.5 (nötr) döner.
-    """
-    key = f"{symbol}|{timeframe}"
-    cached = _ml_pred_cache.get(key)
-    if cached:
-        return float(cached.get("ml_score", 0.5))
-    # Birleşik BTC tahmini yok, BTC/USDT|4h dene
-    for fallback_key in [f"BTC/USDT|{timeframe}", "BTC/USDT|4h", "BTC/USDT|1d"]:
-        if fallback_key in _ml_pred_cache:
-            return float(_ml_pred_cache[fallback_key].get("ml_score", 0.5))
-    return 0.5  # eğitilmemiş → nötr
+    """Sync ML skoru — model yoksa en yakın fallback, o da yoksa 0.5."""
+    cached = _get_fallback_cache(symbol, timeframe)
+    return float(cached.get("ml_score", 0.5)) if cached else 0.5
 
 
 def get_ml_signal(symbol: str, timeframe: str) -> str:
-    """BUY / SELL / HOLD — model yoksa NEUTRAL"""
-    key = f"{symbol}|{timeframe}"
-    cached = _ml_pred_cache.get(key)
-    if cached:
-        return cached.get("signal", "HOLD")
-    return "NEUTRAL"
+    cached = _get_fallback_cache(symbol, timeframe)
+    return cached.get("signal", "NEUTRAL") if cached else "NEUTRAL"
 
 
 def is_ml_trained(symbol: str, timeframe: str) -> bool:
+    """Herhangi bir model eğitilmişse True döner (fallback için de yeterli)."""
     key = f"{symbol}|{timeframe}"
-    if key in _ml_pred_cache:
+    if key in _models:
         return True
-    for k in _ml_pred_cache:
-        if k.startswith("BTC/USDT|"):
+    # Fallback model var mı?
+    for fb in _TF_FALLBACK_ORDER:
+        if fb in _models:
             return True
     return False
+
+
+def get_ml_status(symbol: str, timeframe: str) -> dict:
+    """Bir TF için model durumu: trained/training/fallback/untrained."""
+    key = f"{symbol}|{timeframe}"
+    if key in _models:
+        return {"status": "trained", "key": key}
+    if key in _training_queue:
+        return {"status": "training", "key": key}
+    for fb in _TF_FALLBACK_ORDER:
+        if fb in _models:
+            return {"status": "fallback", "key": key, "fallback_from": fb}
+    return {"status": "untrained", "key": key}
 
 
 # ── Özellik Mühendisliği ──────────────────────────────────────────────────────
@@ -404,52 +460,94 @@ async def train_endpoint(
 
 @router.get("/predict")
 async def predict_endpoint(
-    symbol:    str = Query("BTC/USDT"),
-    timeframe: str = Query("4h"),
+    symbol:     str  = Query("BTC/USDT"),
+    timeframe:  str  = Query("4h"),
     auto_train: bool = Query(True),
 ):
     """
     Mevcut piyasa durumu için ML tahmini üret.
-    Model yoksa otomatik eğitir (auto_train=True).
+
+    - Model zaten varsa: hızlı predict (non-blocking)
+    - Model yoksa + auto_train: arka planda eğitim başlatır, fallback döndürür
+    - Model yoksa + fallback var: fallback modelden sonuç döndürür
     """
     symbol_tf = f"{symbol}|{timeframe}"
     _bar_count[symbol_tf] = _bar_count.get(symbol_tf, 0) + 1
+    ml_status = get_ml_status(symbol, timeframe)
 
-    # Auto-train veya yeniden eğitim zamanı geldiyse
-    needs_train = (
-        symbol_tf not in _models or
-        (auto_train and _bar_count.get(symbol_tf, 0) >= _RETRAIN_BARS)
-    )
-    if needs_train:
-        try:
-            df = await _fetch_ohlcv_for_ml(symbol, timeframe, limit=_TRAIN_LOOKBACK_BARS + 50)
-            train_model(df, symbol_tf)
-            # Son 200 bar predict için
-            result = predict(df, symbol_tf)
-        except Exception as exc:
-            logger.error("ML auto-train failed: %s", exc)
-            return {"ml_score": 0.5, "signal": "NEUTRAL", "confidence": 0.0,
-                    "trained": False, "error": str(exc)}
-    else:
-        try:
-            df = await _fetch_ohlcv_for_ml(symbol, timeframe, limit=300)
-            result = predict(df, symbol_tf)
-        except Exception as exc:
-            return {"ml_score": 0.5, "signal": "NEUTRAL", "confidence": 0.0,
-                    "trained": symbol_tf in _models, "error": str(exc)}
+    # ── Model bu TF için hiç yok → arka planda eğit, fallback döndür ──────────
+    if ml_status["status"] in ("untrained", "fallback"):
+        if auto_train and ml_status["status"] == "untrained":
+            # Arka planda eğitim başlat (non-blocking)
+            trigger_background_train(symbol, timeframe)
+
+        # Fallback sonuç: en yakın mevcut modelin önbelleğini kullan
+        fallback = _get_fallback_cache(symbol, timeframe)
+        if fallback:
+            fb_from = fallback.get("_fallback_from", "bilinmiyor")
+            meta_fb = _metadata.get(fb_from, {})
+            return {
+                **{k: v for k, v in fallback.items() if not k.startswith("_")},
+                "symbol":     symbol,
+                "timeframe":  timeframe,
+                "model_type": meta_fb.get("model_type"),
+                "accuracy":   meta_fb.get("accuracy"),
+                "trained_at": meta_fb.get("trained_at"),
+                "top_features": meta_fb.get("top_features", [])[:5],
+                "fallback_from": fb_from,
+                "training": ml_status["status"] == "untrained",
+                "training_note": f"Bu TF için eğitim başlatıldı. Şimdilik {fb_from} modeli kullanılıyor.",
+            }
+        else:
+            return {
+                "ml_score": 0.5, "signal": "NEUTRAL", "confidence": 0.0,
+                "trained": False, "training": True,
+                "training_note": f"Model eğitimi başlatıldı ({symbol_tf}). 30-60 sn içinde hazır olacak.",
+                "symbol": symbol, "timeframe": timeframe,
+            }
+
+    # ── Eğitim devam ediyor ────────────────────────────────────────────────────
+    if ml_status["status"] == "training":
+        fallback = _get_fallback_cache(symbol, timeframe)
+        if fallback:
+            meta_fb = _metadata.get(fallback.get("_fallback_from", ""), {})
+            return {
+                **{k: v for k, v in fallback.items() if not k.startswith("_")},
+                "symbol": symbol, "timeframe": timeframe,
+                "model_type": meta_fb.get("model_type"),
+                "accuracy": meta_fb.get("accuracy"),
+                "training": True,
+                "training_note": f"{symbol_tf} için eğitim devam ediyor…",
+            }
+        return {"ml_score": 0.5, "signal": "NEUTRAL", "confidence": 0.0,
+                "trained": False, "training": True, "symbol": symbol, "timeframe": timeframe}
+
+    # ── Model mevcut → Yeniden eğitim zamanı geldiyse arka planda eğit ────────
+    if auto_train and _bar_count.get(symbol_tf, 0) >= _RETRAIN_BARS:
+        trigger_background_train(symbol, timeframe)
+
+    # ── Hızlı predict ─────────────────────────────────────────────────────────
+    try:
+        df = await _fetch_ohlcv_for_ml(symbol, timeframe, limit=300)
+        result = predict(df, symbol_tf)
+    except Exception as exc:
+        cached = _ml_pred_cache.get(symbol_tf)
+        if cached:
+            return {**cached, "symbol": symbol, "timeframe": timeframe, "error": str(exc)}
+        return {"ml_score": 0.5, "signal": "NEUTRAL", "confidence": 0.0,
+                "trained": True, "error": str(exc), "symbol": symbol, "timeframe": timeframe}
 
     meta = _metadata.get(symbol_tf, {})
-    # Dashboard için önbelleğe yaz
     _ml_pred_cache[symbol_tf] = result
-
     return {
         **result,
-        "symbol":    symbol,
-        "timeframe": timeframe,
-        "model_type":  meta.get("model_type"),
-        "accuracy":    meta.get("accuracy"),
-        "trained_at":  meta.get("trained_at"),
+        "symbol":     symbol,
+        "timeframe":  timeframe,
+        "model_type": meta.get("model_type"),
+        "accuracy":   meta.get("accuracy"),
+        "trained_at": meta.get("trained_at"),
         "top_features": meta.get("top_features", [])[:5],
+        "training": False,
     }
 
 
