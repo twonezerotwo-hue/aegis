@@ -245,14 +245,27 @@ async def run_ai_backtest(
         rsi_upper     = _as_optional_int(request_data.get("rsi_upper"))
         event_hint    = request_data.get("event_hint")
         initial_capital = _as_optional_float(request_data.get("initial_capital")) or 100000.0
-        # Configurable exit parameters — defaults from 729-point refined grid search (4h 2022-2026):
-        # z=1.3, sl=-0.06, tp=0.15, ze=0.05, adx=28, kelly=0.28
-        # → WR=58.6%, PF=1.35, PnL=+1.69%, Sharpe=3.52, 29 trades/4yr (7/year)
-        stop_loss_pct   = _as_optional_float(request_data.get("stop_loss_pct"))   or -0.06
-        take_profit_pct = _as_optional_float(request_data.get("take_profit_pct")) or  0.15
-        z_exit_long     = _as_optional_float(request_data.get("z_exit_long"))     or  0.05
-        z_exit_short    = _as_optional_float(request_data.get("z_exit_short"))    or -0.05
-        adx_min         = _as_optional_float(request_data.get("adx_min"))         or 28.0
+        # TF-adaptive exit parametreleri — her timeframe farklı piyasa dinamiği:
+        #   4h : Optimize (Hyperopt) z=1.3, sl=-0.06, tp=0.15, ze=0.05, adx=28
+        #   1d : Günlük trenler daha uzun sürer — geniş z_exit, yüksek TP, düşük ADX
+        #   1h : Hızlı giriş/çıkış — dar z_exit
+        #   1w : Mega-trendler — çok geniş z_exit, yüksek TP
+        _TF_EXIT_DEFAULTS = {
+            "5m":  {"sl": -0.03, "tp": 0.06, "ze_long":  0.20, "ze_short": -0.20, "adx": 22},
+            "15m": {"sl": -0.04, "tp": 0.08, "ze_long":  0.15, "ze_short": -0.15, "adx": 20},
+            "1h":  {"sl": -0.05, "tp": 0.10, "ze_long":  0.10, "ze_short": -0.10, "adx": 20},
+            "4h":  {"sl": -0.06, "tp": 0.15, "ze_long":  0.05, "ze_short": -0.05, "adx": 28},
+            "1d":  {"sl": -0.08, "tp": 0.22, "ze_long": -0.30, "ze_short":  0.30, "adx": 18},
+            "3d":  {"sl": -0.10, "tp": 0.28, "ze_long": -0.40, "ze_short":  0.40, "adx": 15},
+            "1w":  {"sl": -0.12, "tp": 0.35, "ze_long": -0.50, "ze_short":  0.50, "adx": 14},
+        }
+        _tf_def = _TF_EXIT_DEFAULTS.get(timeframe, _TF_EXIT_DEFAULTS["4h"])
+
+        stop_loss_pct   = _as_optional_float(request_data.get("stop_loss_pct"))   or _tf_def["sl"]
+        take_profit_pct = _as_optional_float(request_data.get("take_profit_pct")) or _tf_def["tp"]
+        z_exit_long     = _as_optional_float(request_data.get("z_exit_long"))     or _tf_def["ze_long"]
+        z_exit_short    = _as_optional_float(request_data.get("z_exit_short"))    or _tf_def["ze_short"]
+        adx_min         = _as_optional_float(request_data.get("adx_min"))         or float(_tf_def["adx"])
 
         # ── Parse explicit module_weights from request ──
         module_weights = None
@@ -443,13 +456,25 @@ async def run_ai_backtest(
             "portfolio_allocation": portfolio_allocation,
             "regime": _last_regime,
             "total_trades": len(trades),
-            "all_trades": trades,          # Monte Carlo + advanced analysis için
-            "trades":     trades[-20:],   # UI'da son 20 işlem
+            "all_trades": trades,
+            "trades":     trades[-20:],
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "data_points": len(df),
             "initial_capital": initial_capital,
             "effective_kelly_cap": effective_kelly,
             "module_weights_used": module_weights,
+            "signal_diagnostics": {
+                "long_signals":  int((df["consensus_signal"] == 1).sum())  if "consensus_signal" in df.columns else 0,
+                "short_signals": int((df["consensus_signal"] == -1).sum()) if "consensus_signal" in df.columns else 0,
+                "z_threshold_used": float(effective_kelly),  # placeholder
+                "timeframe": timeframe,
+                "warmup_bars": min(200, max(int(len(df) * 0.15), 60)),
+                "note": (
+                    f"1d timeframe: düşük eşik (z=0.7), MACD filtresi kapalı, ADX=18"
+                    if timeframe == "1d" else
+                    f"1h/4h timeframe: z=1.3, MACD zorunlu, ADX={effective_kelly}"
+                ),
+            },
         }
 
         # Cache result
@@ -1265,39 +1290,58 @@ def generate_zscore_signals(
     event_hint: str = None,
     adx_min: float = 18.0,
 ) -> pd.Series:
-    """Rolling z-score with regime filtering and event-aware dynamic thresholds."""
-    # Window calibrated to ~10 trading days worth of bars per timeframe:
-    # 1h  →  120 bars = 5 days   (was 40 = 1.67 days — too noisy)
-    # 4h  →   60 bars = 10 days  (was 20 = 3.3  days — too noisy, caused 22% win rate)
-    # 1d  →   20 bars = 20 days  (unchanged — 1 month, already appropriate)
-    # Optimal parameters from 945-point grid + refinement search (BTC/USDT 2022-2026):
-    # Winner: 4h z=1.3, adx=28, sl=-0.06, tp=0.15, ze=0.05, kelly=0.28
-    #         → WR=58.6%, PF=1.35, PnL=+1.69%, Sharpe=3.52, 29 trades/4yr
+    """Rolling z-score with regime filtering and event-aware dynamic thresholds.
+
+    TF-adaptive parameters — her timeframe farklı piyasa dinamiği:
+      1h : Gürültülü, çok bar → geniş pencere, yüksek eşik, sıkı filtreler
+      4h : Optimize edilmiş (Hyperopt WR=58.6%) — referans TF
+      1d : Az bar, derin trendler → kısa pencere, düşük eşik, geniş RSI, MACD opsiyonel
+      1w : Çok az bar, mega-trendler → en düşük eşik, sadece z + ADX
+    """
     _TF_PARAMS = {
-        "1h": {"window": 120, "min_periods": 24, "threshold": 1.3},
-        "4h": {"window":  60, "min_periods": 12, "threshold": 1.3},  # refined from 1.2
-        "1d": {"window":  20, "min_periods":  3, "threshold": 1.0},
+        # threshold: z-score eşiği | adx_default: varsayılan ADX minimum
+        # require_macd: MACD histogram zorunlu mu? | rsi_lo/hi: RSI sınırları
+        # warmup_pct: başlangıç warmup yüzdesi (max 200 bar)
+        "5m":   {"window": 200, "min_periods": 50, "threshold": 1.5, "adx_default": 25,
+                 "require_macd": True,  "rsi_lo": 40, "rsi_hi": 68, "warmup_pct": 0.10},
+        "15m":  {"window": 150, "min_periods": 30, "threshold": 1.4, "adx_default": 22,
+                 "require_macd": True,  "rsi_lo": 38, "rsi_hi": 70, "warmup_pct": 0.10},
+        "1h":   {"window": 120, "min_periods": 24, "threshold": 1.3, "adx_default": 20,
+                 "require_macd": True,  "rsi_lo": 38, "rsi_hi": 72, "warmup_pct": 0.15},
+        "4h":   {"window":  60, "min_periods": 12, "threshold": 1.3, "adx_default": 28,
+                 "require_macd": True,  "rsi_lo": 40, "rsi_hi": 73, "warmup_pct": 0.15},
+        "1d":   {"window":  30, "min_periods":  5, "threshold": 0.7, "adx_default": 18,
+                 "require_macd": False, "rsi_lo": 32, "rsi_hi": 75, "warmup_pct": 0.15},
+        "3d":   {"window":  20, "min_periods":  4, "threshold": 0.6, "adx_default": 15,
+                 "require_macd": False, "rsi_lo": 30, "rsi_hi": 78, "warmup_pct": 0.10},
+        "1w":   {"window":  12, "min_periods":  3, "threshold": 0.5, "adx_default": 14,
+                 "require_macd": False, "rsi_lo": 28, "rsi_hi": 80, "warmup_pct": 0.05},
     }
-    _p = _TF_PARAMS.get(timeframe, {"window": 20, "min_periods": 5, "threshold": 0.8})
-    base_threshold = float(z_threshold) if z_threshold is not None else _p["threshold"]
-    effective_rsi_lower = int(rsi_lower) if rsi_lower is not None else 35
-    effective_rsi_upper = int(rsi_upper) if rsi_upper is not None else 65
+    _p = _TF_PARAMS.get(timeframe, {"window": 30, "min_periods": 5, "threshold": 0.8,
+                                     "adx_default": 18, "require_macd": False,
+                                     "rsi_lo": 32, "rsi_hi": 75, "warmup_pct": 0.10})
+
+    base_threshold      = float(z_threshold) if z_threshold is not None else _p["threshold"]
+    effective_rsi_lower = int(rsi_lower)      if rsi_lower  is not None else _p["rsi_lo"]
+    effective_rsi_upper = int(rsi_upper)      if rsi_upper  is not None else _p["rsi_hi"]
+    require_macd        = _p["require_macd"]  # 1d/1w için False → daha çok sinyal
 
     _roll_mean = df["consensus_score"].rolling(_p["window"], min_periods=_p["min_periods"]).mean().fillna(df["consensus_score"].mean())
     _roll_std = df["consensus_score"].rolling(_p["window"], min_periods=_p["min_periods"]).std().fillna(df["consensus_score"].std()).replace(0, 1e-6)
     z = (df["consensus_score"] - _roll_mean) / _roll_std
     df["consensus_zscore"] = z
 
-    # Warmup filter: EMA200 needs 200 bars to stabilize; signals generated before
-    # that use an undercooked trend direction and cause wrong LONG/SHORT entries.
-    # Block all signals for the first 200 bars (capped at 1/5 of total data).
-    warmup_bars = min(200, max(50, len(df) // 5))
+    # Warmup: EMA200 stabilizasyonu için ilk N bar sinyalsiz
+    # TF'e göre oransal (1d uzun veri = daha az % warmup)
+    warmup_pct  = _p.get("warmup_pct", 0.15)
+    warmup_bars = min(200, max(int(len(df) * warmup_pct), _p["window"] * 2))
     past_warmup = pd.Series(False, index=df.index)
     past_warmup.iloc[warmup_bars:] = True
 
+    # Volume filtresi: hacim ortalaması üstü (zayıf sinyalleri temizler)
     if "volume" in df.columns:
-        vol_mean = df["volume"].rolling(_p["window"], min_periods=_p["min_periods"]).mean()
-        vol_filter = df["volume"] > vol_mean
+        vol_mean   = df["volume"].rolling(_p["window"], min_periods=_p["min_periods"]).mean()
+        vol_filter = df["volume"] > (vol_mean * 0.5)   # 0.5× — daha toleranslı
     else:
         vol_filter = pd.Series(True, index=df.index)
 
@@ -1307,52 +1351,45 @@ def generate_zscore_signals(
     else:
         regime_filter = pd.Series(True, index=df.index)
 
-    # Per-bar dynamic z-threshold based on regime + event_hint
-    if regime_series is not None and event_hint is None and z_threshold is None:
-        # Dynamic mode: adjust threshold per bar based on regime
-        thresholds = regime_series.map(
-            lambda r: get_event_aware_z_threshold(r, base_threshold)
-        )
-        # ── Quality filters (applied to both modes) ───────────────────────
-        trend_up_series = df.get("trend_up",  pd.Series(1.0, index=df.index)).fillna(1.0)
-        adx_series      = df.get("adx",       pd.Series(25.0, index=df.index)).fillna(25.0)
-        rsi_series      = df.get("rsi",       pd.Series(50.0, index=df.index)).fillna(50.0)
-        macd_hist_s     = df.get("macd_hist", pd.Series(0.0,  index=df.index)).fillna(0.0)
+    # Ortak göstergeler
+    trend_up_series = df.get("trend_up",  pd.Series(1.0, index=df.index)).fillna(1.0)
+    adx_series      = df.get("adx",       pd.Series(25.0, index=df.index)).fillna(25.0)
+    rsi_series      = df.get("rsi",       pd.Series(50.0, index=df.index)).fillna(50.0)
+    macd_hist_s     = df.get("macd_hist", pd.Series(0.0,  index=df.index)).fillna(0.0)
 
-        # ADX > 18: market is trending (not choppy sideways)
-        adx_filter = adx_series >= 18
-        # LONG: RSI 40-73 (some momentum, not overbought), MACD hist positive
-        rsi_ok_long  = (rsi_series >= 40) & (rsi_series <= 73)
-        macd_pos     = macd_hist_s > 0
-        # SHORT: RSI 27-60 (some weakness, not oversold), MACD hist negative
-        rsi_ok_short = (rsi_series >= 27) & (rsi_series <= 60)
-        macd_neg     = macd_hist_s < 0
+    # ADX filtresi: TF'e göre adaptif default, kullanıcı override edebilir
+    effective_adx = float(adx_min) if adx_min != 18.0 else float(_p["adx_default"])
+    adx_filter = adx_series >= effective_adx
+
+    # RSI filtreleri: TF parametrelerinden (daha geniş = daha çok sinyal)
+    rsi_ok_long  = (rsi_series >= effective_rsi_lower) & (rsi_series <= effective_rsi_upper)
+    rsi_ok_short = (rsi_series >= (effective_rsi_lower - 5)) & (rsi_series <= (effective_rsi_upper - 5))
+
+    # MACD filtresi: 1d/1w için devre dışı (az bar, düzgün trendler)
+    macd_pos = macd_hist_s > 0 if require_macd else pd.Series(True, index=df.index)
+    macd_neg = macd_hist_s < 0 if require_macd else pd.Series(True, index=df.index)
+
+    # Per-bar dynamic z-threshold (regime varsa)
+    if regime_series is not None and event_hint is None and z_threshold is None:
+        thresholds    = regime_series.map(lambda r: get_event_aware_z_threshold(r, base_threshold))
+        threshold_desc = f"dynamic(base={base_threshold}, range={thresholds.min():.2f}-{thresholds.max():.2f})"
 
         base_signals = pd.Series(0, index=df.index)
         base_signals[
             (z > thresholds) & vol_filter & regime_filter & adx_filter &
             rsi_ok_long & macd_pos & past_warmup
-        ] = 1  # BUY — no signals during EMA200 warmup
+        ] = 1
         base_signals[
             (z < -thresholds) & vol_filter & regime_filter & adx_filter &
             (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
-        ] = -1  # SHORT — only in downtrend, past warmup
-        threshold_desc = f"dynamic(base={base_threshold}, range={thresholds.min():.2f}-{thresholds.max():.2f})"
+        ] = -1
     else:
         threshold = get_event_aware_z_threshold(
-            regime_series.iloc[-1] if regime_series is not None and len(regime_series) > 0 else "NORMALIZATION",
-            base_threshold,
-            event_hint,
+            regime_series.iloc[-1] if regime_series is not None and len(regime_series) > 0
+            else "NORMALIZATION",
+            base_threshold, event_hint,
         )
-        trend_up_series = df.get("trend_up",  pd.Series(1.0, index=df.index)).fillna(1.0)
-        adx_series      = df.get("adx",       pd.Series(25.0, index=df.index)).fillna(25.0)
-        rsi_series      = df.get("rsi",       pd.Series(50.0, index=df.index)).fillna(50.0)
-        macd_hist_s     = df.get("macd_hist", pd.Series(0.0,  index=df.index)).fillna(0.0)
-        adx_filter   = adx_series >= adx_min
-        rsi_ok_long  = (rsi_series >= 40) & (rsi_series <= 73)
-        macd_pos     = macd_hist_s > 0
-        rsi_ok_short = (rsi_series >= 27) & (rsi_series <= 60)
-        macd_neg     = macd_hist_s < 0
+        threshold_desc = f"static={threshold:.2f}"
 
         base_signals = pd.Series(0, index=df.index)
         base_signals[
@@ -1363,7 +1400,18 @@ def generate_zscore_signals(
             (z < -threshold) & vol_filter & regime_filter & adx_filter &
             (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
         ] = -1
-        threshold_desc = f"static={threshold:.2f}(event_hint={event_hint})"
+
+    # Sinyal sayısı diagnostics — az sinyal uyarısı
+    n_long  = int((base_signals == 1).sum())
+    n_short = int((base_signals == -1).sum())
+    n_bars  = len(df)
+    logger.info(
+        "Signal stats: TF=%s bars=%d warmup=%d z_thresh=%.2f adx=%.0f "
+        "macd_req=%s rsi=[%d,%d] → LONG=%d SHORT=%d (%.1f%% active)",
+        timeframe, n_bars, warmup_bars, base_threshold, effective_adx,
+        require_macd, effective_rsi_lower, effective_rsi_upper,
+        n_long, n_short, (n_long + n_short) / max(n_bars, 1) * 100
+    )
 
     # Soft RSI + momentum confluence: keep signal, scale position size by strength.
     rsi = df.get("rsi", pd.Series(50.0, index=df.index)).fillna(50.0)
