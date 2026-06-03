@@ -255,9 +255,10 @@ async def run_ai_backtest(
             "15m": {"sl": -0.04, "tp": 0.08, "ze_long":  0.15, "ze_short": -0.15, "adx": 20},
             "1h":  {"sl": -0.05, "tp": 0.10, "ze_long":  0.10, "ze_short": -0.10, "adx": 20},
             "4h":  {"sl": -0.06, "tp": 0.15, "ze_long":  0.05, "ze_short": -0.05, "adx": 28},
-            "1d":  {"sl": -0.08, "tp": 0.22, "ze_long": -0.30, "ze_short":  0.30, "adx": 18},
-            "3d":  {"sl": -0.10, "tp": 0.28, "ze_long": -0.40, "ze_short":  0.40, "adx": 15},
-            "1w":  {"sl": -0.12, "tp": 0.35, "ze_long": -0.50, "ze_short":  0.50, "adx": 14},
+            # Kontrarian mod için z_exit = 0.0: consensus nötre dönünce çık (dip alıp geri döndüğünde sat)
+            "1d":  {"sl": -0.08, "tp": 0.22, "ze_long":  0.00, "ze_short":  0.00, "adx": 18},
+            "3d":  {"sl": -0.10, "tp": 0.28, "ze_long":  0.10, "ze_short": -0.10, "adx": 15},
+            "1w":  {"sl": -0.12, "tp": 0.35, "ze_long":  0.20, "ze_short": -0.20, "adx": 14},
         }
         _tf_def = _TF_EXIT_DEFAULTS.get(timeframe, _TF_EXIT_DEFAULTS["4h"])
 
@@ -1310,12 +1311,20 @@ def generate_zscore_signals(
                  "require_macd": True,  "rsi_lo": 38, "rsi_hi": 72, "warmup_pct": 0.15},
         "4h":   {"window":  60, "min_periods": 12, "threshold": 1.3, "adx_default": 28,
                  "require_macd": True,  "rsi_lo": 40, "rsi_hi": 73, "warmup_pct": 0.15},
-        "1d":   {"window":  30, "min_periods":  5, "threshold": 0.7, "adx_default": 18,
-                 "require_macd": False, "rsi_lo": 32, "rsi_hi": 75, "warmup_pct": 0.15},
-        "3d":   {"window":  20, "min_periods":  4, "threshold": 0.6, "adx_default": 15,
-                 "require_macd": False, "rsi_lo": 30, "rsi_hi": 78, "warmup_pct": 0.10},
-        "1w":   {"window":  12, "min_periods":  3, "threshold": 0.5, "adx_default": 14,
-                 "require_macd": False, "rsi_lo": 28, "rsi_hi": 80, "warmup_pct": 0.05},
+        # 1d/1w için "contrarian" mod:
+        #   z < -threshold AND trend_up = 1  → LONG (dip al, trend yukarı)
+        #   z >  threshold AND trend_up = 0  → SHORT (tepe sat, trend aşağı)
+        # Neden: günlük timeframe'de consensus yüksekken HERKES AL diyor = tepe
+        #        consensus düşükken herkes korku içinde = dip fırsatı (klasik)
+        "1d":   {"window":  30, "min_periods":  5, "threshold": 0.65, "adx_default": 18,
+                 "require_macd": False, "rsi_lo": 28, "rsi_hi": 78, "warmup_pct": 0.15,
+                 "contrarian": True},
+        "3d":   {"window":  20, "min_periods":  4, "threshold": 0.55, "adx_default": 15,
+                 "require_macd": False, "rsi_lo": 25, "rsi_hi": 80, "warmup_pct": 0.10,
+                 "contrarian": True},
+        "1w":   {"window":  12, "min_periods":  3, "threshold": 0.50, "adx_default": 14,
+                 "require_macd": False, "rsi_lo": 22, "rsi_hi": 82, "warmup_pct": 0.05,
+                 "contrarian": True},
     }
     _p = _TF_PARAMS.get(timeframe, {"window": 30, "min_periods": 5, "threshold": 0.8,
                                      "adx_default": 18, "require_macd": False,
@@ -1325,6 +1334,13 @@ def generate_zscore_signals(
     effective_rsi_lower = int(rsi_lower)      if rsi_lower  is not None else _p["rsi_lo"]
     effective_rsi_upper = int(rsi_upper)      if rsi_upper  is not None else _p["rsi_hi"]
     require_macd        = _p["require_macd"]  # 1d/1w için False → daha çok sinyal
+    contrarian_mode     = _p.get("contrarian", False)
+    # contrarian=True (1d/1w):
+    #   LONG  ← z < -threshold AND trend_up   (dip al, trend yukarı)
+    #   SHORT ← z > +threshold AND trend_down  (tepe sat, trend aşağı)
+    # contrarian=False (1h/4h):
+    #   LONG  ← z > +threshold AND trend_any   (momentum al)
+    #   SHORT ← z < -threshold AND trend_down  (momentum sat)
 
     _roll_mean = df["consensus_score"].rolling(_p["window"], min_periods=_p["min_periods"]).mean().fillna(df["consensus_score"].mean())
     _roll_std = df["consensus_score"].rolling(_p["window"], min_periods=_p["min_periods"]).std().fillna(df["consensus_score"].std()).replace(0, 1e-6)
@@ -1375,31 +1391,55 @@ def generate_zscore_signals(
         threshold_desc = f"dynamic(base={base_threshold}, range={thresholds.min():.2f}-{thresholds.max():.2f})"
 
         base_signals = pd.Series(0, index=df.index)
-        base_signals[
-            (z > thresholds) & vol_filter & regime_filter & adx_filter &
-            rsi_ok_long & macd_pos & past_warmup
-        ] = 1
-        base_signals[
-            (z < -thresholds) & vol_filter & regime_filter & adx_filter &
-            (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
-        ] = -1
+        if contrarian_mode:
+            # KONTRARIAN: dip al (z düşük & trend yukarı), tepe sat (z yüksek & trend aşağı)
+            base_signals[
+                (z < -thresholds) & (trend_up_series >= 0.5) &
+                vol_filter & adx_filter & rsi_ok_long & past_warmup
+            ] = 1
+            base_signals[
+                (z > thresholds) & (trend_up_series < 0.5) &
+                vol_filter & adx_filter & rsi_ok_short & past_warmup
+            ] = -1
+        else:
+            # MOMENTUM: yüksek z = güçlü sinyal (1h/4h default)
+            base_signals[
+                (z > thresholds) & vol_filter & regime_filter & adx_filter &
+                rsi_ok_long & macd_pos & past_warmup
+            ] = 1
+            base_signals[
+                (z < -thresholds) & vol_filter & regime_filter & adx_filter &
+                (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
+            ] = -1
     else:
         threshold = get_event_aware_z_threshold(
             regime_series.iloc[-1] if regime_series is not None and len(regime_series) > 0
             else "NORMALIZATION",
             base_threshold, event_hint,
         )
-        threshold_desc = f"static={threshold:.2f}"
+        threshold_desc = f"static={threshold:.2f} mode={'contrarian' if contrarian_mode else 'momentum'}"
 
         base_signals = pd.Series(0, index=df.index)
-        base_signals[
-            (z > threshold) & vol_filter & regime_filter & adx_filter &
-            rsi_ok_long & macd_pos & past_warmup
-        ] = 1
-        base_signals[
-            (z < -threshold) & vol_filter & regime_filter & adx_filter &
-            (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
-        ] = -1
+        if contrarian_mode:
+            # 1d/1w: dip al (herkes korkarken, trend yukarıysa gir)
+            base_signals[
+                (z < -threshold) & (trend_up_series >= 0.5) &
+                vol_filter & adx_filter & rsi_ok_long & past_warmup
+            ] = 1
+            base_signals[
+                (z > threshold) & (trend_up_series < 0.5) &
+                vol_filter & adx_filter & rsi_ok_short & past_warmup
+            ] = -1
+        else:
+            # 1h/4h: momentum sinyali (herkes aynı fikirde = güçlü)
+            base_signals[
+                (z > threshold) & vol_filter & regime_filter & adx_filter &
+                rsi_ok_long & macd_pos & past_warmup
+            ] = 1
+            base_signals[
+                (z < -threshold) & vol_filter & regime_filter & adx_filter &
+                (trend_up_series < 0.5) & rsi_ok_short & macd_neg & past_warmup
+            ] = -1
 
     # Sinyal sayısı diagnostics — az sinyal uyarısı
     n_long  = int((base_signals == 1).sum())
@@ -1507,42 +1547,43 @@ def execute_ai_driven_trades(
     (blocked by the EMA200 trend gate). Result: 2 trades in 2281 bars.
     """
     trades = []
-    position = None
-    entry_price = None
-    entry_time  = None
-    entry_z     = None   # FIX: store entry z-score for correct position sizing
-    entry_conf  = None   # FIX: store entry confluence for correct position sizing
+    position     = None
+    entry_price  = None
+    entry_time   = None
+    entry_z      = None
+    entry_conf   = None
     entry_regime = None
+    last_exit_ts = None   # cooldown: son çıkış zamanı
 
-    STOP_LOSS_PCT   = float(stop_loss_pct)    # from request param
-    TAKE_PROFIT_PCT = float(take_profit_pct)  # from request param
-    Z_EXIT_LONG     = float(z_exit_long)      # from request param
-    Z_EXIT_SHORT    = float(z_exit_short)     # from request param
+    STOP_LOSS_PCT   = float(stop_loss_pct)
+    TAKE_PROFIT_PCT = float(take_profit_pct)
+    Z_EXIT_LONG     = float(z_exit_long)
+    Z_EXIT_SHORT    = float(z_exit_short)
 
     def _record_trade(exit_price, exit_ts, exit_z, exit_regime, exit_reason):
+        nonlocal last_exit_ts
         pnl_raw    = (exit_price - entry_price) * (1 if position == "LONG" else -1)
-        # Gerçekçi maliyet: sabit komisyon + slippage modeli
         slippage   = _apply_slippage_model(entry_price, exit_price, entry_z)
-        commission = (entry_price + exit_price) * 0.001   # 0.1% taker her iki taraf
+        commission = (entry_price + exit_price) * 0.001
         pnl_net    = pnl_raw - commission - slippage
-        # İşlem süresi (bar sayısı değil gerçek süre)
         duration_h = (exit_ts - entry_time).total_seconds() / 3600 if hasattr(exit_ts - entry_time, "total_seconds") else 0
         trades.append({
-            "entry_time":  entry_time.isoformat(),
-            "exit_time":   exit_ts.isoformat(),
-            "entry_price": round(entry_price, 2),
-            "exit_price":  round(exit_price, 2),
-            "position":    position,
-            "pnl":         round(pnl_net, 2),
-            "pnl_pct":     round(pnl_net / entry_price * 100, 4),
+            "entry_time":    entry_time.isoformat(),
+            "exit_time":     exit_ts.isoformat(),
+            "entry_price":   round(entry_price, 2),
+            "exit_price":    round(exit_price, 2),
+            "position":      position,
+            "pnl":           round(pnl_net, 2),
+            "pnl_pct":       round(pnl_net / entry_price * 100, 4),
             "pnl_gross_pct": round(pnl_raw / entry_price * 100, 4),
             "slippage_pct":  round(slippage / entry_price * 100, 4),
             "duration_h":    round(duration_h, 1),
-            "z_score":  float(entry_z),
-            "regime":   entry_regime,
+            "z_score":       float(entry_z),
+            "regime":        entry_regime,
             "confluence_multiplier": float(entry_conf),
-            "exit_reason": exit_reason,
+            "exit_reason":   exit_reason,
         })
+        last_exit_ts = exit_ts
 
     for idx, row in df.iterrows():
         signal  = row["consensus_signal"]
@@ -1564,11 +1605,12 @@ def execute_ai_driven_trades(
                 _record_trade(price, ts, z, regime, "take_profit")
                 position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
-            elif position == "LONG" and z < Z_EXIT_LONG:
+            elif position == "LONG" and z > Z_EXIT_LONG:
+                # Kontrarian: z nötre döndü → kâr al; momentum: z düştü → çık
                 _record_trade(price, ts, z, regime, "z_reversion")
                 position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
-            elif position == "SHORT" and z > Z_EXIT_SHORT:
+            elif position == "SHORT" and z < Z_EXIT_SHORT:
                 _record_trade(price, ts, z, regime, "z_reversion")
                 position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
@@ -1578,12 +1620,19 @@ def execute_ai_driven_trades(
                     position = entry_price = entry_time = entry_z = entry_conf = entry_regime = None
 
         # ── Entry ─────────────────────────────────────────────────────────────
-        if position is None and signal != 0:
+        # Cooldown: son çıkıştan bu yana minimum 2 bar (4h=8saat, 1d=2gün) bekle
+        # Ardışık günlük girişleri önler (115 işlem → ~30 işlem)
+        cooldown_ok = True
+        if last_exit_ts is not None and position is None:
+            elapsed_h = (ts - last_exit_ts).total_seconds() / 3600 if hasattr((ts - last_exit_ts), "total_seconds") else 999
+            cooldown_ok = elapsed_h >= 48  # minimum 2 bar = 48h (2 günlük bekleme)
+
+        if position is None and signal != 0 and cooldown_ok:
             position      = "LONG" if signal > 0 else "SHORT"
             entry_price   = price
             entry_time    = ts
-            entry_z       = z      # store for sizing
-            entry_conf    = conf   # store for sizing
+            entry_z       = z
+            entry_conf    = conf
             entry_regime  = regime
 
     return trades
