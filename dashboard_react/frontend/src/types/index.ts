@@ -58,6 +58,17 @@ export interface DashboardData {
     quantum: Metric;
     sentinel: Metric;
     news: Metric;
+    ml?: Metric & {
+      ml_detail?: {
+        trained: boolean;
+        signal?: string;
+        buy_prob?: number;
+        sell_prob?: number;
+        confidence?: number;
+        accuracy?: number;
+        top_features?: [string, number][];
+      };
+    };
   };
   consensus: ConsensusData;
   health: SystemHealth;

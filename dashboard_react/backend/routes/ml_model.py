@@ -43,6 +43,7 @@ _models:    dict[str, object]     = {}   # key: symbol_timeframe
 _metadata:  dict[str, dict]       = {}   # eğitim meta
 _bar_count: dict[str, int]        = {}   # son eğitimden bu yana bar sayısı
 _ohlcv_cache: dict[str, pd.DataFrame] = {}
+_ml_pred_cache: dict[str, dict]   = {}  # son ML tahmini önbelleği (dashboard okur)
 
 
 # ── Özellik Mühendisliği ──────────────────────────────────────────────────────
@@ -403,6 +404,9 @@ async def predict_endpoint(
                     "trained": symbol_tf in _models, "error": str(exc)}
 
     meta = _metadata.get(symbol_tf, {})
+    # Dashboard için önbelleğe yaz
+    _ml_pred_cache[symbol_tf] = result
+
     return {
         **result,
         "symbol":    symbol,

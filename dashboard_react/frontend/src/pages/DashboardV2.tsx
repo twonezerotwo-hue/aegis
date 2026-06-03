@@ -768,6 +768,44 @@ const DashboardV2Inner: React.FC = () => {
                       );
                     })}
 
+                    {/* ML Predictor satırı */}
+                    {metricsData.metrics.ml && (() => {
+                      const ml = metricsData.metrics.ml as unknown as { score: number; summary: string; ml_detail?: { signal?: string; buy_prob?: number; sell_prob?: number; confidence?: number; trained?: boolean } };
+                      const pct = Math.round(ml.score * 100);
+                      const sc  = ml.score > 0.65 ? "text-emerald-400" : ml.score < 0.35 ? "text-rose-400" : "text-slate-300";
+                      const detail = ml.ml_detail;
+                      const sigBadge = detail?.signal === "BUY" ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/5"
+                                     : detail?.signal === "SELL" ? "text-rose-400 border-rose-500/30 bg-rose-500/5"
+                                     : "text-amber-400 border-amber-500/30 bg-amber-500/5";
+                      return (
+                        <div className="group rounded-xl border border-indigo-500/20 bg-indigo-500/5 px-3 py-2.5 hover:bg-indigo-500/10 transition-colors">
+                          <div className="mb-1.5 flex items-center gap-2">
+                            <span className="w-20 shrink-0 text-[10px] font-semibold text-indigo-400">ML Predictor</span>
+                            <div className="h-1.5 flex-1 rounded-full bg-slate-700/60">
+                              <div className="h-1.5 rounded-full bg-indigo-400 transition-all duration-500" style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className={`w-8 shrink-0 text-right font-mono text-[11px] font-bold ${sc}`}>{pct}</span>
+                            {detail?.signal && detail.trained && (
+                              <span className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[8px] font-bold ${sigBadge}`}>
+                                {detail.signal === "BUY" ? "AL" : detail.signal === "SELL" ? "SAT" : "TUT"}
+                              </span>
+                            )}
+                          </div>
+                          {detail?.trained ? (
+                            <div className="pl-[5.5rem] flex items-center gap-2 text-[9px] text-slate-600">
+                              <span>AL {Math.round((detail.buy_prob ?? 0) * 100)}%</span>
+                              <span>TUT {Math.round((1 - (detail.buy_prob ?? 0) - (detail.sell_prob ?? 0)) * 100)}%</span>
+                              <span>SAT {Math.round((detail.sell_prob ?? 0) * 100)}%</span>
+                              <span className="text-slate-700">· güven %{Math.round((detail.confidence ?? 0) * 100)}</span>
+                              <span className="text-indigo-700">· XGBoost 3-bar tahmin</span>
+                            </div>
+                          ) : (
+                            <p className="pl-[5.5rem] text-[9px] italic text-slate-700">Model egitilmedi — POST /api/ml/train</p>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     {/* Ayırıcı */}
                     <div className="my-2 flex items-center gap-2 px-3">
                       <div className="h-px flex-1 bg-slate-800" />

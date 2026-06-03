@@ -1,4 +1,4 @@
-﻿from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRouter
 import httpx
@@ -988,6 +988,52 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             "data_status": "LIVE" if any(status == "UP" for status in service_states.values()) else "MISSING",
         }
 
+
+        # ── ML Predictor skoru — son önbelleklenmiş tahmin ──────────────────
+        def _get_ml_metric(sym: str, tf: str) -> dict:
+            """ML önbelleğinden son tahmini döndür. Arka planda güncellenir."""
+            key = f"{sym}|{tf}"
+            from routes.ml_model import _models, _metadata, _ml_pred_cache
+            cached = _ml_pred_cache.get(key)
+            meta   = _metadata.get(key, {})
+            if not cached:
+                return {"ml": {
+                    "name": "ML Predictor", "score": 0.5,
+                    "health": "warning", "color": "#818cf8",
+                    "summary": "Model egitilmedi — POST /api/ml/train ile baslat.",
+                    "timeframe": tf, "source": "ml_not_trained",
+                    "fallback_used": True, "data_status": "MISSING",
+                    "symbol": sym, "timestamp": None, "last_updated": None,
+                    "ml_detail": {"trained": False},
+                }}
+            score  = cached["ml_score"]
+            sig    = cached["signal"]
+            health = "healthy" if score > 0.62 or score < 0.38 else "warning"
+            detail = (
+                f"Tahmin: {sig} | "
+                f"AL=%{round(cached['buy_prob']*100,0):.0f} "
+                f"TUT=%{round(cached['hold_prob']*100,0):.0f} "
+                f"SAT=%{round(cached['sell_prob']*100,0):.0f} | "
+                f"Guven: %{round(cached['confidence']*100,1)} | "
+                f"acc=%{meta.get('accuracy','?')}"
+            )
+            return {"ml": {
+                "name": "ML Predictor", "score": round(score, 4),
+                "health": health, "color": "#818cf8",
+                "summary": detail,
+                "timeframe": tf, "source": f"ml_{meta.get('model_type','model').lower()}",
+                "fallback_used": False, "data_status": "LIVE",
+                "symbol": sym, "timestamp": None, "last_updated": None,
+                "ml_detail": {
+                    "trained": True, "signal": sig,
+                    "buy_prob": cached["buy_prob"],
+                    "sell_prob": cached["sell_prob"],
+                    "confidence": cached["confidence"],
+                    "accuracy": meta.get("accuracy"),
+                    "top_features": meta.get("top_features", [])[:3],
+                },
+            }}
+
         return {
             "timestamp": effective_timestamp,
             "last_updated": effective_timestamp,
@@ -1002,6 +1048,7 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
                 "quantum": _metric_payload("Quantum Score", "quantum", quantum_score, "#F59E0B", missing_metrics["quantum"], summary=_build_metric_summary("quantum", quantum_score, module_details.get("quantum"))),
                 "sentinel": _metric_payload("Sentinel Score", "sentinel", sentinel_score, "#8B5CF6", missing_metrics["sentinel"], include_macro=True, summary=_build_metric_summary("sentinel", sentinel_score, module_details.get("sentinel"))),
                 "news": _metric_payload("News Sentiment", "news", news_score, "#EC4899", missing_metrics["news"], include_symbol=False, summary=_build_metric_summary("news", news_score, module_details.get("news"))),
+                **_get_ml_metric(symbol, timeframe),
             },
             "consensus": {
                 "weighted_score": round(weighted_score, 4),
