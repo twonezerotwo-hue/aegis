@@ -400,29 +400,95 @@ def _compute_ema_trend(closes: list[float], fast: int = 20, slow: int = 50) -> d
 
 
 async def _analyze_timeframe(symbol: str, timeframe: str) -> dict[str, Any]:
+    """
+    7 fazlı Touche EQS pipeline — RSI tek başına değil, tam teknik analiz.
+
+    Faz 1: Likidite Süpürmesi (Smart Money sweep tespiti)
+    Faz 2: Piyasa Yapısı + RSI/MACD Diverjans
+    Faz 3: Arz/Talep Zonu + FVG + Confluence
+    Faz 4: OBV + CMF Hacim Teyidi
+    Faz 5: Hammer, Engulfing, Doji gibi mum formasyonları
+    Faz 6: ATR bazlı SL/TP hesabı
+    Faz 7: Fundamental/Makro köprüsü
+    """
     if _data_fetcher is None:
         raise RuntimeError("service_not_initialized")
 
     binance_symbol = _binance_symbol(symbol)
-    df = await _data_fetcher.fetch_ohlcv(binance_symbol, timeframe, limit=120)
+    df_pd = await _data_fetcher.fetch_ohlcv(binance_symbol, timeframe, limit=200)
     fetch_meta = _data_fetcher.get_last_fetch_meta()
-    closes = [float(v) for v in df["close"].tolist()] if "close" in df.columns else []
+    closes = [float(v) for v in df_pd["close"].tolist()] if "close" in df_pd.columns else []
     if len(closes) < 15:
         raise RuntimeError(f"insufficient_ohlcv_rows:{timeframe}")
 
+    # ── Fallback indikatörler (orchestrator başarısız olursa) ────────────────
     rsi   = _compute_rsi(closes)
-    eqs   = round(min(95.0, max(5.0, rsi)), 2)
     macd  = _compute_macd(closes)
     ema   = _compute_ema_trend(closes)
-    timestamp = fetch_meta.get("timestamp")
 
+    # ── 7 fazlı orchestrator ─────────────────────────────────────────────────
+    orchestrator_eqs   = None
+    orchestrator_signal = None
+    phase_summaries: list[dict] = []
+
+    try:
+        import polars as pl
+        import os as _os
+        import sys as _sys
+        # Uvicorn /app/touche_ai/ içinden çalışır — üst dizini path'e ekle
+        _app_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if _app_dir not in _sys.path:
+            _sys.path.insert(0, _app_dir)
+        from touche_ai.src.engine.orchestrator import ToucheOrchestrator
+
+        # pandas → polars dönüşümü
+        df_pl = pl.from_pandas(df_pd.reset_index())
+
+        orc = ToucheOrchestrator(symbol=binance_symbol, timeframe=timeframe)
+        result = await orc.analyze(df_pl)
+
+        raw_eqs = float(result.eqs_score)
+        orchestrator_signal = result.recommendation   # BUY / SELL / HOLD
+        phase_summaries = [
+            {
+                "phase": r.get("phase_name", ""),
+                "signal": r.get("signal", ""),
+                "score": round(float(r.get("score", 0)), 1),
+                "reason": r.get("reason", ""),
+            }
+            for r in (result.phase_results or [])
+        ]
+        # EQS=0.0 → pipeline bloke (NO_TRADE/NEUTRAL yön).
+        # Bu durumda faz ortalama skorunu kullan — 0.0 "SAT" olarak yanlış okunuyor.
+        if raw_eqs == 0.0 and phase_summaries:
+            phase_avg = sum(p["score"] for p in phase_summaries) / len(phase_summaries)
+            orchestrator_eqs = round(min(95.0, max(5.0, phase_avg)), 2)
+        else:
+            orchestrator_eqs = round(min(95.0, max(5.0, raw_eqs)), 2)
+        logger.info("[TOUCHE-7F] %s %s → EQS=%.1f signal=%s (raw_eqs=%.1f)",
+                    binance_symbol, timeframe, orchestrator_eqs, orchestrator_signal, raw_eqs)
+    except Exception as exc:
+        logger.warning("[TOUCHE-7F] orchestrator failed (%s %s): %s — RSI fallback",
+                       binance_symbol, timeframe, exc)
+
+    # Orchestrator başarılıysa onun EQS'ini kullan, yoksa RSI fallback
+    if orchestrator_eqs is not None:
+        eqs    = orchestrator_eqs
+        signal = orchestrator_signal or _signal_from_eqs(eqs)
+    else:
+        eqs    = round(min(95.0, max(5.0, rsi)), 2)
+        signal = _signal_from_eqs(eqs)
+
+    timestamp = fetch_meta.get("timestamp")
     return {
         "eqs":      eqs,
-        "signal":   _signal_from_eqs(eqs),
+        "signal":   signal,
         "rsi":      round(rsi, 2),
         "rsi_zone": "oversold" if rsi < 30 else "overbought" if rsi > 70 else "neutral",
         "macd":     macd,
         "ema_trend": ema,
+        "phase_results": phase_summaries,
+        "engine": "7-phase-orchestrator" if orchestrator_eqs is not None else "rsi-fallback",
         "timestamp":   timestamp,
         "source":      fetch_meta.get("source", "binance_public"),
         "verified":    bool(fetch_meta.get("verified")),
@@ -430,8 +496,8 @@ async def _analyze_timeframe(symbol: str, timeframe: str) -> dict[str, Any]:
         "cached":      bool(fetch_meta.get("cached")),
         "row_count":   len(closes),
         "range": {
-            "start": df.index[0].isoformat() if len(df.index) else None,
-            "end":   df.index[-1].isoformat() if len(df.index) else None,
+            "start": df_pd.index[0].isoformat() if len(df_pd.index) else None,
+            "end":   df_pd.index[-1].isoformat() if len(df_pd.index) else None,
         },
     }
 
