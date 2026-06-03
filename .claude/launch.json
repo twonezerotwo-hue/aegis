@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "aegis-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173,
+      "cwd": "dashboard_react/frontend"
+    },
+    {
+      "name": "aegis-backend",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8502", "--reload"],
+      "port": 8502,
+      "cwd": "dashboard_react/backend"
+    }
+  ]
+}

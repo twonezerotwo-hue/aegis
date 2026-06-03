@@ -34,7 +34,7 @@ import { fetchConsensus, fetchMacro } from "../services/apiV2";
 import type { ConsensusResponse, MacroViewModel } from "../types/dashboardV2";
 
 // Lazy-load heavy tab pages
-const Backtest = lazy(() => import("./Backtest").then((m) => ({ default: m.default ?? m })));
+const Backtest = lazy(() => import("./BacktestV2"));
 const PaperTrading = lazy(() => import("./PaperTrading").then((m) => ({ default: m.default ?? m })));
 
 // ── Tab definitions ────────────────────────────────────────────────────────────

@@ -7,7 +7,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 import random
-import numpy as np
 import threading
 import time
 import os
@@ -15,16 +14,28 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 import yaml
 try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None  # type: ignore[assignment]
+try:
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
     from determinism_control import DeterministicSeedManager, GLOBAL_SEED
     DeterministicSeedManager.initialize(GLOBAL_SEED, verbose=False)
 except:
     random.seed(42)
-    if "np" in dir(): np.random.seed(42)
+    if np is not None:
+        np.random.seed(42)
 
 # Load environment variables from .env
 load_dotenv()
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge, Histogram
 
@@ -96,6 +107,14 @@ MAX_POSITION_SIZE = float(os.getenv('MAX_POSITION_SIZE', 1000))
 MAX_DAILY_LOSS_PCT = float(os.getenv('MAX_DAILY_LOSS_PCT', 2.0))
 MULTIPLIER_FLOOR = float(os.getenv('MULTIPLIER_FLOOR', 0.1))
 MULTIPLIER_CEILING = float(os.getenv('MULTIPLIER_CEILING', 1.0))
+LEGACY_DECISION_OUTPUTS_ENABLED = _env_flag("AEGIS_ENABLE_LEGACY_DECISION_OUTPUTS", False)
+LEGACY_DECISION_OUTPUTS_ENV_VAR = "AEGIS_ENABLE_LEGACY_DECISION_OUTPUTS"
+LEGACY_DECISION_FIELDS = (
+    "action",
+    "position_size",
+    "green_light",
+    "green_light_thresholds",
+)
 
 logger.info("ℹ️  [CONSENSUS] MOCK DATA MODE - Risk parameters loaded from .env")
 logger.info(f"Risk config: MaxPos={MAX_POSITION_SIZE}, MaxLoss={MAX_DAILY_LOSS_PCT}%, Floor={MULTIPLIER_FLOOR}, Ceiling={MULTIPLIER_CEILING}")
@@ -310,7 +329,8 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "consensus-engine",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "decision_surface": _decision_surface_descriptor(LEGACY_DECISION_OUTPUTS_ENABLED),
     }
 
 @app.get("/health/clickhouse")
@@ -518,6 +538,7 @@ async def root():
     return {
         "service": "Consensus Engine",
         "description": "Position Aggregation & Risk Management",
+        "decision_surface": _decision_surface_descriptor(LEGACY_DECISION_OUTPUTS_ENABLED),
         "endpoints": {
             "health": "/health",
             "metrics": "/metrics",
@@ -598,6 +619,36 @@ def _merge_warnings(*warning_lists: list[str]) -> list[str]:
             if warning and warning not in merged:
                 merged.append(warning)
     return merged
+
+
+def _decision_surface_descriptor(enabled: bool) -> dict[str, object]:
+    return {
+        "enabled": enabled,
+        "mode": "legacy_opt_in" if enabled else "analysis_only",
+        "env_var": LEGACY_DECISION_OUTPUTS_ENV_VAR,
+        "fields": list(LEGACY_DECISION_FIELDS),
+    }
+
+
+def _apply_decision_surface_guard(payload: dict) -> dict:
+    guarded = dict(payload)
+    if LEGACY_DECISION_OUTPUTS_ENABLED:
+        guarded["decision_surface"] = _decision_surface_descriptor(True)
+        return guarded
+
+    for field in LEGACY_DECISION_FIELDS:
+        guarded.pop(field, None)
+
+    existing_warnings = guarded.get("warnings", [])
+    if not isinstance(existing_warnings, list):
+        existing_warnings = []
+
+    guarded["warnings"] = _merge_warnings(
+        existing_warnings,
+        ["Legacy decision outputs disabled; analysis-only response emitted."],
+    )
+    guarded["decision_surface"] = _decision_surface_descriptor(False)
+    return guarded
 
 
 def _latest_timestamp(*timestamps: str | None) -> str | None:
@@ -712,11 +763,10 @@ async def process_signal(request_data: dict):
 
     Response:
     {
-        "action": "BUY/SELL/HOLD",
         "confidence": 0.85,
-        "position_size": 0.12,
         "news_contrib": 0.23,
-        "weights": {"touche": 0.50, "fundamental": 0.35, "news": 0.15}
+        "weights": {"touche": 0.50, "fundamental": 0.35, "news": 0.15},
+        "decision_surface": {"enabled": false, "mode": "analysis_only"}
     }
     """
     try:
@@ -1383,7 +1433,7 @@ async def process_signal(request_data: dict):
                 ["Signal is not verified because source data is stale/fallback/mock."],
             )
 
-        return {
+        return _apply_decision_surface_guard({
             "asset": asset_key,
             "symbol": symbol,
             "timeframe": timeframe,
@@ -1458,11 +1508,11 @@ async def process_signal(request_data: dict):
             "attribution_ref": _attribution_ref,
             "bounded_update": _bounded_update_status,
             "adjusted_module_weights": adjusted_module_weights,
-        }
+        })
 
     except Exception as e:
         logger.error(f"Process endpoint error: {e}")
-        return {
+        return _apply_decision_surface_guard({
             "error": str(e),
             "asset": str(request_data.get("symbol", "BTC")).replace("/USDT", "").replace("/", "").upper(),
             "symbol": str(request_data.get("symbol", "BTC")).strip() or "BTC",
@@ -1552,7 +1602,7 @@ async def process_signal(request_data: dict):
             "action": "HOLD",
             "confidence": 0.0,
             "position_size": 0.0
-        }
+        })
 
 
 # ── v7.0 New Endpoints ────────────────────────────────────────────────────────

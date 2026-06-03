@@ -744,3 +744,5 @@ export const BacktestV2: React.FC = () => {
     </div>
   );
 };
+
+export default BacktestV2;
