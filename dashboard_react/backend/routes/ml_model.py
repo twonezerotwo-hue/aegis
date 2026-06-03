@@ -439,23 +439,68 @@ async def _fetch_ohlcv_for_ml(symbol: str, timeframe: str, limit: int = 2500) ->
         raise
 
 
+_ALL_TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d", "1w"]
+
+
+async def _train_one(symbol: str, tf: str) -> dict:
+    """Tek bir TF için eğit ve predict — paralel çağrı için."""
+    key = f"{symbol}|{tf}"
+    try:
+        df = await _fetch_ohlcv_for_ml(symbol, tf, limit=_TRAIN_LOOKBACK_BARS + 50)
+        meta = train_model(df, key)
+        result = predict(df, key)
+        _ml_pred_cache[key] = result
+        logger.info("TRAIN_ONE done: %s acc=%.1f%%", key, meta.get("accuracy", 0))
+        return {"tf": tf, "success": True, "accuracy": meta.get("accuracy"),
+                "train_rows": meta.get("train_rows"), "model_type": meta.get("model_type"),
+                "signal": result.get("signal"), "ml_score": result.get("ml_score")}
+    except Exception as exc:
+        logger.warning("TRAIN_ONE failed %s: %s", key, exc)
+        return {"tf": tf, "success": False, "error": str(exc)}
+
+
 @router.post("/train")
 async def train_endpoint(
     symbol:    str = Query("BTC/USDT"),
     timeframe: str = Query("4h"),
 ):
-    """
-    ML modelini (yeniden) eğit.
-    Binance'ten geçmiş 2500 bar çeker, XGBoost sınıflandırıcı eğitir.
-    """
+    """Tek bir TF için ML modeli eğit."""
     symbol_tf = f"{symbol}|{timeframe}"
     try:
         df = await _fetch_ohlcv_for_ml(symbol, timeframe, limit=_TRAIN_LOOKBACK_BARS + 50)
         meta = train_model(df, symbol_tf)
-        return {"success": True, "symbol": symbol, "timeframe": timeframe, **meta}
+        result = predict(df, symbol_tf)
+        _ml_pred_cache[symbol_tf] = result
+        return {"success": True, "symbol": symbol, "timeframe": timeframe,
+                "signal": result.get("signal"), "ml_score": result.get("ml_score"), **meta}
     except Exception as exc:
         logger.error("ML train failed: %s", exc)
         return {"success": False, "error": str(exc)}
+
+
+@router.post("/train_all")
+async def train_all_endpoint(
+    symbol: str = Query("BTC/USDT"),
+):
+    """
+    Tüm standart timeframe'ler için paralel model eğitimi.
+    5m, 15m, 1h, 4h, 1d, 1w — hepsi aynı anda.
+    Toplam süre: en uzun TF kadar (~60-90 sn).
+    """
+    logger.info("TRAIN_ALL başlıyor: %s %s", symbol, _ALL_TIMEFRAMES)
+    results = await asyncio.gather(
+        *[_train_one(symbol, tf) for tf in _ALL_TIMEFRAMES],
+        return_exceptions=False,
+    )
+    summary = {r["tf"]: r for r in results}
+    success_count = sum(1 for r in results if r.get("success"))
+    return {
+        "symbol": symbol,
+        "total": len(_ALL_TIMEFRAMES),
+        "success": success_count,
+        "failed": len(_ALL_TIMEFRAMES) - success_count,
+        "results": summary,
+    }
 
 
 @router.get("/predict")
