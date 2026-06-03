@@ -25,7 +25,7 @@ import { ConsensusCard } from "../components/ConsensusCard";
 import { SystemStatus } from "../components/SystemStatus";
 import { AlertBanner } from "../components/AlertBanner";
 import { KontrolMerkezi } from "../components/control/KontrolMerkezi";
-import { SymbolSelector } from "../components/SymbolSelector";
+import { SymbolSelector, type SymbolOption } from "../components/SymbolSelector";
 import { TimeframeSelector } from "../components/TimeframeSelector";
 import { useMetrics } from "../hooks/useMetrics";
 
@@ -50,12 +50,20 @@ const TABS: { id: TabId; label: string }[] = [
 
 // ── Asset catalogue ───────────────────────────────────────────────────────────
 const ASSETS = [
-  { key: "gold",      symbol: "XAU/USDT",  label: "XAU — Altın",   tradeable: true  },
-  { key: "btc",       symbol: "BTC/USDT",  label: "BTC — Bitcoin", tradeable: true  },
-  { key: "commodity", symbol: "XAG/USDT",  label: "XAG — Emtia",  tradeable: true  },
-  { key: "bond",      symbol: "BOND/USDT", label: "BOND — Tahvil", tradeable: false },
-  { key: "cash",      symbol: "CASH/USDT", label: "CASH — Nakit",  tradeable: false },
+  { key: "gold",      symbol: "XAU/USDT",  label: "XAU — Altın",    tradeable: true  },
+  { key: "btc",       symbol: "BTC/USDT",  label: "BTC — Bitcoin",  tradeable: true  },
+  { key: "eth",       symbol: "ETH/USDT",  label: "ETH — Ethereum", tradeable: true  },
+  { key: "sol",       symbol: "SOL/USDT",  label: "SOL — Solana",   tradeable: true  },
+  { key: "xrp",       symbol: "XRP/USDT",  label: "XRP — Ripple",   tradeable: true  },
+  { key: "commodity", symbol: "XAG/USDT",  label: "XAG — Gümüş",   tradeable: true  },
+  { key: "bond",      symbol: "BOND/USDT", label: "BOND — Tahvil",  tradeable: false },
+  { key: "cash",      symbol: "CASH/USDT", label: "CASH — Nakit",   tradeable: false },
 ] as const;
+
+// Metrikler sekmesi: tüm trade edilebilir semboller SymbolSelector'a geçilir
+const METRICS_SYMBOLS: SymbolOption[] = ASSETS
+  .filter((a) => a.tradeable)
+  .map(({ symbol, label }) => ({ symbol, label }));
 
 type AssetKey = (typeof ASSETS)[number]["key"];
 
@@ -88,6 +96,9 @@ const getConsensusTimestamp = (consensus: ConsensusResponse | null): string | nu
 const INITIAL_ASSET_STATE: Record<AssetKey, AssetState> = {
   gold:      { data: null, loading: true, error: null, lastSuccessfulData: null },
   btc:       { data: null, loading: true, error: null, lastSuccessfulData: null },
+  eth:       { data: null, loading: true, error: null, lastSuccessfulData: null },
+  sol:       { data: null, loading: true, error: null, lastSuccessfulData: null },
+  xrp:       { data: null, loading: true, error: null, lastSuccessfulData: null },
   commodity: { data: null, loading: true, error: null, lastSuccessfulData: null },
   bond:      { data: null, loading: true, error: null, lastSuccessfulData: null },
   cash:      { data: null, loading: true, error: null, lastSuccessfulData: null },
@@ -681,7 +692,7 @@ const DashboardV2Inner: React.FC = () => {
             {/* Seçiciler — kompakt */}
             <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-4 py-3">
               <div className="flex flex-wrap items-center gap-3">
-                <SymbolSelector currentSymbol={metricsSymbol} onSymbolChange={setMetricsSymbol} />
+                <SymbolSelector currentSymbol={metricsSymbol} onSymbolChange={setMetricsSymbol} symbols={METRICS_SYMBOLS} />
                 <TimeframeSelector currentTimeframe={metricsTimeframe} onTimeframeChange={setMetricsTimeframe} />
                 {metricsLoading && metricsData && (
                   <span className="flex items-center gap-1 text-[10px] text-slate-500">
