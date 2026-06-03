@@ -51,7 +51,7 @@ def _data_status(timestamp: Optional[str], fallback_used: bool) -> str:
     return "LIVE" if timestamp else "UNKNOWN"
 
 
-_CONSENSUS_STATUS_PRIORITY = ("FALLBACK", "MOCK", "MISSING", "STALE", "UNKNOWN", "RECENT", "LIVE")
+_CONSENSUS_STATUS_PRIORITY = ("FALLBACK", "MOCK", "MISSING", "PARTIAL_FALLBACK", "STALE", "UNKNOWN", "RECENT", "LIVE")
 
 
 def _merge_warnings(*warning_lists: Any) -> List[str]:
@@ -101,8 +101,8 @@ def _default_module_source(
         "source_data": module,
         "timestamp": None,
         "timestamp_source": "none",
-        "data_status": "FALLBACK",
-        "fallback_used": True,
+        "data_status": "MISSING",
+        "fallback_used": False,
         "verified": False,
         "asset_specific": False,
         "shared_score": False,
@@ -210,7 +210,7 @@ def _derive_rebalance_actions(
     return derived
 
 
-def _normalize_macro(response: Dict[str, Any], horizon: str = "medium") -> Dict[str, Any]:
+async def _normalize_macro(response: Dict[str, Any], horizon: str = "medium") -> Dict[str, Any]:
     metrics = response.get("metrics") if isinstance(response.get("metrics"), dict) else {}
     fallback_fields_raw = response.get("fallback_fields") if isinstance(response.get("fallback_fields"), list) else []
     source_fields_raw = response.get("source_fields") if isinstance(response.get("source_fields"), list) else []
@@ -267,7 +267,15 @@ def _normalize_macro(response: Dict[str, Any], horizon: str = "medium") -> Dict[
     )
     hedge_signal = allocation_plan["hedge_on"]
     hedge_unverified = bool(hedge_signal) and verified is False
-    current = _derive_current_allocation(allocation_plan["weights"], response.get("allocation_current"))
+    # ── Gerçek pozisyon takibi ────────────────────────────────────────────────
+    # Önce PositionTracker ile Binance bakiyelerinden gerçek ağırlık hesapla.
+    # Başarısız olursa _derive_current_allocation ile eski davranışa dön.
+    try:
+        from services.position_tracker import get_current_allocation
+        current, _pos_source = await get_current_allocation(allocation_plan["weights"])
+    except Exception as _pt_exc:
+        current = _derive_current_allocation(allocation_plan["weights"], response.get("allocation_current"))
+        _pos_source = "target_fallback"
     rebalance_actions = [] if allocation_plan["verified"] is False else _derive_rebalance_actions(
         allocation_plan["weights"],
         current,
@@ -398,7 +406,7 @@ def _normalize_consensus(
         process.get("warnings"),
         *[module_source.get("warnings") for module_source in normalized_provenance.values()],
     )
-    if data_status in {"STALE", "FALLBACK", "MOCK", "MISSING", "UNKNOWN"}:
+    if data_status in {"STALE", "FALLBACK", "PARTIAL_FALLBACK", "MOCK", "MISSING", "UNKNOWN"}:
         warnings = _merge_warnings(warnings, ["Signal is not verified because source data is stale/fallback/mock."])
     verified = (
         data_status in {"LIVE", "RECENT"}
@@ -406,10 +414,9 @@ def _normalize_consensus(
         and process.get("verified", True) is not False
         and gateway.get("verified", True) is not False
     )
-    source = (
-        _clean_timestamp(process.get("source"))
-        or _clean_timestamp(gateway.get("source"))
-        or ("consensus_stream_fallback" if fallback_used else "dashboard-gateway")
+    source = _get_string(
+        process.get("source") or gateway.get("source"),
+        "consensus_stream_fallback" if fallback_used else "dashboard-gateway",
     )
     asset = _get_string(
         process.get("asset") or gateway.get("asset"),
@@ -747,7 +754,7 @@ async def _build_snapshot(
         _empty_attribution(period),
     )
 
-    macro = _normalize_macro(macro_raw, horizon=horizon)
+    macro = await _normalize_macro(macro_raw, horizon=horizon)
     consensus = _normalize_consensus(gateway_consensus, process_consensus, symbol, timeframe)
 
     cbr_raw = await _safe(

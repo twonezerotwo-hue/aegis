@@ -553,6 +553,27 @@ async def get_pending_signals():
     }
 
 
+@app.get("/api/positions/current")
+async def get_current_positions():
+    """
+    Binance hesabından mevcut portföy ağırlıklarını döndür.
+    Credentials yoksa hedef ağırlıkları döner (fallback).
+    """
+    from services.position_tracker import get_current_allocation
+    target = {"gold": 0.22, "btc": 0.20, "bond": 0.25, "commodity": 0.13, "cash": 0.20}
+    weights, source = await get_current_allocation(target)
+    return {
+        "allocation_current": weights,
+        "source": source,
+        "tracked": source == "binance",
+        "note": (
+            "Binance spot bakiyelerinden hesaplandı"
+            if source == "binance"
+            else "Binance credentials yok — hedef ağırlıklar gösteriliyor"
+        ),
+    }
+
+
 @app.get("/api/price/validate/{symbol}")
 async def validate_price_endpoint(symbol: str):
     """İki kaynaktan fiyat çap, sapma analizi döndür.
