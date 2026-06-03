@@ -523,77 +523,140 @@ const DashboardV2Inner: React.FC = () => {
 
         {/* ── METRİKLER TAB ─────────────────────────────────────────────────── */}
         {activeTab === "metrics" && (
-          <div className="space-y-6">
-            {/* Symbol + Timeframe selectors */}
-            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-5 py-4">
-              <div className="flex flex-wrap items-center gap-4">
-                <SymbolSelector
-                  currentSymbol={metricsSymbol}
-                  onSymbolChange={setMetricsSymbol}
-                />
-                <TimeframeSelector
-                  currentTimeframe={metricsTimeframe}
-                  onTimeframeChange={setMetricsTimeframe}
-                />
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-500">
-                    Her {metricsRefreshMs / 1000}s güncellenir
+          <div className="space-y-4">
+            {/* Seçiciler — kompakt */}
+            <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-4 py-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <SymbolSelector currentSymbol={metricsSymbol} onSymbolChange={setMetricsSymbol} />
+                <TimeframeSelector currentTimeframe={metricsTimeframe} onTimeframeChange={setMetricsTimeframe} />
+                {metricsLoading && metricsData && (
+                  <span className="flex items-center gap-1 text-[10px] text-slate-500">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    yenileniyor
                   </span>
-                  {metricsLoading && metricsData && (
-                    <span className="flex items-center gap-1 text-[10px] text-slate-500">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      yenileniyor
-                    </span>
-                  )}
-                </div>
+                )}
               </div>
             </div>
 
             {metricsLoading && !metricsData ? (
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {Array.from({ length: 3 }).map((_, i) => (
-                  <SkeletonLoader key={i} variant="stat" />
-                ))}
-              </div>
+              <SkeletonLoader variant="card" lines={5} />
             ) : metricsData ? (
-              <>
-                <AlertBanner data={metricsData} />
+              <div className={`transition-opacity duration-200 ${metricsLoading ? "opacity-50" : "opacity-100"}`}>
 
-                {/* Only Touche / Fundamental / News enter the consensus —
-                    Sentinel and Quantum are background-only risk filters. */}
-                <div className={`grid gap-4 md:grid-cols-2 lg:grid-cols-3 transition-opacity duration-200 ${metricsLoading ? "opacity-50" : "opacity-100"}`}>
-                  {(["touche", "fundamental", "news"] as const).map((key) => (
-                    <MetricCard key={key} metric={metricsData.metrics[key]} />
-                  ))}
-                </div>
+                {/* ── Tek Panel ─────────────────────────────────────────────── */}
+                <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-5 shadow-md">
 
-                {/* Sentinel high-risk inline notice (non-alarming) */}
-                {metricsData.metrics.sentinel.score < 0.45 && (
-                  <div className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3">
-                    <span className="mt-0.5 shrink-0 text-amber-400 text-sm">⚠</span>
-                    <div>
-                      <p className="text-[11px] font-semibold text-amber-300">Sentinel — Yüksek Olay Riski</p>
-                      <p className="text-[10px] text-amber-200/70 mt-0.5">
-                        {metricsData.metrics.sentinel.summary ?? "Makro olay riski eşiğin üzerinde — pozisyon boyutlandırmasına dikkat."}
-                      </p>
+                  {/* Header: consensus karar + sağlık noktaları */}
+                  {(() => {
+                    const cons  = metricsData.consensus;
+                    const act   = cons?.action ?? "HOLD";
+                    const score = ((cons?.weighted_score ?? 0) * 100).toFixed(1);
+                    const conf  = ((cons?.confidence ?? 0) * 100).toFixed(0);
+                    const actCls = act === "BUY" ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
+                                 : act === "SELL" ? "text-rose-400 border-rose-500/40 bg-rose-500/10"
+                                 : "text-amber-400 border-amber-500/40 bg-amber-500/10";
+                    const actTr = act === "BUY" ? "AL" : act === "SELL" ? "SAT" : "TUT";
+                    const svcs  = metricsData.health?.services ?? {};
+                    const svcList = [
+                      { k: "touche",      label: "T" },
+                      { k: "fundamental", label: "F" },
+                      { k: "news",        label: "N" },
+                      { k: "sentinel",    label: "S" },
+                      { k: "quantum",     label: "Q" },
+                    ];
+                    return (
+                      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                          <span className={`inline-flex rounded-xl border px-4 py-1.5 text-lg font-extrabold ${actCls}`}>
+                            {actTr}
+                          </span>
+                          <div>
+                            <p className="font-mono text-xl font-bold text-white">{score}<span className="text-sm text-slate-500">%</span></p>
+                            <p className="text-[9px] text-slate-600">Güven {conf}%</p>
+                          </div>
+                        </div>
+                        {/* Servis sağlık noktaları */}
+                        <div className="flex items-center gap-1.5">
+                          {svcList.map(({ k, label }) => (
+                            <div key={k} className="flex flex-col items-center gap-0.5">
+                              <span className={`h-2 w-2 rounded-full ${(svcs as Record<string,string>)[k] === "UP" ? "bg-emerald-400" : "bg-rose-400"}`} title={k} />
+                              <span className="font-mono text-[8px] text-slate-700">{label}</span>
+                            </div>
+                          ))}
+                          <span className={`ml-1 text-[9px] font-semibold ${Object.values(svcs).filter(s => s === "UP").length >= 4 ? "text-emerald-400" : "text-amber-400"}`}>
+                            {Object.values(svcs).filter(s => s === "UP").length}/{svcList.length} UP
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Modül satırları */}
+                  <div className="space-y-1">
+                    {/* Consensus'a giren modüller */}
+                    {(["touche", "fundamental", "news"] as const).map((key) => {
+                      const m   = metricsData.metrics[key];
+                      const pct = Math.round(m.score * 100);
+                      const BAR: Record<string, string> = { touche: "bg-violet-400", fundamental: "bg-sky-400", news: "bg-amber-400" };
+                      const NAME: Record<string, string> = { touche: "Touche EQS", fundamental: "Fundamental", news: "Haber" };
+                      const sc  = m.score > 0.65 ? "text-emerald-400" : m.score < 0.35 ? "text-rose-400" : "text-slate-300";
+                      return (
+                        <div key={key} className="group rounded-xl px-3 py-2.5 hover:bg-slate-800/40 transition-colors">
+                          <div className="mb-1.5 flex items-center gap-2">
+                            <span className="w-20 shrink-0 text-[10px] font-semibold text-slate-400">{NAME[key]}</span>
+                            <div className="h-1.5 flex-1 rounded-full bg-slate-700/60">
+                              <div className={`h-1.5 rounded-full ${BAR[key]} transition-all duration-500`} style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className={`w-8 shrink-0 text-right font-mono text-[11px] font-bold ${sc}`}>{pct}</span>
+                          </div>
+                          <p className="pl-[5.5rem] text-[9px] leading-4 text-slate-600">{m.summary}</p>
+                        </div>
+                      );
+                    })}
+
+                    {/* Ayırıcı */}
+                    <div className="my-2 flex items-center gap-2 px-3">
+                      <div className="h-px flex-1 bg-slate-800" />
+                      <span className="text-[8px] uppercase tracking-wider text-slate-700">arka plan (consensus dışı)</span>
+                      <div className="h-px flex-1 bg-slate-800" />
                     </div>
+
+                    {/* Arka plan modülleri */}
+                    {(["sentinel", "quantum"] as const).map((key) => {
+                      const m   = metricsData.metrics[key];
+                      const pct = Math.round(m.score * 100);
+                      const BAR: Record<string, string> = { sentinel: "bg-rose-400", quantum: "bg-emerald-400" };
+                      const NAME: Record<string, string> = { sentinel: "Sentinel", quantum: "Quantum" };
+                      const badge: Record<string, { label: string; cls: string }> = {
+                        sentinel: m.score >= 0.55 ? { label: "✓ Düşük Risk", cls: "text-emerald-500" }
+                                : m.score >= 0.45 ? { label: "~ Orta Risk",  cls: "text-amber-500"  }
+                                : { label: "✗ Yüksek Risk", cls: "text-rose-500" },
+                        quantum:  Math.abs(m.score - 0.5) < 0.01
+                                ? { label: "~ Veri Yok",     cls: "text-slate-600" }
+                                : m.score >= 0.55 ? { label: "✓ Likidite İyi", cls: "text-emerald-500" }
+                                : { label: "✗ Düşük Likidite", cls: "text-rose-500" },
+                      };
+                      return (
+                        <div key={key} className="rounded-xl px-3 py-2 opacity-60 hover:opacity-90 transition-opacity">
+                          <div className="flex items-center gap-2">
+                            <span className="w-20 shrink-0 text-[10px] text-slate-500">{NAME[key]}</span>
+                            <div className="h-1 flex-1 rounded-full bg-slate-800">
+                              <div className={`h-1 rounded-full ${BAR[key]} opacity-50`} style={{ width: `${pct}%` }} />
+                            </div>
+                            <span className="w-8 shrink-0 text-right font-mono text-[10px] text-slate-600">{pct}</span>
+                            <span className={`text-[9px] font-semibold ${badge[key].cls}`}>{badge[key].label}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                )}
 
-                <div className="grid gap-4 lg:grid-cols-3">
-                  <ConsensusCard data={metricsData.consensus} />
-                  <SystemStatus
-                    health={metricsData.health}
-                    sentinelScore={metricsData.metrics.sentinel.score}
-                    quantumScore={metricsData.metrics.quantum.score}
-                  />
+                  {/* Footer: son güncelleme */}
+                  <p className="mt-3 text-right font-mono text-[9px] text-slate-700">
+                    {metricsData.last_updated ?? metricsData.timestamp ?? "—"}
+                  </p>
                 </div>
-
-                <p className="text-center text-xs text-slate-600">
-                  Son güncelleme:{" "}
-                  {metricsData.last_updated ?? metricsData.timestamp ?? "—"}
-                </p>
-              </>
+              </div>
             ) : (
               <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-10 text-center text-sm text-slate-500">
                 Backend bağlantısı bekleniyor — http://localhost:8502
