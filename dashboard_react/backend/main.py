@@ -26,6 +26,7 @@ except Exception as _aegis_core_import_err:
 from routes import dashboard
 from routes import macro
 from routes import stream
+from routes import ml_model
 
 # Setup logging early
 logging.basicConfig(
@@ -259,6 +260,7 @@ app.include_router(_load_paper_trading_router())
 
 # Include macro routes
 app.include_router(macro.router)
+app.include_router(ml_model.router)
 
 # Include SSE live-feed route
 app.include_router(stream.router)
