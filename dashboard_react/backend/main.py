@@ -28,6 +28,7 @@ from routes import macro
 from routes import stream
 from routes import ml_model
 from routes import agent as agent_routes
+from routes import optimizer_agent_routes
 
 # Setup logging early
 logging.basicConfig(
@@ -263,6 +264,7 @@ app.include_router(_load_paper_trading_router())
 app.include_router(macro.router)
 app.include_router(ml_model.router)
 app.include_router(agent_routes.router)
+app.include_router(optimizer_agent_routes.router)
 
 # Include SSE live-feed route
 app.include_router(stream.router)

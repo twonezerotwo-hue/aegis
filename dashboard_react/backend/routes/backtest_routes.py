@@ -81,6 +81,39 @@ _OHLCV_CACHE_MAX_ITEMS = 64
 # Deney/optimizasyon scriptleri bunu set edebilir. Production'da None kalır.
 _CONTRARIAN_OVERRIDE: bool | None = None
 
+# Optimizasyon Agent'ının uyguladığı config önbelleği (30s TTL)
+_APPLIED_CFG_CACHE: dict = {"data": None, "ts": 0.0, "mtime": 0.0}
+
+
+def _load_applied_config(timeframe: str) -> dict | None:
+    """
+    Optimizer agent'ının yazdığı applied_strategy_config.json'u oku.
+    Yalnız config'in timeframe'i eşleşirse paramları döndür (aksi halde None).
+    Dosya değişmediyse önbellekten okur.
+    """
+    import json as _json, os as _os, time as _t
+    path = _os.path.join(_os.getenv("AGENT_DATA_DIR", "/app/data"), "applied_strategy_config.json")
+    try:
+        if not _os.path.exists(path):
+            return None
+        mtime = _os.path.getmtime(path)
+        now = _t.time()
+        if _APPLIED_CFG_CACHE["data"] is None or mtime != _APPLIED_CFG_CACHE["mtime"]:
+            with open(path, "r", encoding="utf-8") as f:
+                _APPLIED_CFG_CACHE["data"] = _json.load(f)
+            _APPLIED_CFG_CACHE["mtime"] = mtime
+            _APPLIED_CFG_CACHE["ts"] = now
+        cfg = _APPLIED_CFG_CACHE["data"]
+        if not cfg or cfg.get("timeframe") != timeframe:
+            return None
+        p = dict(cfg.get("params", {}))
+        # weights iç içe — düzleştir
+        if "weights" in p and isinstance(p["weights"], dict):
+            p["_weights"] = p.pop("weights")
+        return p
+    except Exception:
+        return None
+
 
 def get_score_attribution(module: str, score: float, macro: dict = None, price_data: dict = None) -> list:
     """Return top 3 contributors for a module score (simplified SHAP-like)."""
@@ -240,14 +273,17 @@ async def run_ai_backtest(
         horizon = request_data.get("horizon", "medium")
         if horizon not in ("short", "medium", "long"):
             horizon = "medium"
+        # ── Optimizasyon Agent'ının UYGULADIĞI config (varsa öncelikli) ───────
+        # Agent OOS-doğrulanmış en iyi ayarı bulup buraya yazar; sistem otomatik kullanır.
+        _applied = _load_applied_config(timeframe)
+
         # Use optimal static threshold by default (explicit value forces static mode,
         # None triggers dynamic regime-adjusted mode which generates 73 vs 29 trades).
-        # Static 1.3 gave WR=58.6%, Sharpe=3.52 vs dynamic's WR=41.1%, Sharpe=0.61.
         # TF-bazlı optimal z-threshold (iteratif optimizasyon, BTC 2022-2025):
-        #   1d kontrarian z=1.734 → WR=73.7%, kârlı (PF=1.06, PnL=+7.7%)
         _TF_Z_DEFAULT = {"5m": 1.5, "15m": 1.4, "1h": 1.3, "4h": 1.3,
                          "1d": 1.734, "3d": 1.7, "1w": 1.7}
         z_threshold   = (_as_optional_float(request_data.get("z_threshold"))
+                         or (_applied or {}).get("z_threshold")
                          or _TF_Z_DEFAULT.get(timeframe, 1.3))
         kelly_cap     = _as_optional_float(request_data.get("kelly_cap"))
         rsi_lower     = _as_optional_int(request_data.get("rsi_lower"))
@@ -272,12 +308,18 @@ async def run_ai_backtest(
             "1w":  {"sl": -0.12, "tp": 0.35, "ze_long": -0.30, "ze_short": 0.30, "adx": 13},
         }
         _tf_def = _TF_EXIT_DEFAULTS.get(timeframe, _TF_EXIT_DEFAULTS["4h"])
+        _ap = _applied or {}
 
-        stop_loss_pct   = _as_optional_float(request_data.get("stop_loss_pct"))   or _tf_def["sl"]
-        take_profit_pct = _as_optional_float(request_data.get("take_profit_pct")) or _tf_def["tp"]
-        z_exit_long     = _as_optional_float(request_data.get("z_exit_long"))     or _tf_def["ze_long"]
-        z_exit_short    = _as_optional_float(request_data.get("z_exit_short"))    or _tf_def["ze_short"]
-        adx_min         = _as_optional_float(request_data.get("adx_min"))         or float(_tf_def["adx"])
+        stop_loss_pct   = _as_optional_float(request_data.get("stop_loss_pct"))   or _ap.get("stop_loss_pct")   or _tf_def["sl"]
+        take_profit_pct = _as_optional_float(request_data.get("take_profit_pct")) or _ap.get("take_profit_pct") or _tf_def["tp"]
+        z_exit_long     = _as_optional_float(request_data.get("z_exit_long"))     or _ap.get("z_exit_long")     or _tf_def["ze_long"]
+        z_exit_short    = _as_optional_float(request_data.get("z_exit_short"))    or _ap.get("z_exit_short")    or _tf_def["ze_short"]
+        adx_min         = _as_optional_float(request_data.get("adx_min"))         or _ap.get("adx_min")         or float(_tf_def["adx"])
+
+        # Agent yön (kontrarian) override'ı uygula
+        if _ap.get("contrarian") is not None and request_data.get("z_threshold") is None:
+            global _CONTRARIAN_OVERRIDE
+            _CONTRARIAN_OVERRIDE = bool(_ap["contrarian"])
 
         # ── Parse explicit module_weights from request ──
         module_weights = None
@@ -295,6 +337,11 @@ async def run_ai_backtest(
                 "quantum": _wq or 0.05,
             }
             logger.info(f"Explicit module_weights from request: {module_weights}")
+
+        # ── Optimizer agent ağırlıkları (istek ağırlığı yoksa) ────────────────
+        if module_weights is None and _ap.get("_weights"):
+            module_weights = dict(_ap["_weights"])
+            logger.info(f"Applied (optimizer) module_weights: {module_weights}")
 
         # ── Auto regime-aware weights (sentinel → YAML) when no explicit weights ──
         if module_weights is None:
