@@ -114,7 +114,8 @@ const VADE_OPTIONS: { value: Vade; label: string; sub: string }[] = [
 // ── Sparkline: son N skor noktası mini SVG grafiği ──────────────────────────
 const Sparkline: React.FC<{ data: number[]; color: string }> = ({ data, color }) => {
   if (!data || data.length < 2) {
-    return <span className="text-[8px] text-slate-700">geçmiş yok</span>;
+    // Geçmiş henüz birikmedi — sabit genişlikte boş yer tut (layout kaymasın)
+    return <span className="inline-block w-12 shrink-0" aria-hidden="true" />;
   }
   const W = 48, H = 14;
   const min = Math.min(...data), max = Math.max(...data);
@@ -145,11 +146,19 @@ function dataSourceKind(summary: string): { real: boolean; label: string } {
   return { real: true, label: "canlı" };
 }
 
-// ── Çelişki uyarısı: summary içindeki ⚠ işaretini ayıkla ────────────────────
+// ── Çelişki uyarısı: yalnız GERÇEK çelişkileri ayıkla ───────────────────────
+// "⚠ MVRV/NUPL simüle" gibi veri-kaynağı notları DEĞİL — onlar amber nokta ile
+// zaten gösteriliyor. Sadece "aşırı ... ama sinyal nötr" türü çelişkiler kutuya çıkar.
 function extractWarning(summary: string): string | null {
   const idx = (summary || "").indexOf("⚠");
   if (idx < 0) return null;
-  return summary.slice(idx + 1).trim().split("·")[0].trim() || null;
+  const text = summary.slice(idx + 1).trim().split("·")[0].trim();
+  if (!text) return null;
+  // Gerçek çelişki sinyalleri: aşırı alım/satım + nötr sinyal, dip/tepe riski
+  const isContradiction = /aşırı|dip fırsat|tepe risk|nötr|çelişk/i.test(text);
+  const isDataNote = /simüle|mock|bağlanmadı|veri yok/i.test(text);
+  if (isDataNote && !isContradiction) return null;   // veri notu → kutu yok
+  return text;
 }
 
 // ── "Bu skoru neden verdi?" — dinamik açıklama üreteci ───────────────────────
