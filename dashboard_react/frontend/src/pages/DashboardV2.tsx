@@ -28,6 +28,7 @@ import { KontrolMerkezi } from "../components/control/KontrolMerkezi";
 import { AgentControlPanel } from "../components/control/AgentControlPanel";
 import { SymbolSelector, type SymbolOption } from "../components/SymbolSelector";
 import { TimeframeSelector } from "../components/TimeframeSelector";
+import { NewsHeadlines } from "../components/NewsHeadlines";
 import { useMetrics } from "../hooks/useMetrics";
 
 import { useRealTimeFeed } from "../hooks/useRealTimeFeed";
@@ -1060,6 +1061,9 @@ const DashboardV2Inner: React.FC = () => {
                     </p>
                   </div>
                 </div>
+
+                {/* ── Canlı Haber Akışı (gerçek RSS başlıkları) ───────────── */}
+                <NewsHeadlines symbol={metricsSymbol} />
 
                 {/* ── Modül Açıklamaları ─────────────────────────────────── */}
                 <MetricsModuleInfo

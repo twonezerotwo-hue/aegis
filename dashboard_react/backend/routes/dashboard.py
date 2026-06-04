@@ -136,6 +136,36 @@ async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, 
     except Exception as exc:
         logger.debug("F&G enrich failed: %s", exc)
 
+    # ── News'i GERÇEK RSS akışıyla değiştir (CoinDesk/Cointelegraph/Decrypt) ────
+    # Statik "47 haber" yerine canlı, taze, sembol-filtreli gerçek haberler
+    try:
+        from services.news_feed import get_live_news
+        live_news = await get_live_news(symbol_clean)
+        if live_news.get("available"):
+            # signals[0] formatına uydur (mevcut tüketici kodu çalışsın)
+            if payloads.get("news") is None:
+                payloads["news"] = {}
+            _dh = live_news.get("display_headlines", [])
+            payloads["news"]["signals"] = [{
+                "crypto_impact_score":  live_news["crypto_impact_score"],
+                "aggregated_sentiment": live_news.get("symbol_sentiment", live_news["aggregated_sentiment"]),
+                "news_items_count":     live_news["count_total"],
+                "count_24h":            live_news["count_24h"],
+                "confidence_level":     min(95, 50 + live_news["count_24h"] * 2),
+                "primary_countries":    [],
+                "impact_factors":       {"regulatory_score": 50},
+                "sources":              live_news.get("sources", []),
+                "newest_age_h":         live_news.get("newest_age_h"),
+                "top_headline":         _dh[0]["title"] if _dh else None,
+                "top_headline_sentiment": _dh[0]["sentiment"] if _dh else 0,
+                "display_headlines":    _dh,
+            }]
+            payloads["news"]["_live_feed"] = live_news   # zengin veri (başlıklar)
+            payloads["news"]["data_status"] = "LIVE"
+            payloads["news"]["verified"] = True
+    except Exception as exc:
+        logger.debug("Live news enrich failed: %s", exc)
+
     return payloads
 
 
@@ -485,19 +515,29 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
 
     if module == "news":
         impact = raw.get("crypto_impact_score", round(score * 100, 1))
-        conf = raw.get("confidence_level", 0)
         count = raw.get("news_items_count", 0)
+        count_24h = raw.get("count_24h")
         sentiment = raw.get("aggregated_sentiment", 0)
-        countries = (raw.get("primary_countries") or [])[:2]
-        reg = (raw.get("impact_factors") or {}).get("regulatory_score", 0)
-        sent_str = "pozitif" if sentiment > 0.1 else "negatif" if sentiment < -0.1 else "nötr"
-        country_str = f" · Ülkeler: {', '.join(countries)}" if countries else ""
-        # FIX: "TF bağımsız" yanlıştı — haber TF-relevance decay uygulanıyor
-        # Kısa TF'de haber tam etkili, uzun TF'de sönümlenir
+        sources = raw.get("sources", [])
+        newest = raw.get("newest_age_h")
+        top_headline = raw.get("top_headline")
+        sent_str = "pozitif 📈" if sentiment > 0.1 else "negatif 📉" if sentiment < -0.1 else "nötr"
+
+        # GERÇEK haber akışı (RSS) varsa zengin özet
+        if top_headline:
+            src_str = "/".join(sources[:3]) if sources else "RSS"
+            fresh = f"{newest:.0f}s önce" if isinstance(newest, (int, float)) and newest < 48 else "güncel"
+            cnt_str = f"{count_24h}/24s ({count} toplam)" if count_24h is not None else f"{count} haber"
+            head_short = top_headline[:60] + ("…" if len(top_headline) > 60 else "")
+            return (
+                f"📰 {cnt_str} · {src_str} · en yeni {fresh} · "
+                f"Duygu: {sent_str} ({sentiment:+.2f}) · Etki: {impact:.0f} · "
+                f"⏱ TF-duyarlı · Manşet: «{head_short}»"
+            )
+        # Fallback (RSS başarısız → eski format)
         return (
             f"{count} haber analizi · Etki: {impact:.0f} · "
-            f"Güven: {conf:.0f}% · Regulatory: {reg:.0f} · "
-            f"Genel duygu: {sent_str}{country_str} · ⏱ TF-duyarlı (kısa vadede etkili)."
+            f"Genel duygu: {sent_str} · ⏱ TF-duyarlı (kısa vadede etkili)."
         )
 
     if module == "sentinel":
@@ -1048,6 +1088,33 @@ async def get_news_metrics(
             "source": "cache",
             "error": str(e),
         }
+
+
+@router.get("/news/live")
+async def get_live_news_feed(symbol: str = Query("BTC")):
+    """
+    Gerçek canlı haber akışı — RSS kaynaklarından (CoinDesk/Cointelegraph/Decrypt).
+    Manşetler, kaynak, yaş, duygu. Frontend haber panelinde gösterilir.
+    """
+    try:
+        from services.news_feed import get_live_news
+        data = await get_live_news(symbol.replace("/USDT", "").replace("/", ""))
+        if not data.get("available"):
+            return {"available": False, "headlines": [], "note": "Haber akışı geçici olarak yok"}
+        return {
+            "available": True,
+            "symbol": data.get("symbol"),
+            "impact_score": data["crypto_impact_score"],
+            "sentiment": data.get("symbol_sentiment", data["aggregated_sentiment"]),
+            "count_24h": data["count_24h"],
+            "count_total": data["count_total"],
+            "sources": data["sources"],
+            "fetched_at": data["fetched_at"],
+            "headlines": data.get("display_headlines", []),
+        }
+    except Exception as e:
+        logger.error(f"Live news endpoint error: {e}")
+        return {"available": False, "headlines": [], "error": str(e)}
 
 
 async def _fetch_macro_for_asset_scoring(horizon: str = "medium") -> dict:
