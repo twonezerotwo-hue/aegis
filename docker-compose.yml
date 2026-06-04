@@ -473,12 +473,26 @@ services:
       LIVE_TIMEFRAMES: "${LIVE_TIMEFRAMES:-4h,1d}"
       MAX_RISK_PER_TRADE: "${MAX_RISK_PER_TRADE:-0.02}"
       KILL_SWITCH_DRAWDOWN: "${KILL_SWITCH_DRAWDOWN:-0.10}"
+      EXECUTION_MODE: "${EXECUTION_MODE:-DRY_RUN}"
+      # ── Otonom Agent (GÜVENLİ-VARSAYILAN: kapalı) ──────────────────────
+      AGENT_ENABLED: "${AGENT_ENABLED:-false}"
+      AGENT_INTERVAL_SEC: "${AGENT_INTERVAL_SEC:-300}"
+      AGENT_SYMBOLS: "${AGENT_SYMBOLS:-BTC/USDT,ETH/USDT}"
+      AGENT_TIMEFRAME: "${AGENT_TIMEFRAME:-4h}"
+      AGENT_HORIZON: "${AGENT_HORIZON:-medium}"
+      AGENT_MIN_CONFIDENCE: "${AGENT_MIN_CONFIDENCE:-0.62}"
+      AGENT_MIN_SCORE_EDGE: "${AGENT_MIN_SCORE_EDGE:-0.08}"
+      AGENT_MAX_SIGNALS_DAY: "${AGENT_MAX_SIGNALS_DAY:-6}"
+      AGENT_RISK_PCT: "${AGENT_RISK_PCT:-0.02}"
+      AGENT_SIGNAL_TTL_MIN: "${AGENT_SIGNAL_TTL_MIN:-30}"
+      AGENT_DATA_DIR: "/app/data"
     ports:
       - "8502:8502"
     volumes:
       - ./backtest:/app/backtest
       - ./strategies:/app/strategies
       - ./consensus_engine/config:/app/consensus_engine/config
+      - agent_data:/app/data
     networks:
       - aegis_network
     depends_on:
@@ -606,3 +620,4 @@ volumes:
   prometheus_data:
   grafana_data:
   qdrant_data:
+  agent_data:        # Agent karar günlüğü kalıcılığı (recreate'te korunur)

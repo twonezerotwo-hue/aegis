@@ -27,6 +27,7 @@ from routes import dashboard
 from routes import macro
 from routes import stream
 from routes import ml_model
+from routes import agent as agent_routes
 
 # Setup logging early
 logging.basicConfig(
@@ -261,6 +262,7 @@ app.include_router(_load_paper_trading_router())
 # Include macro routes
 app.include_router(macro.router)
 app.include_router(ml_model.router)
+app.include_router(agent_routes.router)
 
 # Include SSE live-feed route
 app.include_router(stream.router)
@@ -275,6 +277,76 @@ else:
 
 
 # ========== STARTUP EVENT ==========
+
+@app.on_event("startup")
+async def wire_agent_on_startup():
+    """
+    Agent orchestrator bağımlılıklarını bağla (consensus, kuyruk, kill-switch, fiyat).
+    GÜVENLİ: AGENT_ENABLED=true değilse agent başlatılmaz, sadece bağlanır.
+    """
+    try:
+        from services.agent_loop import get_agent
+
+        # 1) Consensus fonksiyonu — dashboard.get_consensus'u sarmalar
+        async def _consensus_fn(symbol: str, timeframe: str, horizon: str) -> dict:
+            return await dashboard.get_consensus(
+                symbol=symbol, timeframe=timeframe, horizon=horizon,
+                prometheus_url=PROMETHEUS_URL,
+            )
+
+        # 2) Enqueue — agent sinyalini PendingSignal'e çevirip kuyruğa koyar
+        def _enqueue_fn(sig: dict) -> Optional[str]:
+            from datetime import timedelta
+            sig_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc)
+            ps = PendingSignal(
+                id=sig_id,
+                symbol=sig.get("symbol", "BTC/USDT"),
+                action=sig.get("action", "BUY"),
+                timeframe=sig.get("timeframe", "4h"),
+                quantity=0.0,                       # miktar onay anında belirlenir
+                price=None,
+                risk_pct=float(os.getenv("AGENT_RISK_PCT", "0.02")),
+                confidence=float(sig.get("confidence", 0.5)),
+                reason=sig.get("reason", "agent sinyali"),
+                queued_at=now.isoformat(),
+                expires_at=(now + timedelta(minutes=int(os.getenv("AGENT_SIGNAL_TTL_MIN", "30")))).isoformat(),
+                source="agent_auto",
+            )
+            _signal_queue.push(ps)
+            return sig_id
+
+        # 3) Kill switch — günlük PnL takipçisinden
+        def _kill_switch_fn() -> tuple[bool, str]:
+            dd = float(os.getenv("KILL_SWITCH_DRAWDOWN", "0.10"))
+            return _pnl_tracker.is_kill_switch_active(dd)
+
+        # 4) Fiyat doğrulama (opsiyonel)
+        async def _price_check_fn(symbol: str) -> dict:
+            try:
+                from services.price_validator import validate_price
+                vld = await validate_price(symbol)
+                return vld.to_dict()
+            except Exception:
+                return {"unverified": False}
+
+        agent = get_agent()
+        agent.wire(
+            consensus_fn=_consensus_fn,
+            enqueue_fn=_enqueue_fn,
+            kill_switch_fn=_kill_switch_fn,
+            price_check_fn=_price_check_fn,
+        )
+        logger.info("Agent wired. AGENT_ENABLED=%s mode=%s",
+                    os.getenv("AGENT_ENABLED", "false"), EXECUTION_MODE)
+
+        # Otomatik başlat — yalnızca açıkça AGENT_ENABLED=true ise
+        if os.getenv("AGENT_ENABLED", "false").lower() == "true":
+            await agent.start()
+            logger.info("Agent auto-started (AGENT_ENABLED=true)")
+    except Exception as e:
+        logger.error(f"Agent wiring failed: {e}", exc_info=True)
+
 
 @app.on_event("startup")
 async def load_backtest_on_startup():

@@ -25,6 +25,7 @@ import { ConsensusCard } from "../components/ConsensusCard";
 import { SystemStatus } from "../components/SystemStatus";
 import { AlertBanner } from "../components/AlertBanner";
 import { KontrolMerkezi } from "../components/control/KontrolMerkezi";
+import { AgentControlPanel } from "../components/control/AgentControlPanel";
 import { SymbolSelector, type SymbolOption } from "../components/SymbolSelector";
 import { TimeframeSelector } from "../components/TimeframeSelector";
 import { useMetrics } from "../hooks/useMetrics";
@@ -664,12 +665,15 @@ const DashboardV2Inner: React.FC = () => {
 
         {/* ── KONTROL MERKEZİ TAB ─────────────────────────────────────────── */}
         {activeTab === "control" && (
-          <KontrolMerkezi
-            macro={effectiveMacro}
-            btcConsensus={assetConsensus.btc.data ?? null}
-            dailyPnl={dailyPnl}
-            loading={loading && !effectiveMacro}
-          />
+          <div className="space-y-4">
+            <KontrolMerkezi
+              macro={effectiveMacro}
+              btcConsensus={assetConsensus.btc.data ?? null}
+              dailyPnl={dailyPnl}
+              loading={loading && !effectiveMacro}
+            />
+            <AgentControlPanel />
+          </div>
         )}
 
         {/* ── ANALİZ TAB (eski Portföy) ─────────────────────────────────── */}
