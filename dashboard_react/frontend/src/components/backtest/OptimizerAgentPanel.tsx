@@ -26,6 +26,15 @@ interface OptResult {
   num_trades: number;
   oos_trades: number;
   oos_validated: boolean;
+  robust_score?: number;
+}
+
+interface AutoStatus {
+  auto_enabled: boolean;
+  interval_hours: number;
+  last_auto_run: string | null;
+  next_auto_run: string | null;
+  min_profit_factor: number;
 }
 
 interface OptStatus {
@@ -40,6 +49,7 @@ interface OptStatus {
   last_error: string | null;
   results_count: number;
   config: { timeframes: string[]; n_candidates_per_tf: number; oos_fraction: number };
+  auto?: AutoStatus;
 }
 
 export const OptimizerAgentPanel: React.FC = () => {
@@ -77,8 +87,19 @@ export const OptimizerAgentPanel: React.FC = () => {
     try { await fetch(`${API_BASE}/api/optimizer/stop`, { method: "POST" }); refresh(); }
     finally { setBusy(false); }
   };
+  const toggleAuto = async (on: boolean) => {
+    setBusy(true);
+    try {
+      await fetch(`${API_BASE}/api/optimizer/auto/${on ? "start" : "stop"}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: on ? JSON.stringify({ auto_interval_hours: 24, n_candidates_per_tf: 80 }) : undefined,
+      });
+      refresh();
+    } finally { setBusy(false); }
+  };
 
   if (!status) return null;
+  const auto = status.auto;
 
   const pct = Math.round((status.progress ?? 0) * 100);
   const pnlCls = (v: number | null) => v == null ? "text-slate-500" : v > 0 ? "text-emerald-400" : "text-rose-400";
@@ -97,6 +118,16 @@ export const OptimizerAgentPanel: React.FC = () => {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Otonom mod düğmesi */}
+          <button onClick={() => toggleAuto(!auto?.auto_enabled)} disabled={busy}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-bold transition-colors disabled:opacity-50 ${
+              auto?.auto_enabled
+                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
+                : "border-slate-600 bg-slate-800 text-slate-400 hover:bg-slate-700"
+            }`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${auto?.auto_enabled ? "bg-emerald-400 animate-pulse" : "bg-slate-600"}`} />
+            Otonom {auto?.auto_enabled ? "AÇIK" : "KAPALI"}
+          </button>
           {status.running ? (
             <button onClick={stop} disabled={busy}
               className="rounded-lg bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-500 disabled:opacity-50">
@@ -105,11 +136,21 @@ export const OptimizerAgentPanel: React.FC = () => {
           ) : (
             <button onClick={run} disabled={busy}
               className="rounded-lg bg-violet-600 px-4 py-2 text-xs font-bold text-white hover:bg-violet-500 disabled:opacity-50">
-              ▶ Optimizasyonu Başlat
+              ▶ Tek Sefer Tara
             </button>
           )}
         </div>
       </div>
+
+      {/* Otonom durum şeridi */}
+      {auto?.auto_enabled && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[10px] text-emerald-300">
+          <span className="font-semibold">🔄 Otonom mod aktif</span>
+          <span className="text-slate-400">her {auto.interval_hours}s'te yeniden tarar</span>
+          <span className="text-slate-400">PF kapısı ≥ {auto.min_profit_factor}</span>
+          {auto.next_auto_run && <span className="text-slate-500">sonraki: {auto.next_auto_run.slice(5, 16).replace("T", " ")}</span>}
+        </div>
+      )}
 
       {/* İlerleme */}
       {status.running && (
@@ -163,8 +204,8 @@ export const OptimizerAgentPanel: React.FC = () => {
                 <tr className="border-b border-slate-800 text-slate-600">
                   <th className="py-1.5 text-left">TF</th>
                   <th className="py-1.5 text-left">Yön</th>
+                  <th className="py-1.5 text-right">Sağlam</th>
                   <th className="py-1.5 text-right">OOS PnL</th>
-                  <th className="py-1.5 text-right">Full PnL</th>
                   <th className="py-1.5 text-right">WR</th>
                   <th className="py-1.5 text-right">PF</th>
                   <th className="py-1.5 text-right">Sharpe</th>
@@ -177,11 +218,9 @@ export const OptimizerAgentPanel: React.FC = () => {
                   <tr key={i} className={`border-b border-slate-800/50 ${i === 0 ? "bg-emerald-500/5" : ""}`}>
                     <td className="py-1.5 font-mono font-bold text-white">{r.timeframe}{i === 0 && " 🏆"}</td>
                     <td className="py-1.5 text-slate-400">{r.params.contrarian ? "Kont." : "Mom."}</td>
-                    <td className={`py-1.5 text-right font-mono font-bold ${pnlCls(r.oos_pnl_pct)}`}>
+                    <td className="py-1.5 text-right font-mono font-bold text-violet-300">{r.robust_score ?? "—"}</td>
+                    <td className={`py-1.5 text-right font-mono ${pnlCls(r.oos_pnl_pct)}`}>
                       {r.oos_pnl_pct != null ? `${r.oos_pnl_pct > 0 ? "+" : ""}${r.oos_pnl_pct.toFixed(1)}%` : "—"}
-                    </td>
-                    <td className={`py-1.5 text-right font-mono ${pnlCls(r.full_pnl_pct)}`}>
-                      {r.full_pnl_pct > 0 ? "+" : ""}{r.full_pnl_pct.toFixed(1)}%
                     </td>
                     <td className="py-1.5 text-right font-mono text-slate-400">{r.win_rate.toFixed(0)}%</td>
                     <td className="py-1.5 text-right font-mono text-slate-400">{r.profit_factor}</td>

@@ -34,6 +34,21 @@ async def optimizer_stop() -> Dict[str, Any]:
     return await get_optimizer().stop()
 
 
+@router.post("/auto/start")
+async def optimizer_auto_start(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    """
+    OTONOM mod: agent periyodik kendi tarar + en SAĞLAM config'i otomatik uygular.
+    Opsiyonel: { "auto_interval_hours": 24, "timeframes": ["4h","1d"],
+                 "n_candidates_per_tf": 80, "min_profit_factor": 1.05 }
+    """
+    return await get_optimizer().start_auto(overrides=body or None)
+
+
+@router.post("/auto/stop")
+async def optimizer_auto_stop() -> Dict[str, Any]:
+    return await get_optimizer().stop_auto()
+
+
 @router.get("/status")
 async def optimizer_status() -> Dict[str, Any]:
     return get_optimizer().status()

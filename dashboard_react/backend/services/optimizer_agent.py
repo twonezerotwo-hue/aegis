@@ -45,6 +45,10 @@ class OptimizerConfig:
     oos_fraction: float = 0.30         # son %30 = out-of-sample test
     min_trades: int = 12               # istatistiksel anlamlılık
     seed: int = 42
+    # ── Otonom mod ──────────────────────────────────────────────────────────
+    auto_enabled: bool = False         # periyodik kendi kendine yeniden optimize et
+    auto_interval_hours: float = 24.0  # her N saatte bir tara
+    min_profit_factor: float = 1.05    # KAPI: PF<1.05 config UYGULANMAZ (kırılgan)
 
 
 @dataclass
@@ -70,6 +74,11 @@ class OptimizerAgent:
         self.state = OptimizerState()
         self._task: Optional[asyncio.Task] = None
         self.all_results: list[dict] = []
+        self._stop_flag: bool = False
+        self._auto_task = None
+        self._auto_running = False
+        self.last_auto_run = None
+        self.next_auto_run = None
 
     # ── Parametre uzayı (HER ŞEY) ──────────────────────────────────────────────
     @staticmethod
@@ -199,12 +208,15 @@ class OptimizerAgent:
         self.all_results = []
         self.state.total = self.config.n_candidates_per_tf * len(self.config.timeframes)
         self.state.evaluated = 0
+        self.state.running = True   # FIX: _run kendi bayrağını yönetir (auto modda da çalışsın)
+        self._stop_flag = False
 
         for tf_i, tf in enumerate(self.config.timeframes):
             self.state.current_tf = tf
             candidates = self._sample(self.config.n_candidates_per_tf, self.config.seed + tf_i)
             for ps in candidates:
-                if not self.state.running:   # durduruldu
+                if self._stop_flag:   # kullanıcı durdurdu
+                    self.state.running = False
                     return
                 res = await self._evaluate(bt, tf, ps, start_dt, end_dt, news_fetcher, split_ts)
                 if res:
@@ -214,32 +226,65 @@ class OptimizerAgent:
                 # Event loop'a nefes aldır — status/diğer istekler bloke olmasın
                 await asyncio.sleep(0.01)
 
-        # ── Sıralama: OOS-doğrulanmış olanlar arasında OOS PnL maks ────────────
-        validated = [r for r in self.all_results if r["oos_validated"]]
-        validated.sort(key=lambda x: (x["oos_pnl_pct"] or -999), reverse=True)
-        # Doğrulanmamışlar (referans için) full PnL'e göre
-        unvalidated = [r for r in self.all_results if not r["oos_validated"]]
+        # ── AKILLI SEÇİM: kapı + sağlam skor ──────────────────────────────────
+        # Agent kırılgan/sağlam ikilemini KENDİ çözer. İki katmanlı:
+        #   1) KAPI: OOS'de kârlı VE profit_factor >= min_pf (kırılgan eler)
+        #   2) SIRALAMA: sağlam bileşik skor (Sharpe + PF + OOS PnL − drawdown)
+        # Böylece PF=0.71 gibi kırılgan ama yüksek-PnL config asla uygulanmaz.
+        min_pf = self.config.min_profit_factor
+
+        def robust_score(r: dict) -> float:
+            oos = r.get("oos_pnl_pct") or 0.0
+            sharpe = r.get("sharpe") or 0.0
+            pf = min(r.get("profit_factor") or 0.0, 3.0)
+            dd = abs(r.get("max_dd_pct") or 0.0)
+            # Risk-ayarlı kalite: Sharpe ve PF baskın, getiri katkı, drawdown ceza
+            return (sharpe * 8 * 0.32
+                    + pf * 14 * 0.28
+                    + oos * 1.5 * 0.22
+                    - dd * 0.6 * 0.18)
+
+        # Kapı: OOS kârlı + yeterli profit factor (pozitif beklenti)
+        eligible = [r for r in self.all_results
+                    if r.get("oos_validated") and (r.get("profit_factor") or 0) >= min_pf]
+        eligible.sort(key=robust_score, reverse=True)
+        for r in eligible:
+            r["robust_score"] = round(robust_score(r), 3)
+
+        # Doğrulanmış ama kapıyı geçemeyenler (referans)
+        validated = [r for r in self.all_results if r.get("oos_validated")]
+        validated.sort(key=lambda x: (x.get("oos_pnl_pct") or -999), reverse=True)
+        unvalidated = [r for r in self.all_results if not r.get("oos_validated")]
         unvalidated.sort(key=lambda x: x["full_pnl_pct"], reverse=True)
 
-        self.state.best = validated[0] if validated else None
+        self.state.best = eligible[0] if eligible else None
 
-        # ── OTOMATİK UYGULA — ama yalnız OOS-doğrulanmış kârlı config ──────────
-        if validated:
-            best = validated[0]
+        # ── OTOMATİK UYGULA — kapıyı geçen en SAĞLAM config ────────────────────
+        if eligible:
+            best = eligible[0]
             self._apply_config(best)
             self.state.applied = best
             self.state.message = (
-                f"✓ Uygulandı: {best['timeframe']} OOS PnL=+{best['oos_pnl_pct']:.1f}% "
-                f"(full {best['full_pnl_pct']:+.1f}%, {best['num_trades']} işlem)"
+                f"✓ Uygulandı: {best['timeframe']} {'Kont' if best['params']['contrarian'] else 'Mom'} · "
+                f"sağlam skor={best['robust_score']} · OOS+{best['oos_pnl_pct']:.1f}% · "
+                f"PF={best['profit_factor']} · Sharpe={best['sharpe']} · DD={best['max_dd_pct']}%"
+            )
+        elif validated:
+            self.state.message = (
+                f"⚠ {len(validated)} config OOS kârlı AMA hiçbiri PF≥{min_pf} kapısını geçemedi "
+                f"(hepsi kırılgan, negatif beklenti) → mevcut ayar KORUNDU."
             )
         else:
             self.state.message = (
                 "⚠ Hiçbir config OOS testini geçemedi (görülmemiş veride kârlı değil) → "
                 "mevcut ayar KORUNDU. Overfitting'den otomatik kaçınıldı."
             )
+        # Sıralanmış listeyi sağlam-skora göre sakla (UI bunu gösterir)
+        validated = eligible if eligible else validated
 
         # Sonuçları kaydet
         self._save_results(validated[:10], unvalidated[:5])
+        self.state.running = False   # tur bitti
 
     def _apply_config(self, best: dict):
         """En iyi OOS-doğrulanmış config'i sisteme yaz (backtest bunu override okur)."""
@@ -253,6 +298,7 @@ class OptimizerAgent:
                 "is_pnl_pct": best["is_pnl_pct"], "win_rate": best["win_rate"],
                 "profit_factor": best["profit_factor"], "sharpe": best["sharpe"],
                 "max_dd_pct": best["max_dd_pct"], "num_trades": best["num_trades"],
+                "robust_score": best.get("robust_score"),
             },
         }
         try:
@@ -300,20 +346,82 @@ class OptimizerAgent:
         return {"status": "started", **self.status()}
 
     async def stop(self) -> dict:
+        self._stop_flag = True
         self.state.running = False
         return {"status": "stopped", **self.status()}
+
+    # ── OTONOM MOD: periyodik kendi kendine yeniden optimize + uygula ─────────
+    _auto_task: Optional[asyncio.Task] = None
+    _auto_running: bool = False
+    last_auto_run: Optional[str] = None
+    next_auto_run: Optional[str] = None
+
+    async def start_auto(self, overrides: Optional[dict] = None) -> dict:
+        """Otonom mod: her auto_interval_hours'ta kendi tarar + en sağlamı uygular."""
+        if overrides:
+            for k, v in overrides.items():
+                if hasattr(self.config, k):
+                    setattr(self.config, k, v)
+        self.config.auto_enabled = True
+        if self._auto_running:
+            return {"status": "auto_already_running", "auto": self.auto_status()}
+        self._auto_running = True
+
+        async def _loop():
+            # Açılışta hemen bir tur (kullanıcı sonucu hemen görsün)
+            while self._auto_running:
+                try:
+                    if not self.state.running:
+                        self.last_auto_run = datetime.now(timezone.utc).isoformat()
+                        await self._run()
+                except Exception as exc:
+                    self.state.last_error = str(exc)[:300]
+                    logger.error("auto optimize error: %s", exc, exc_info=True)
+                # Sonraki tura kadar bekle (kesintiye uğrayabilir)
+                import time as _t
+                interval = max(600, int(self.config.auto_interval_hours * 3600))
+                self.next_auto_run = datetime.fromtimestamp(_t.time() + interval, tz=timezone.utc).isoformat()
+                slept = 0
+                while self._auto_running and slept < interval:
+                    await asyncio.sleep(10); slept += 10
+
+        self._auto_task = asyncio.get_event_loop().create_task(_loop())
+        logger.info("OPTIMIZER_AUTO_STARTED interval=%.1fh", self.config.auto_interval_hours)
+        return {"status": "auto_started", "auto": self.auto_status()}
+
+    async def stop_auto(self) -> dict:
+        self._auto_running = False
+        self.config.auto_enabled = False
+        self.next_auto_run = None
+        return {"status": "auto_stopped", "auto": self.auto_status()}
+
+    def auto_status(self) -> dict:
+        return {
+            "auto_enabled": self._auto_running,
+            "interval_hours": self.config.auto_interval_hours,
+            "last_auto_run": self.last_auto_run,
+            "next_auto_run": self.next_auto_run,
+            "min_profit_factor": self.config.min_profit_factor,
+        }
 
     def status(self) -> dict:
         s = asdict(self.state)
         s["config"] = asdict(self.config)
         s["results_count"] = len(self.all_results)
+        s["auto"] = self.auto_status()
         return _to_native(s)
 
     def results(self, limit: int = 15) -> dict:
-        validated = [r for r in self.all_results if r["oos_validated"]]
-        validated.sort(key=lambda x: (x["oos_pnl_pct"] or -999), reverse=True)
+        # Sağlam-skora göre sıralı (kapıyı geçenler)
+        min_pf = self.config.min_profit_factor
+        eligible = [r for r in self.all_results
+                    if r.get("oos_validated") and (r.get("profit_factor") or 0) >= min_pf]
+        eligible.sort(key=lambda x: x.get("robust_score", -999), reverse=True)
+        if not eligible:  # kapıyı geçen yoksa OOS-kârlıları göster
+            eligible = [r for r in self.all_results if r.get("oos_validated")]
+            eligible.sort(key=lambda x: (x.get("oos_pnl_pct") or -999), reverse=True)
         return _to_native({
-            "validated": validated[:limit],
+            "validated": eligible[:limit],
             "total_evaluated": len(self.all_results),
             "applied": self.state.applied,
         })
