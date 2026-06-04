@@ -77,6 +77,10 @@ latest_backtest_id: str | None = None
 _OHLCV_CACHE: Dict[str, pd.DataFrame] = {}
 _OHLCV_CACHE_MAX_ITEMS = 64
 
+# Sinyal yönü override (None=TF varsayılanı, True=kontrarian, False=momentum)
+# Deney/optimizasyon scriptleri bunu set edebilir. Production'da None kalır.
+_CONTRARIAN_OVERRIDE: bool | None = None
+
 
 def get_score_attribution(module: str, score: float, macro: dict = None, price_data: dict = None) -> list:
     """Return top 3 contributors for a module score (simplified SHAP-like)."""
@@ -239,7 +243,12 @@ async def run_ai_backtest(
         # Use optimal static threshold by default (explicit value forces static mode,
         # None triggers dynamic regime-adjusted mode which generates 73 vs 29 trades).
         # Static 1.3 gave WR=58.6%, Sharpe=3.52 vs dynamic's WR=41.1%, Sharpe=0.61.
-        z_threshold   = _as_optional_float(request_data.get("z_threshold")) or 1.3
+        # TF-bazlı optimal z-threshold (iteratif optimizasyon, BTC 2022-2025):
+        #   1d kontrarian z=1.734 → WR=73.7%, kârlı (PF=1.06, PnL=+7.7%)
+        _TF_Z_DEFAULT = {"5m": 1.5, "15m": 1.4, "1h": 1.3, "4h": 1.3,
+                         "1d": 1.734, "3d": 1.7, "1w": 1.7}
+        z_threshold   = (_as_optional_float(request_data.get("z_threshold"))
+                         or _TF_Z_DEFAULT.get(timeframe, 1.3))
         kelly_cap     = _as_optional_float(request_data.get("kelly_cap"))
         rsi_lower     = _as_optional_int(request_data.get("rsi_lower"))
         rsi_upper     = _as_optional_int(request_data.get("rsi_upper"))
@@ -255,10 +264,12 @@ async def run_ai_backtest(
             "15m": {"sl": -0.04, "tp": 0.08, "ze_long":  0.15, "ze_short": -0.15, "adx": 20},
             "1h":  {"sl": -0.05, "tp": 0.10, "ze_long":  0.10, "ze_short": -0.10, "adx": 20},
             "4h":  {"sl": -0.06, "tp": 0.15, "ze_long":  0.05, "ze_short": -0.05, "adx": 28},
-            # Kontrarian mod için z_exit = 0.0: consensus nötre dönünce çık (dip alıp geri döndüğünde sat)
-            "1d":  {"sl": -0.08, "tp": 0.22, "ze_long":  0.00, "ze_short":  0.00, "adx": 18},
-            "3d":  {"sl": -0.10, "tp": 0.28, "ze_long":  0.10, "ze_short": -0.10, "adx": 15},
-            "1w":  {"sl": -0.12, "tp": 0.35, "ze_long":  0.20, "ze_short": -0.20, "adx": 14},
+            # 1d KONTRARIAN — iteratif optimizasyon şampiyonu (BTC 2022-2025):
+            #   WR=73.7% PF=1.06 PnL=+7.7% Sharpe=6.39 MaxDD=2.4% (19 işlem)
+            #   Dip al (z<-1.73 & trend↑), z geri -0.285'e dönünce sat, geniş SL
+            "1d":  {"sl": -0.106, "tp": 0.153, "ze_long": -0.285, "ze_short": 0.285, "adx": 13},
+            "3d":  {"sl": -0.10, "tp": 0.28, "ze_long": -0.25, "ze_short": 0.25, "adx": 14},
+            "1w":  {"sl": -0.12, "tp": 0.35, "ze_long": -0.30, "ze_short": 0.30, "adx": 13},
         }
         _tf_def = _TF_EXIT_DEFAULTS.get(timeframe, _TF_EXIT_DEFAULTS["4h"])
 
@@ -1316,7 +1327,8 @@ def generate_zscore_signals(
         #   z >  threshold AND trend_up = 0  → SHORT (tepe sat, trend aşağı)
         # Neden: günlük timeframe'de consensus yüksekken HERKES AL diyor = tepe
         #        consensus düşükken herkes korku içinde = dip fırsatı (klasik)
-        "1d":   {"window":  30, "min_periods":  5, "threshold": 0.65, "adx_default": 18,
+        # 1d: iteratif optimizasyon → kontrarian z=1.734 adx=13 (WR=73.7% kârlı)
+        "1d":   {"window":  30, "min_periods":  5, "threshold": 1.734, "adx_default": 13,
                  "require_macd": False, "rsi_lo": 28, "rsi_hi": 78, "warmup_pct": 0.15,
                  "contrarian": True},
         "3d":   {"window":  20, "min_periods":  4, "threshold": 0.55, "adx_default": 15,
@@ -1334,7 +1346,8 @@ def generate_zscore_signals(
     effective_rsi_lower = int(rsi_lower)      if rsi_lower  is not None else _p["rsi_lo"]
     effective_rsi_upper = int(rsi_upper)      if rsi_upper  is not None else _p["rsi_hi"]
     require_macd        = _p["require_macd"]  # 1d/1w için False → daha çok sinyal
-    contrarian_mode     = _p.get("contrarian", False)
+    # Override: deney/optimizasyon için modül seviyesinden zorlanabilir (None=TF default)
+    contrarian_mode     = _CONTRARIAN_OVERRIDE if _CONTRARIAN_OVERRIDE is not None else _p.get("contrarian", False)
     # contrarian=True (1d/1w):
     #   LONG  ← z < -threshold AND trend_up   (dip al, trend yukarı)
     #   SHORT ← z > +threshold AND trend_down  (tepe sat, trend aşağı)
