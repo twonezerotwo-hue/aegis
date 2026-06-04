@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { paperTradingApi, PaperTradingSession } from '../services/paperTradingApi';
+import { PaperAutoPanel } from '../components/paper/PaperAutoPanel';
 
 const PaperTrading: React.FC = () => {
   const [session, setSession] = useState<PaperTradingSession | null>(null);
@@ -73,10 +74,13 @@ const PaperTrading: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* ÖNCELİK: Agent config'iyle otonom paper trading */}
+      <PaperAutoPanel />
+
+      {/* Manuel paper trading (eski) */}
       <div className="bg-white dark:bg-gray-900 rounded-lg shadow-lg p-6 border border-gray-200 dark:border-gray-700">
         <h1 className="text-3xl font-bold text-gray-800 dark:text-white mb-4">
-          📝 Paper Trading
+          📝 Paper Trading (Manuel)
         </h1>
         <p className="text-gray-600 dark:text-gray-400 mb-4">
           Practice trading with $100,000 virtual capital
