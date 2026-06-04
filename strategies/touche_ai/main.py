@@ -471,13 +471,39 @@ async def _analyze_timeframe(symbol: str, timeframe: str) -> dict[str, Any]:
         logger.warning("[TOUCHE-7F] orchestrator failed (%s %s): %s — RSI fallback",
                        binance_symbol, timeframe, exc)
 
-    # Orchestrator başarılıysa onun EQS'ini kullan, yoksa RSI fallback
-    if orchestrator_eqs is not None:
+    # ── DÜNYA ÇAPINDA KONFLUENS MOTORU (18+ gösterge) ─────────────────────────
+    # Birincil EQS/sinyal sürücüsü. Aşırı durumları (RSI<20) doğru yakalar:
+    # orchestrator "nötr bekle" derken konfluens RSI=12'yi STRONG_BUY'a yükseltir.
+    confluence = None
+    try:
+        import os as _os, sys as _sys
+        _app_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if _app_dir not in _sys.path:
+            _sys.path.insert(0, _app_dir)
+        from touche_ai.src.indicators.confluence import analyze_confluence
+        confluence = analyze_confluence(df_pd)
+    except Exception as exc:
+        logger.warning("[CONFLUENCE] %s %s başarısız: %s", binance_symbol, timeframe, exc)
+
+    if confluence and confluence.get("available"):
+        # Konfluens birincil — orchestrator EQS ile harmanla (%70 konfluens + %30 orch)
+        conf_eqs = float(confluence["eqs"])
+        if orchestrator_eqs is not None:
+            eqs = round(conf_eqs * 0.70 + orchestrator_eqs * 0.30, 2)
+        else:
+            eqs = round(conf_eqs, 2)
+        signal = confluence["signal"]   # STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL
+        engine = "confluence-18+orchestrator" if orchestrator_eqs is not None else "confluence-18"
+        logger.info("[CONFLUENCE] %s %s → EQS=%.1f signal=%s conviction=%.0f extremes=%s",
+                    binance_symbol, timeframe, eqs, signal, confluence["conviction"], confluence["extremes"])
+    elif orchestrator_eqs is not None:
         eqs    = orchestrator_eqs
         signal = orchestrator_signal or _signal_from_eqs(eqs)
+        engine = "7-phase-orchestrator"
     else:
         eqs    = round(min(95.0, max(5.0, rsi)), 2)
         signal = _signal_from_eqs(eqs)
+        engine = "rsi-fallback"
 
     timestamp = fetch_meta.get("timestamp")
     return {
@@ -487,8 +513,9 @@ async def _analyze_timeframe(symbol: str, timeframe: str) -> dict[str, Any]:
         "rsi_zone": "oversold" if rsi < 30 else "overbought" if rsi > 70 else "neutral",
         "macd":     macd,
         "ema_trend": ema,
+        "confluence": confluence if confluence and confluence.get("available") else None,
         "phase_results": phase_summaries,
-        "engine": "7-phase-orchestrator" if orchestrator_eqs is not None else "rsi-fallback",
+        "engine": engine,
         "timestamp":   timestamp,
         "source":      fetch_meta.get("source", "binance_public"),
         "verified":    bool(fetch_meta.get("verified")),

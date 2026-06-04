@@ -86,7 +86,8 @@ _TF_FUNDAMENTAL_LEVEL_W: dict[str, float] = {
 # Touche multi-TF ağırlıkları: mesafeye göre yarıya düşür
 _TF_ORDER = {"15m": 1, "1h": 2, "4h": 3, "1d": 4, "1w": 5}
 _TF_SIGNAL_SCORE: dict[str, float] = {
-    "BUY": 0.74, "HOLD": 0.50, "NEUTRAL": 0.50, "SELL": 0.26,
+    "STRONG_BUY": 0.92, "BUY": 0.74, "HOLD": 0.50, "NEUTRAL": 0.50,
+    "CONFLICTED": 0.50, "SELL": 0.26, "STRONG_SELL": 0.08,
 }
 
 
@@ -456,34 +457,57 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
                     f"{cross_str}"
                 )
 
-        buy_count  = sum(1 for v in tf.values() if str(v).upper() == "BUY")
-        sell_count = sum(1 for v in tf.values() if str(v).upper() == "SELL")
+        # ── KONFLUENS MOTORU verisi (18+ gösterge) ────────────────────────────
+        # En zengin/extreme TF'in konfluensini bul
+        best_conf = None
+        best_conf_tf = None
+        for tf_k, tf_d in td.items():
+            if isinstance(tf_d, dict):
+                cf = tf_d.get("confluence")
+                if cf and cf.get("available"):
+                    # Konviksiyon × aşırı sayısı en yüksek olanı seç
+                    weight = cf.get("conviction", 0) + len(cf.get("extremes", [])) * 15
+                    if best_conf is None or weight > best_conf[0]:
+                        best_conf = (weight, cf); best_conf_tf = tf_k
+
+        if best_conf:
+            cf = best_conf[1]
+            conv = cf.get("conviction", 0)
+            sig_cf = cf.get("signal", "HOLD")
+            extremes = cf.get("extremes", [])
+            confs = cf.get("confluences", [])
+            rev = cf.get("reversal_note")
+            n_votes = cf.get("vote_count", 0)
+            sig_tr = {"STRONG_BUY": "GÜÇLÜ AL", "BUY": "AL", "HOLD": "BEKLE",
+                      "SELL": "SAT", "STRONG_SELL": "GÜÇLÜ SAT"}.get(sig_cf, sig_cf)
+
+            parts_out = [f"EQS {eqs:.1f}/100 · {n_votes} gösterge konsensüsü → {sig_tr} (konviksiyon %{conv:.0f})"]
+            if rev:
+                parts_out.append(f"🔥 {rev}")
+            elif extremes:
+                ext_short = ", ".join(e.split(":")[0] for e in extremes[:4])
+                parts_out.append(f"Aşırı: {ext_short}")
+            if confs:
+                parts_out.append("Hizalı: " + ", ".join(confs[:5]))
+            # Anahtar göstergeler
+            cf_tf_data = td.get(best_conf_tf, {})
+            ci = (cf_tf_data.get("confluence") or {}).get("indicators", {})
+            if ci:
+                parts_out.append(
+                    f"{best_conf_tf.upper()}: RSI={ci.get('rsi','?')} Stoch={ci.get('stoch','?')} "
+                    f"CCI={ci.get('cci','?')} ADX={ci.get('adx','?')} Ichimoku={ci.get('ichimoku','?')}"
+                )
+            return " · ".join(parts_out) + "."
+
+        # Fallback (konfluens yoksa eski format)
+        buy_count  = sum(1 for v in tf.values() if str(v).upper() in ("BUY", "STRONG_BUY"))
+        sell_count = sum(1 for v in tf.values() if str(v).upper() in ("SELL", "STRONG_SELL"))
         hold_count = sum(1 for v in tf.values() if str(v).upper() in ("HOLD", "NEUTRAL"))
-        # FIX: buy==sell==0 (hepsi HOLD) "Karışık" değil "Tümü Nötr"
-        if buy_count > sell_count:
-            bias = "Çoğunluk AL"
-        elif sell_count > buy_count:
-            bias = "Çoğunluk SAT"
-        elif hold_count > 0 and buy_count == 0 and sell_count == 0:
-            bias = "Tümü Nötr (Bekleme)"
-        else:
-            bias = "Karışık sinyal"
-
-        # Çelişki tespiti: RSI aşırı uçta ama sinyal HOLD → uyarı ekle
-        contradiction = ""
-        if td:
-            for tf_k, tf_d in td.items():
-                if isinstance(tf_d, dict):
-                    r = tf_d.get("rsi", 50)
-                    sig_tf = str(tf.get(tf_k, "")).upper()
-                    if r < 20 and sig_tf in ("HOLD", "NEUTRAL", ""):
-                        contradiction = f" ⚠ {tf_k.upper()} RSI={r:.0f} aşırı satım ama sinyal nötr — dip fırsatı olabilir"
-                        break
-                    if r > 80 and sig_tf in ("HOLD", "NEUTRAL", ""):
-                        contradiction = f" ⚠ {tf_k.upper()} RSI={r:.0f} aşırı alım ama sinyal nötr — tepe riski"
-                        break
-
-        return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}.{indicator_hint}{contradiction}"
+        if buy_count > sell_count:    bias = "Çoğunluk AL"
+        elif sell_count > buy_count:  bias = "Çoğunluk SAT"
+        elif hold_count > 0 and buy_count == 0 and sell_count == 0:  bias = "Tümü Nötr (Bekleme)"
+        else:                         bias = "Karışık sinyal"
+        return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}.{indicator_hint}"
 
     if module == "fundamental":
         mvrv = raw.get("mvrv_z_score")
