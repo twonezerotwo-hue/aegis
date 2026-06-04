@@ -215,13 +215,21 @@ def _extract_live_scores(
         "news": None, "sentinel": None, "quantum": None,
     }
 
-    # ── TOUCHE: Multi-TF ağırlıklı konsensüs ─────────────────────────────────
+    # ── TOUCHE: EQS skoru (birincil) + tf_signals yön düzeltmesi ─────────────
+    # DÜZELTME: Eskiden skor SADECE tf_signals'tan geliyordu (hepsi HOLD = 0.5
+    # → hep 50). Artık Touche'un gerçek EQS'i (TF-duyarlı, 0-100) birincil sürücü,
+    # tf_signals yön nüansı ekler.
     touche = payloads.get("touche")
     if touche and not touche.get("fallback_used", False):
         tf_signals = touche.get("tf_signals") or {}
         tf_key = timeframe.lower()
         current_ord = _TF_ORDER.get(tf_key, 2)
 
+        # 1) EQS bazlı temel skor (gerçek, TF-duyarlı)
+        eqs = float(touche.get("eqs") or touche.get("eqs_score") or 50.0)
+        eqs_score = min(max(eqs / 100.0, 0.0), 1.0)
+
+        # 2) tf_signals yön ağırlığı (TF-mesafe ağırlıklı)
         weighted_sum = 0.0
         weight_total = 0.0
         for tf, sig in tf_signals.items():
@@ -233,12 +241,11 @@ def _extract_live_scores(
             val = _TF_SIGNAL_SCORE.get(str(sig).upper(), 0.50)
             weighted_sum += val * w
             weight_total += w
+        signal_score = (weighted_sum / weight_total) if weight_total > 0 else 0.5
 
-        if weight_total > 0:
-            scores["touche"] = round(weighted_sum / weight_total, 4)
-        else:
-            eqs = float(touche.get("eqs") or touche.get("eqs_score") or 50.0)
-            scores["touche"] = min(max(eqs / 100.0, 0.0), 1.0)
+        # 3) Harman: EQS %65 (skor büyüklüğü) + sinyal %35 (yön)
+        # Sinyaller HOLD (0.5) iken EQS belirleyici → TF değişince skor değişir.
+        scores["touche"] = round(eqs_score * 0.65 + signal_score * 0.35, 4)
 
     # ── FUNDAMENTAL: MVRV/NUPL (mock) + Fear&Greed (GERÇEK) harmanı ──────────
     # Emtia (XAU/XAG) için MVRV/NUPL zincir verisi anlamsız → atla

@@ -602,11 +602,23 @@ async def touche_analyze(symbol: str = "BTC", timeframe: str = "1h,4h", horizon:
     """
     sym = symbol.upper().strip()
 
-    # Horizon takes precedence over the raw timeframe param
+    # DÜZELTME: timeframe parametresi artık dikkate alınıyor.
+    # Açıkça bir timeframe verilmişse (gateway öyle çağırıyor) o TF birincil olur;
+    # yoksa horizon'un TF setini kullan.
     if horizon not in _VALID_HORIZONS:
         horizon = "medium"
     horizon_tfs = HORIZON_TF_MAP[horizon]
-    requested_tfs = horizon_tfs
+
+    # timeframe param parse (virgüllü liste veya tek TF)
+    _req_tfs = [t.strip() for t in str(timeframe).split(",") if t.strip()]
+    _valid_tf_set = {"5m", "15m", "1h", "4h", "1d", "1w", "1month"}
+    explicit_tfs = [t for t in _req_tfs if t in _valid_tf_set]
+
+    # Birincil TF: açıkça istenen ilk geçerli TF (EQS'i bu sürükler)
+    primary_tf = explicit_tfs[0] if explicit_tfs else None
+
+    # requested_tfs: açık TF varsa onlar, yoksa horizon seti
+    requested_tfs = explicit_tfs if explicit_tfs else horizon_tfs
 
     standard_tfs = ["15m", "1h", "4h", "1d"]
     for _tf in requested_tfs:
@@ -645,7 +657,16 @@ async def touche_analyze(symbol: str = "BTC", timeframe: str = "1h,4h", horizon:
             warnings or [f"No verified OHLCV data available for {sym}."],
         )
 
-    eqs = round(sum(requested_scores) / len(requested_scores), 2)
+    # DÜZELTME: Birincil TF varsa EQS onu yansıtsın (TF-duyarlılık).
+    # Birincil TF %70, diğer TF'ler %30 ağırlık → TF değişince EQS belirgin değişir.
+    if primary_tf and primary_tf in tf_eqs:
+        other_scores = [tf_eqs[tf] for tf in standard_tfs if tf in tf_eqs and tf != primary_tf]
+        if other_scores:
+            eqs = round(tf_eqs[primary_tf] * 0.70 + (sum(other_scores) / len(other_scores)) * 0.30, 2)
+        else:
+            eqs = round(tf_eqs[primary_tf], 2)
+    else:
+        eqs = round(sum(requested_scores) / len(requested_scores), 2)
     timestamps = [tf_results[tf].get("timestamp") for tf in requested_tfs if tf in tf_results]
     valid_timestamps = [ts for ts in timestamps if isinstance(ts, str) and ts.strip()]
     statuses = [str(tf_results[tf].get("data_status", "UNKNOWN")) for tf in requested_tfs if tf in tf_results]

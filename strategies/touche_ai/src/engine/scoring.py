@@ -116,24 +116,11 @@ class EQSScorer:
                 active_weights[phase_id] = adjusted_weight
             logger.info("volatility_adjusted_weights", regime=volatility_regime, weights=vol_adjustments)
 
-        # ── Bloklanmış Faz Kontrolü ───────────────────────────────────────────
-        blocking_phases = [r for r in phase_results if not r.passed]
-        if blocking_phases:
-            blocker = blocking_phases[0]
-            logger.warning(
-                "eqs_pipeline_blocked",
-                blocker_phase=blocker.phase_name,
-                reason=blocker.reason,
-            )
-            return EQSResult(
-                eqs_score=0.0,
-                weighted_scores={},
-                dominant_signal="NEUTRAL",
-                signal_strength="NO_TRADE",
-                confidence=0.0,
-            )
-
-        # ── Ağırlıklı Skor Hesabı ─────────────────────────────────────────────
+        # ── Ağırlıklı Skor Hesabı (HER ZAMAN — bloke olsa bile sürekli EQS) ───
+        # DÜZELTME: Eskiden 1 faz bloke olunca EQS=0 dönüyordu → hep NEUTRAL/50.
+        # Normal piyasada en az 1 faz hep bloke eder (sweep yok, zon yok vb.),
+        # bu yüzden EQS asla anlamlı değer almıyordu. Artık skor sürekli hesaplanır
+        # ve bloke eden fazlar YUMUŞAK CEZA uygular (sert sıfırlama yerine).
         total_weight = 0.0
         total_score = 0.0
         weighted_scores: Dict[str, float] = {}
@@ -155,8 +142,23 @@ class EQSScorer:
                 confidence=0.0,
             )
 
-        # Toplam ağırlık 1.0 değilse normalleştir
+        # Ağırlıklı ortalama (0-100 sürekli)
         eqs_score = round(total_score / total_weight, 2)
+
+        # ── Yumuşak Blok Cezası ───────────────────────────────────────────────
+        # Bloke eden faz sayısına göre EQS'i kademeli düşür (maks %55 ceza).
+        # Böylece EQS hem TF'e duyarlı kalır hem de bloke durumu yansıtır.
+        blocking_phases = [r for r in phase_results if not r.passed]
+        if blocking_phases:
+            block_ratio = len(blocking_phases) / max(len(phase_results), 1)
+            block_penalty = min(0.55, block_ratio * 0.75)
+            eqs_score = round(eqs_score * (1.0 - block_penalty), 2)
+            logger.info(
+                "eqs_soft_block",
+                blockers=[b.phase_name for b in blocking_phases],
+                penalty=round(block_penalty, 2),
+                eqs_after=eqs_score,
+            )
 
         # ── Ardışık Faz Uyumu Bonusu ──────────────────────────────────────────
         # Fazların art arda aynı yönde oy vermesi güven artırır (1+1+1 > 3 etkisi).
