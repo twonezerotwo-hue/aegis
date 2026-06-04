@@ -95,6 +95,25 @@ export const AgentControlPanel: React.FC = () => {
     }
   };
 
+  // Config güncelle (timeframe, interval, eşikler)
+  const updateConfig = async (patch: Record<string, any>, label: string) => {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await fetch(`${API_BASE}/api/agent/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      await r.json();
+      setMsg(`${label} güncellendi`);
+      fetchStatus();
+    } catch {
+      setMsg(`${label}: hata`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!status) {
     return (
       <div className="rounded-2xl border border-slate-700/60 bg-slate-900 p-5">
@@ -158,19 +177,83 @@ export const AgentControlPanel: React.FC = () => {
         {msg && <span className="text-[11px] text-slate-400">{msg}</span>}
       </div>
 
-      {/* Config özeti */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {[
-          { k: "Aralık", v: `${cfg.interval_sec}s` },
-          { k: "Timeframe", v: cfg.timeframe },
-          { k: "Min Güven", v: `${Math.round(cfg.min_confidence * 100)}%` },
-          { k: "Günlük Limit", v: `${status.signals_today}/${cfg.max_signals_per_day}` },
-        ].map(({ k, v }) => (
-          <div key={k} className="rounded-lg border border-slate-700/40 bg-slate-800/40 px-2.5 py-1.5">
-            <p className="text-[8px] uppercase tracking-widest text-slate-600">{k}</p>
-            <p className="font-mono text-xs font-bold text-slate-300">{v}</p>
+      {/* Timeframe seçici (interaktif) */}
+      <div>
+        <p className="mb-1.5 text-[9px] uppercase tracking-widest text-slate-600">Analiz Timeframe</p>
+        <div className="flex flex-wrap gap-1">
+          {(["5m", "15m", "1h", "4h", "1d", "1w"] as const).map(tf => (
+            <button
+              key={tf}
+              onClick={() => updateConfig({ timeframe: tf }, `Timeframe ${tf}`)}
+              disabled={busy || cfg.timeframe === tf}
+              className={`rounded-lg px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                cfg.timeframe === tf
+                  ? "bg-cyan-600 text-white"
+                  : "border border-slate-700 bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-slate-200"
+              } disabled:cursor-not-allowed`}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Hızlı ayarlar: aralık + min güven */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {/* Döngü aralığı */}
+        <div>
+          <p className="mb-1.5 text-[9px] uppercase tracking-widest text-slate-600">
+            Döngü Aralığı: <span className="text-slate-400">{cfg.interval_sec}s</span>
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {[60, 300, 900, 1800, 3600].map(s => (
+              <button
+                key={s}
+                onClick={() => updateConfig({ interval_sec: s }, `Aralık ${s}s`)}
+                disabled={busy || cfg.interval_sec === s}
+                className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-colors ${
+                  cfg.interval_sec === s
+                    ? "bg-slate-600 text-white"
+                    : "border border-slate-700 bg-slate-800/60 text-slate-500 hover:bg-slate-700"
+                }`}
+              >
+                {s < 60 ? `${s}s` : `${s / 60}dk`}
+              </button>
+            ))}
           </div>
-        ))}
+        </div>
+        {/* Min güven */}
+        <div>
+          <p className="mb-1.5 text-[9px] uppercase tracking-widest text-slate-600">
+            Min Güven: <span className="text-slate-400">{Math.round(cfg.min_confidence * 100)}%</span>
+          </p>
+          <div className="flex flex-wrap gap-1">
+            {[0.55, 0.60, 0.62, 0.65, 0.70].map(c => (
+              <button
+                key={c}
+                onClick={() => updateConfig({ min_confidence: c }, `Güven ${Math.round(c*100)}%`)}
+                disabled={busy || Math.abs(cfg.min_confidence - c) < 0.001}
+                className={`rounded-md px-2 py-1 text-[10px] font-semibold transition-colors ${
+                  Math.abs(cfg.min_confidence - c) < 0.001
+                    ? "bg-slate-600 text-white"
+                    : "border border-slate-700 bg-slate-800/60 text-slate-500 hover:bg-slate-700"
+                }`}
+              >
+                {Math.round(c * 100)}%
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Günlük limit göstergesi */}
+      <div className="flex items-center gap-2 text-[10px]">
+        <span className="uppercase tracking-widest text-slate-600">Günlük sinyal:</span>
+        <span className="font-mono font-bold text-slate-300">{status.signals_today}/{cfg.max_signals_per_day}</span>
+        <div className="h-1.5 w-24 rounded-full bg-slate-800">
+          <div className="h-1.5 rounded-full bg-amber-500"
+               style={{ width: `${Math.min(100, status.signals_today / cfg.max_signals_per_day * 100)}%` }} />
+        </div>
       </div>
 
       {/* İzlenen semboller */}

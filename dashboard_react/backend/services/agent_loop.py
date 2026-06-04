@@ -150,8 +150,8 @@ class AgentOrchestrator:
         return {"status": "stopped", **self.status()}
 
     async def _run_loop(self) -> None:
-        # Açılışta config'i yeniden oku (env değişmiş olabilir)
-        self.config = AgentConfig()
+        # NOT: config'i burada SIFIRLAMA — çalışma zamanı /config değişiklikleri
+        # (timeframe, interval vb.) korunmalı. Env yalnız __init__'te okunur.
         while not self._stop_evt.is_set():
             try:
                 await self._decision_cycle()
