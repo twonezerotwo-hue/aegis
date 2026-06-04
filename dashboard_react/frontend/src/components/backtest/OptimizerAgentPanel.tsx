@@ -237,8 +237,8 @@ export const OptimizerAgentPanel: React.FC = () => {
 
       <p className="mt-2 text-[9px] leading-4 text-slate-600">
         🛡 Güvenlik: aday config tüm geçmişte optimize edilir ama görülmemiş son %{Math.round((status.config?.oos_fraction ?? 0.3) * 100)}'te
-        (out-of-sample) de kârlı olmazsa otomatik UYGULANMAZ — overfitting'den kaçınmak için. Mock AI skorlarıyla; gerçek
-        forward-test ile teyit edilmeli.
+        (out-of-sample) de kârlı olmazsa otomatik UYGULANMAZ — overfitting'den kaçınmak için. Gerçek Binance OHLCV +
+        18-gösterge konfluens + gerçek haber verisiyle (mock yok). Paper trading ile canlı doğrulanır.
       </p>
     </div>
   );

@@ -248,37 +248,39 @@ def _extract_live_scores(
         # Sinyaller HOLD (0.5) iken EQS belirleyici → TF değişince skor değişir.
         scores["touche"] = round(eqs_score * 0.65 + signal_score * 0.35, 4)
 
-    # ── FUNDAMENTAL: MVRV/NUPL (mock) + Fear&Greed (GERÇEK) harmanı ──────────
-    # Emtia (XAU/XAG) için MVRV/NUPL zincir verisi anlamsız → atla
+    # ── FUNDAMENTAL: GERÇEK Fear&Greed (mock MVRV/NUPL artık KULLANILMIYOR) ──
+    # Emtia (XAU/XAG) için on-chain anlamsız → atla
     fundamental = payloads.get("fundamental")
     if fundamental and not is_commodity:
-        nupl = fundamental.get("nupl")
-        mvrv = fundamental.get("mvrv_z_score")
-        onchain_score = None
-        if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
-            nupl_f = float(nupl); mvrv_f = float(mvrv)
-            nupl_level = min(max((nupl_f + 0.5) / 1.5, 0.0), 1.0)
-            mvrv_level = min(max((4.0 - mvrv_f) / 4.0, 0.0), 1.0)
-            level_score = nupl_level * 0.6 + mvrv_level * 0.4
-            mvrv_healthy = 1.0 - min(1.0, abs(mvrv_f - 1.5) / 3.0)
-            nupl_pos     = min(max((nupl_f + 0.1) / 0.8, 0.0), 1.0)
-            momentum_score = nupl_pos * 0.65 + mvrv_healthy * 0.35
-            lw = _TF_FUNDAMENTAL_LEVEL_W.get(timeframe, 0.55)
-            mw = 1.0 - lw
-            onchain_score = level_score * lw + momentum_score * mw
+        quality = str(fundamental.get("quality", "")).lower()
+        is_mock = quality == "mock"
 
-        # Fear & Greed (GERÇEK veri): kontrarian — aşırı korku=bullish, açgözlülük=bearish
+        # On-chain skoru SADECE gerçek veriyse kullan (mock ise tamamen atla)
+        onchain_score = None
+        if not is_mock:
+            nupl = fundamental.get("nupl")
+            mvrv = fundamental.get("mvrv_z_score")
+            if isinstance(nupl, (int, float)) and isinstance(mvrv, (int, float)):
+                nupl_f = float(nupl); mvrv_f = float(mvrv)
+                nupl_level = min(max((nupl_f + 0.5) / 1.5, 0.0), 1.0)
+                mvrv_level = min(max((4.0 - mvrv_f) / 4.0, 0.0), 1.0)
+                level_score = nupl_level * 0.6 + mvrv_level * 0.4
+                mvrv_healthy = 1.0 - min(1.0, abs(mvrv_f - 1.5) / 3.0)
+                nupl_pos     = min(max((nupl_f + 0.1) / 0.8, 0.0), 1.0)
+                momentum_score = nupl_pos * 0.65 + mvrv_healthy * 0.35
+                lw = _TF_FUNDAMENTAL_LEVEL_W.get(timeframe, 0.55)
+                onchain_score = level_score * lw + momentum_score * (1.0 - lw)
+
+        # Fear & Greed (GERÇEK veri): kontrarian
         fng_val = fundamental.get("fear_greed_value")
         fng_score = None
         if isinstance(fng_val, (int, float)):
-            # F&G 0 (aşırı korku) → 0.85 (al), F&G 100 (açgözlülük) → 0.15 (sat)
             fng_score = 0.85 - (float(fng_val) / 100.0) * 0.70
 
-        # Harman: mock on-chain %40, gerçek F&G %60 (gerçek veriye ağırlık ver)
         if onchain_score is not None and fng_score is not None:
             scores["fundamental"] = round(onchain_score * 0.40 + fng_score * 0.60, 4)
         elif fng_score is not None:
-            scores["fundamental"] = round(fng_score, 4)        # sadece gerçek veri
+            scores["fundamental"] = round(fng_score, 4)        # SADECE gerçek F&G (mock atlandı)
         elif onchain_score is not None:
             scores["fundamental"] = round(onchain_score, 4)
 
@@ -510,27 +512,20 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
         return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}.{indicator_hint}"
 
     if module == "fundamental":
-        mvrv = raw.get("mvrv_z_score")
-        nupl = raw.get("nupl")
-        quality = raw.get("quality", "")
+        quality = str(raw.get("quality", "")).lower()
+        is_mock = quality == "mock"
         parts = []
-        if mvrv is not None:
-            parts.append(f"MVRV Z: {mvrv:.2f}")
-            if mvrv > 3.5:
-                parts.append("(aşırı değerli)")
-            elif mvrv < 0:
-                parts.append("(düşük değerli)")
-            else:
-                parts.append("(değerleme normal)")
-        if nupl is not None:
-            parts.append(f"NUPL: {nupl:.2f}")
-            if nupl > 0.75:
-                parts.append("(öfori — riskli)")
-            elif nupl < 0:
-                parts.append("(kapitülasyon)")
-            else:
-                parts.append("(ılımlı kâr)")
-        # Fear & Greed Index — GERÇEK veri (alternative.me)
+        # MVRV/NUPL SADECE gerçekse göster (mock ise gösterme — sahte sayı yok)
+        if not is_mock:
+            mvrv = raw.get("mvrv_z_score")
+            nupl = raw.get("nupl")
+            if mvrv is not None:
+                parts.append(f"MVRV Z: {mvrv:.2f} " +
+                             ("(aşırı değerli)" if mvrv > 3.5 else "(düşük değerli)" if mvrv < 0 else "(normal)"))
+            if nupl is not None:
+                parts.append(f"NUPL: {nupl:.2f} " +
+                             ("(öfori)" if nupl > 0.75 else "(kapitülasyon)" if nupl < 0 else "(ılımlı kâr)"))
+        # Fear & Greed Index — GERÇEK veri (alternative.me, ücretsiz)
         fng_val = raw.get("fear_greed_value")
         fng_cls = raw.get("fear_greed_class", "")
         if isinstance(fng_val, (int, float)):
@@ -538,11 +533,11 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
                 "Extreme Fear": "Aşırı Korku", "Fear": "Korku", "Neutral": "Nötr",
                 "Greed": "Açgözlülük", "Extreme Greed": "Aşırı Açgözlülük",
             }.get(fng_cls, fng_cls)
-            parts.append(f"✓ Korku&Açgözlülük: {int(fng_val)} ({fng_tr})")
-        if quality == "mock":
-            parts.append("⚠ MVRV/NUPL simüle")
+            parts.append(f"✓ Korku&Açgözlülük: {int(fng_val)} ({fng_tr}) — gerçek veri")
+        if is_mock:
+            parts.append("on-chain veri yok (canlı F&G kullanılıyor)")
         parts.append("📊 TF bağımsız")
-        return " · ".join(parts) + "." if parts else "On-chain veri bekleniyor."
+        return " · ".join(parts) + "." if parts else "Veri bekleniyor."
 
     if module == "news":
         impact = raw.get("crypto_impact_score", round(score * 100, 1))

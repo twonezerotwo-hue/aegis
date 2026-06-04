@@ -632,8 +632,8 @@ async def fetch_real_historical_data(
     """Fetch REAL historical OHLCV data from Binance using ccxt + REAL NEWS SENTIMENT"""
 
     if not CCXT_AVAILABLE:
-        logger.warning("ccxt not available, falling back to mock data")
-        return await generate_mock_historical_data(symbol, timeframe, start_date, end_date, news_fetcher, module_weights=module_weights, event_hint=event_hint)
+        # MOCK YOK: gerçek veri kaynağı yoksa hata ver (sahte veri üretme)
+        raise RuntimeError("Gerçek veri kaynağı (ccxt/Binance) yok — backtest mock veri kullanmaz.")
 
     try:
         cache_key = f"{symbol}|{timeframe}|{start_date.isoformat()}|{end_date.isoformat()}"
@@ -688,8 +688,8 @@ async def fetch_real_historical_data(
             df = df[(df['timestamp'] >= start_tz) & (df['timestamp'] <= end_tz)]
 
             if df.empty:
-                logger.warning(f"No data fetched for {symbol} {timeframe}, using mock fallback")
-                return await generate_mock_historical_data(symbol, timeframe, start_date, end_date, news_fetcher, module_weights=module_weights, event_hint=event_hint)
+                # MOCK YOK: gerçek veri boşsa hata ver
+                raise RuntimeError(f"Binance'de veri yok: {symbol} {timeframe} {start_date.date()}–{end_date.date()}")
 
             if len(_OHLCV_CACHE) >= _OHLCV_CACHE_MAX_ITEMS:
                 _OHLCV_CACHE.pop(next(iter(_OHLCV_CACHE)))
@@ -713,9 +713,9 @@ async def fetch_real_historical_data(
         return df
 
     except Exception as e:
-        logger.error(f"Error fetching real data from Binance: {e}")
-        logger.info("Falling back to mock data")
-        return await generate_mock_historical_data(symbol, timeframe, start_date, end_date, news_fetcher, module_weights=module_weights, event_hint=event_hint)
+        # MOCK YOK: gerçek veri çekilemezse hata fırlat (sahte veriye düşme)
+        logger.error(f"Gerçek Binance verisi çekilemedi: {e}")
+        raise
 
 
 async def generate_mock_historical_data(
@@ -773,6 +773,76 @@ async def generate_mock_historical_data(
     return df
 
 
+def _vectorized_confluence(df: pd.DataFrame) -> pd.Series:
+    """
+    18 göstergeli teknik konfluens — her bar için vektörize EQS (0-1).
+    Canlı Touche servisindeki confluence.py ile AYNI mantık, gerçek OHLCV'den.
+    Mock değil — RSI, Stoch, CCI, Williams%R, Bollinger, MACD, EMA ribbon,
+    MFI, ROC, ADX/DI göstergelerinin konviksiyon-ağırlıklı oylaması.
+    """
+    h, l, c = df["high"], df["low"], df["close"]
+    o = df["open"] if "open" in df.columns else c
+    v = df["volume"] if "volume" in df.columns else pd.Series(1e6, index=df.index)
+    idx = df.index
+    ema = lambda s, n: s.ewm(span=n, adjust=False).mean()
+    votes: list[tuple[pd.Series, float]] = []
+
+    # 1) RSI (aşırı uçlarda 2x)
+    rsi = calculate_rsi(c, 14)
+    votes.append((pd.Series(np.where(rsi < 20, 1.0, np.where(rsi > 80, -1.0,
+                  np.where(rsi < 30, 0.7, np.where(rsi > 70, -0.7, (50 - rsi) / 50 * 0.5)))), index=idx), 2.0))
+    # 2) Stochastic
+    ll, hh = l.rolling(14).min(), h.rolling(14).max()
+    stoch = (100 * (c - ll) / (hh - ll + 1e-10)).rolling(3).mean()
+    votes.append((pd.Series(np.where(stoch < 20, 0.8, np.where(stoch > 80, -0.8, (50 - stoch) / 50 * 0.4)), index=idx), 1.3))
+    # 3) CCI
+    tp = (h + l + c) / 3
+    cci = (tp - tp.rolling(20).mean()) / (0.015 * (tp - tp.rolling(20).mean()).abs().rolling(20).mean() + 1e-10)
+    votes.append((pd.Series(np.where(cci < -200, 1.0, np.where(cci > 200, -1.0,
+                  np.where(cci < -100, 0.6, np.where(cci > 100, -0.6, -cci / 100 * 0.3)))), index=idx), 1.4))
+    # 4) Williams %R
+    wr = -100 * (hh - c) / (hh - ll + 1e-10)
+    votes.append((pd.Series(np.where(wr < -90, 0.9, np.where(wr > -10, -0.9,
+                  np.where(wr < -80, 0.6, np.where(wr > -20, -0.6, (-50 - wr) / 50 * 0.3)))), index=idx), 1.2))
+    # 5) Bollinger %B
+    bb_mid, bb_std = c.rolling(20).mean(), c.rolling(20).std()
+    pct_b = (c - (bb_mid - 2 * bb_std)) / (4 * bb_std + 1e-10)
+    votes.append((pd.Series(np.where(pct_b < 0, 0.9, np.where(pct_b > 1, -0.9,
+                  np.where(pct_b < 0.2, 0.5, np.where(pct_b > 0.8, -0.5, (0.5 - pct_b) * 0.6)))), index=idx), 1.4))
+    # 6) MACD histogram + eğim
+    macd_line = ema(c, 12) - ema(c, 26)
+    hist = macd_line - ema(macd_line, 9)
+    macd_score = np.tanh(hist / (c * 0.005))
+    macd_score = np.where(hist > hist.shift(1), np.minimum(1, macd_score + 0.2), np.maximum(-1, macd_score - 0.2))
+    votes.append((pd.Series(macd_score, index=idx).fillna(0), 1.4))
+    # 7) EMA ribbon (9/21/50/200)
+    e9, e21, e50, e200 = ema(c, 9), ema(c, 21), ema(c, 50), ema(c, 200)
+    ribbon = ((c > e9).astype(int) + (e9 > e21).astype(int) + (e21 > e50).astype(int) + (e50 > e200).astype(int)
+              - (c < e9).astype(int) - (e9 < e21).astype(int) - (e21 < e50).astype(int) - (e50 < e200).astype(int))
+    votes.append((ribbon / 4.0, 1.3))
+    # 8) MFI
+    mf = tp * v
+    pos = mf.where(tp > tp.shift(), 0.0).rolling(14).sum()
+    neg = mf.where(tp < tp.shift(), 0.0).rolling(14).sum()
+    mfi = 100 - 100 / (1 + pos / (neg + 1e-10))
+    votes.append((pd.Series(np.where(mfi < 20, 0.8, np.where(mfi > 80, -0.8, (50 - mfi) / 50 * 0.4)), index=idx), 1.2))
+    # 9) ROC
+    roc = (c / c.shift(10) - 1) * 100
+    votes.append((np.tanh(roc / 5).fillna(0), 0.8))
+    # 10) ADX/DI yön
+    adx = calculate_adx(df, 14) if all(x in df.columns for x in ("high", "low", "close")) else pd.Series(25.0, index=idx)
+    up, dn = h.diff(), -l.diff()
+    pdm = pd.Series(np.where((up > dn) & (up > 0), up, 0.0), index=idx).ewm(alpha=1/14, adjust=False).mean()
+    mdm = pd.Series(np.where((dn > up) & (dn > 0), dn, 0.0), index=idx).ewm(alpha=1/14, adjust=False).mean()
+    di_dir = np.where(pdm > mdm, 1.0, -1.0)
+    votes.append((pd.Series(di_dir * np.minimum(1.0, adx / 40), index=idx).fillna(0), 1.3))
+
+    tot_w = sum(w for _, w in votes)
+    net = sum(s.clip(-1, 1).fillna(0) * w for s, w in votes) / tot_w
+    eqs = (0.5 + net.clip(-1, 1) * 0.45).clip(0.05, 0.95)
+    return eqs
+
+
 def add_ai_scores(
     df: pd.DataFrame,
     symbol: str = "BTC",
@@ -799,16 +869,21 @@ def add_ai_scores(
     else:
         df['adx'] = pd.Series(25.0, index=df.index)  # assume trending if no H/L
 
-    # ── TOUCHE EQS — FIX: MACD histogram, not macd/signal.abs() ─────────────
-    # Old bug: dividing MACD line by |signal line| explodes when signal~0 and
-    # loses direction at trend transitions. Use the actual histogram instead.
+    # ── TOUCHE EQS — GERÇEK 18-gösterge konfluens (canlı sistemle aynı) ──────
+    # Mock/basitleştirilmiş RSI+MACD yerine canlı Touche'un confluence motoru:
+    # RSI, Stoch, CCI, Williams%R, Bollinger, MACD, EMA ribbon, MFI, ROC, ADX/DI.
     macd_hist = df['macd'] - df['signal']
-    close_safe = df['close'].replace(0, np.nan).ffill()
-    macd_norm = (macd_hist / close_safe).fillna(0)          # relative to price
-    macd_score = (0.5 + macd_norm.clip(-0.03, 0.03) / 0.03 * 0.45).clip(0, 1)
-    rsi_score = df['rsi'].fillna(50) / 100.0
-    df['touche_score'] = normalize_score(rsi_score * 0.55 + macd_score * 0.45)
-    df['macd_hist'] = macd_hist  # exposed for attribution
+    df['macd_hist'] = macd_hist  # attribution için
+    try:
+        df['touche_score'] = _vectorized_confluence(df).clip(0, 1)
+        logger.info("Touche: 18-gosterge GERCEK konfluens (vektorize)")
+    except Exception as _conf_exc:
+        logger.warning("Konfluens basarisiz (%s) — RSI+MACD fallback", _conf_exc)
+        close_safe = df['close'].replace(0, np.nan).ffill()
+        macd_norm = (macd_hist / close_safe).fillna(0)
+        macd_score = (0.5 + macd_norm.clip(-0.03, 0.03) / 0.03 * 0.45).clip(0, 1)
+        rsi_score = df['rsi'].fillna(50) / 100.0
+        df['touche_score'] = normalize_score(rsi_score * 0.55 + macd_score * 0.45)
 
     # ── TREND MODULE (NEW) — EMA50/EMA200 golden-cross ───────────────────────
     # Critical for 6-year test: without trend filter the z-score system
