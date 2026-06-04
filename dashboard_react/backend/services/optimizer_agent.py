@@ -41,7 +41,9 @@ class OptimizerConfig:
     start_date: str = "2022-10-01"
     end_date: str = "2025-09-28"
     initial_capital: float = 100000.0
-    n_candidates_per_tf: int = 80      # TF başına aday sayısı
+    n_candidates_per_tf: int = 80      # TF başına aday sayısı (tur başına)
+    refine_rounds: int = 2             # İTERASYON: broad + N daraltma turu (interpolasyon)
+    refine_top_k: int = 8              # her turdan en iyi K aday etrafında daralt
     oos_fraction: float = 0.30         # son %30 = out-of-sample test
     min_trades: int = 12               # istatistiksel anlamlılık
     seed: int = 42
@@ -100,8 +102,9 @@ class OptimizerAgent:
             "contrarian":     [0.0, 1.0],
         }
 
-    def _sample(self, n: int, seed: int) -> list[dict]:
-        bounds = self._param_bounds()
+    def _sample(self, n: int, seed: int, bounds: Optional[dict] = None) -> list[dict]:
+        """Latin Hypercube örnekleme (permütasyon). bounds verilirse o uzayda örnekler."""
+        bounds = bounds or self._param_bounds()
         try:
             from scipy.stats.qmc import LatinHypercube, scale
             s = LatinHypercube(d=len(bounds), seed=seed)
@@ -115,6 +118,37 @@ class OptimizerAgent:
             random.seed(seed)
             return [{k: lo + random.random() * (hi - lo) for k, (lo, hi) in bounds.items()}
                     for _ in range(n)]
+
+    def _refine_bounds(self, top: list[dict]) -> dict:
+        """
+        İNTERPOLASYON: en iyi adayların etrafında arama uzayını daralt.
+        Her param için top'ların min-max'ı ± %20 marj → bir sonraki tur burada arar.
+        """
+        broad = self._param_bounds()
+        if not top:
+            return broad
+        # top'lardan ham param değerlerini çıkar (normalize öncesi yaklaşık geri çevir)
+        refined = {}
+        for key, (blo, bhi) in broad.items():
+            vals = []
+            for r in top:
+                p = r.get("params", {})
+                if key == "contrarian":
+                    vals.append(1.0 if p.get("contrarian") else 0.0)
+                elif key.startswith("w_"):
+                    w = p.get("weights", {}).get(key[2:])
+                    if w is not None:
+                        vals.append(w)
+                else:
+                    v = p.get(key)
+                    if v is not None:
+                        vals.append(float(v))
+            if not vals:
+                refined[key] = [blo, bhi]; continue
+            lo_v, hi_v = min(vals), max(vals)
+            margin = (bhi - blo) * 0.20
+            refined[key] = [max(blo, lo_v - margin), min(bhi, hi_v + margin)]
+        return refined
 
     # ── Tek aday değerlendirme (in-sample + out-of-sample) ─────────────────────
     async def _evaluate(self, bt, tf: str, ps: dict, start_dt, end_dt, news_fetcher, split_ts) -> Optional[dict]:
@@ -206,25 +240,42 @@ class OptimizerAgent:
         split_ts = split_dt.isoformat()
 
         self.all_results = []
-        self.state.total = self.config.n_candidates_per_tf * len(self.config.timeframes)
+        n_rounds = 1 + max(0, self.config.refine_rounds)
+        self.state.total = self.config.n_candidates_per_tf * len(self.config.timeframes) * n_rounds
         self.state.evaluated = 0
         self.state.running = True   # FIX: _run kendi bayrağını yönetir (auto modda da çalışsın)
         self._stop_flag = False
 
         for tf_i, tf in enumerate(self.config.timeframes):
             self.state.current_tf = tf
-            candidates = self._sample(self.config.n_candidates_per_tf, self.config.seed + tf_i)
-            for ps in candidates:
-                if self._stop_flag:   # kullanıcı durdurdu
-                    self.state.running = False
-                    return
-                res = await self._evaluate(bt, tf, ps, start_dt, end_dt, news_fetcher, split_ts)
-                if res:
-                    self.all_results.append(_to_native(res))
-                self.state.evaluated += 1
-                self.state.progress = round(self.state.evaluated / max(self.state.total, 1), 3)
-                # Event loop'a nefes aldır — status/diğer istekler bloke olmasın
-                await asyncio.sleep(0.01)
+            tf_results: list[dict] = []
+            bounds = self._param_bounds()   # tur 1: geniş uzay
+
+            # ── İTERASYON: broad → daraltma turları (interpolasyon) ───────────
+            for rnd in range(n_rounds):
+                self.state.current_tf = f"{tf} (tur {rnd+1}/{n_rounds})"
+                candidates = self._sample(self.config.n_candidates_per_tf,
+                                          self.config.seed + tf_i * 100 + rnd, bounds)
+                for ps in candidates:
+                    if self._stop_flag:
+                        self.state.running = False
+                        return
+                    res = await self._evaluate(bt, tf, ps, start_dt, end_dt, news_fetcher, split_ts)
+                    if res:
+                        res = _to_native(res)
+                        tf_results.append(res)
+                        self.all_results.append(res)
+                    self.state.evaluated += 1
+                    self.state.progress = round(self.state.evaluated / max(self.state.total, 1), 3)
+                    await asyncio.sleep(0.01)
+
+                # Sonraki tur için: bu TF'in en iyi K adayı etrafında daralt (interpolasyon)
+                if rnd < n_rounds - 1:
+                    ranked = [r for r in tf_results if r.get("oos_validated")]
+                    ranked.sort(key=lambda x: (x.get("oos_pnl_pct") or -999), reverse=True)
+                    if not ranked:  # OOS geçen yoksa full PnL'e göre
+                        ranked = sorted(tf_results, key=lambda x: x["full_pnl_pct"], reverse=True)
+                    bounds = self._refine_bounds(ranked[:self.config.refine_top_k])
 
         # ── AKILLI SEÇİM: kapı + sağlam skor ──────────────────────────────────
         # Agent kırılgan/sağlam ikilemini KENDİ çözer. İki katmanlı:
