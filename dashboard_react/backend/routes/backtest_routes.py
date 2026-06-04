@@ -1029,15 +1029,17 @@ def add_ai_scores(
     if w_total > 0:
         _w = {k: v / w_total for k, v in _w.items()}
 
+    # DÜZELTME: Trend + ML artık consensus'a GİRİYOR (en yüksek sinyalli modüller).
+    # Eskiden ml=0.0 ve trend dışarıdaydı → consensus flat Touche'a gömülüyordu.
     df['consensus_score'] = (
-        df['touche_score']      * _w['touche']      +
-        df['fundamental_score'] * _w['fundamental'] +
-        df['news_score']        * _w['news']        +
-        df['ml_score']          * _w.get('ml', 0.0) +
-        df['sentinel_score']    * _w['sentinel']    +
-        df['quantum_score']     * _w['quantum']
+        df['touche_score']      * _w.get('touche', 0.0)      +
+        df['fundamental_score'] * _w.get('fundamental', 0.0) +
+        df['news_score']        * _w.get('news', 0.0)        +
+        df['ml_score']          * _w.get('ml', 0.0)          +
+        df['sentinel_score']    * _w.get('sentinel', 0.0)    +
+        df['quantum_score']     * _w.get('quantum', 0.0)     +
+        df['trend_score']       * _w.get('trend', 0.0)
     )
-    # trend_score stored for reporting, does NOT enter oscillating signal
 
     # Multi-TF confluence: scale 1h consensus by 4h/1d alignment
     if timeframe == "1h":

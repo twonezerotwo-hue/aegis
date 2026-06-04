@@ -92,12 +92,16 @@ class OptimizerAgent:
             "z_exit_long":    [-0.35, 0.25],
             "adx_min":        [10, 32],
             "kelly_cap":      [0.10, 0.40],
-            # Modül ağırlıkları (ham — normalize edilir)
-            "w_touche":       [0.1, 1.0],
-            "w_fundamental":  [0.1, 1.0],
-            "w_news":         [0.0, 0.6],
-            "w_sentinel":     [0.0, 0.6],
-            "w_quantum":      [0.0, 0.4],
+            # Modül ağırlıkları (ham — normalize edilir). Sinyal varyansına göre:
+            # trend(0.31)/ml(0.29)/quantum(0.22) en güçlü → geniş aralık.
+            # touche(0.04 flat)/news(0.00 ölü) → düşük aralık.
+            "w_touche":       [0.0, 0.5],   # flat → düşük tavan
+            "w_fundamental":  [0.0, 0.8],
+            "w_news":         [0.0, 0.15],  # ölü → neredeyse sıfır
+            "w_sentinel":     [0.0, 0.8],
+            "w_quantum":      [0.0, 1.0],   # güçlü sinyal
+            "w_ml":           [0.0, 1.0],   # YENİ — güçlü sinyal
+            "w_trend":        [0.0, 1.0],   # YENİ — en güçlü sinyal
             # Yön: <0.5 momentum, >=0.5 kontrarian
             "contrarian":     [0.0, 1.0],
         }
@@ -152,14 +156,16 @@ class OptimizerAgent:
 
     # ── Tek aday değerlendirme (in-sample + out-of-sample) ─────────────────────
     async def _evaluate(self, bt, tf: str, ps: dict, start_dt, end_dt, news_fetcher, split_ts) -> Optional[dict]:
-        # Modül ağırlıklarını normalize et
-        wsum = ps["w_touche"] + ps["w_fundamental"] + ps["w_news"] + ps["w_sentinel"] + ps["w_quantum"]
+        # Modül ağırlıklarını normalize et (trend + ml DAHİL — en güçlü sinyaller)
+        wsum = (ps["w_touche"] + ps["w_fundamental"] + ps["w_news"] + ps["w_sentinel"]
+                + ps["w_quantum"] + ps.get("w_ml", 0) + ps.get("w_trend", 0))
         if wsum <= 0:
             return None
         weights = {
             "touche": ps["w_touche"] / wsum, "fundamental": ps["w_fundamental"] / wsum,
             "news": ps["w_news"] / wsum, "sentinel": ps["w_sentinel"] / wsum,
             "quantum": ps["w_quantum"] / wsum,
+            "ml": ps.get("w_ml", 0) / wsum, "trend": ps.get("w_trend", 0) / wsum,
         }
         contrarian = ps["contrarian"] >= 0.5
         z   = round(ps["z_threshold"], 3)
