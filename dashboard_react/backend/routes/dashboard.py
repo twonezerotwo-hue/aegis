@@ -304,9 +304,17 @@ def _extract_live_scores(
             news_score = impact_raw * relevance + 0.50 * (1.0 - relevance)
             scores["news"] = round(min(max(news_score, 0.0), 1.0), 4)
 
-    # ── SENTINEL: TF bağımsız (makro göstergeler) ────────────────────────────
+    # ── SENTINEL: GERÇEK anlık makro (yfinance VIX/DXY) — fallback servise değil ─
     sentinel = payloads.get("sentinel")
-    if sentinel and "event_risk_score" in sentinel:
+    _real_sentinel = None
+    try:
+        from services.historical_macro import compute_current_sentinel
+        _real_sentinel = compute_current_sentinel()
+    except Exception:
+        pass
+    if _real_sentinel is not None:
+        scores["sentinel"] = _real_sentinel   # GERÇEK VIX/DXY
+    elif sentinel and "event_risk_score" in sentinel:
         risk = float(sentinel.get("event_risk_score") or 0.5)
         scores["sentinel"] = round(1.0 - min(max(risk, 0.0), 1.0), 4)
 
@@ -1365,6 +1373,11 @@ async def get_consensus(
                 payload = live_payloads.get(payload_key)
                 timestamp = _extract_payload_timestamp(payload, payload_key)
                 data_status = _payload_data_status(payload, payload_key, timeframe)
+                # GERÇEK veri override: gateway gerçek F&G/makro kullanıyor → LIVE
+                if module == "fundamental" and payload and payload.get("fear_greed_value") is not None:
+                    data_status = "LIVE"; timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+                if module == "sentinel" and live_score is not None:
+                    data_status = "LIVE"; timestamp = timestamp or datetime.now(timezone.utc).isoformat()
                 if live_score is not None and payload:
                     return live_score, _build_module_source(
                         module=module,

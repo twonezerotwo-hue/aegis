@@ -136,6 +136,42 @@ def compute_real_sentinel(timestamps: pd.Series, start: str, end: str) -> Option
     return sentinel.reset_index(drop=True)
 
 
+_CUR_CACHE = {"data": None, "ts": 0.0}
+
+def get_current_macro() -> dict:
+    """Anlık gerçek makro (yfinance VIX/DXY/US10Y) — 10dk önbellekli."""
+    now = time.time()
+    if _CUR_CACHE["data"] and (now - _CUR_CACHE["ts"]) < 600:
+        return _CUR_CACHE["data"]
+    out = {"vix": None, "dxy": None, "us10y": None}
+    try:
+        from datetime import timedelta
+        end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        start = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
+        for tic, key in [("^VIX", "vix"), ("DX-Y.NYB", "dxy"), ("^TNX", "us10y")]:
+            s = _yf_series(tic, start, end)
+            if s is not None and len(s):
+                v = float(s.iloc[-1])
+                out[key] = v / 10.0 if key == "us10y" and v > 20 else v
+    except Exception as exc:
+        logger.debug("current macro failed: %s", exc)
+    _CUR_CACHE["data"] = out; _CUR_CACHE["ts"] = now
+    return out
+
+
+def compute_current_sentinel() -> Optional[float]:
+    """Anlık GERÇEK Sentinel skoru (yfinance VIX/DXY). Düşük VIX/DXY = risk-on."""
+    m = get_current_macro()
+    vix, dxy = m.get("vix"), m.get("dxy")
+    if vix is None and dxy is None:
+        return None
+    vix = vix if vix is not None else 18.0
+    dxy = dxy if dxy is not None else 100.0
+    vix_score = 1.0 - min(max((vix - 12) / 28, 0), 1)
+    dxy_score = 1.0 - min(max((dxy - 90) / 20, 0), 1)
+    return round(min(max(vix_score * 0.65 + dxy_score * 0.35, 0.05), 0.95), 4)
+
+
 def compute_real_fundamental(timestamps: pd.Series, start: str, end: str) -> Optional[pd.Series]:
     """
     GERÇEK Fundamental skoru: tarihsel Fear & Greed'den (kontrarian).

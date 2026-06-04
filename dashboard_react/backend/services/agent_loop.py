@@ -44,7 +44,7 @@ PriceCheckFn  = Optional[Callable[[str], Awaitable[dict]]]      # (symbol) → v
 class AgentConfig:
     enabled: bool          = field(default_factory=lambda: os.getenv("AGENT_ENABLED", "false").lower() == "true")
     interval_sec: int      = field(default_factory=lambda: int(os.getenv("AGENT_INTERVAL_SEC", "300")))
-    watch_symbols: list[str] = field(default_factory=lambda: os.getenv("AGENT_SYMBOLS", "BTC/USDT,ETH/USDT").split(","))
+    watch_symbols: list[str] = field(default_factory=lambda: os.getenv("AGENT_SYMBOLS", "BTC/USDT").split(","))
     timeframe: str         = field(default_factory=lambda: os.getenv("AGENT_TIMEFRAME", "4h"))
     horizon: str           = field(default_factory=lambda: os.getenv("AGENT_HORIZON", "medium"))
     min_confidence: float  = field(default_factory=lambda: float(os.getenv("AGENT_MIN_CONFIDENCE", "0.62")))
