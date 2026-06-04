@@ -26,6 +26,7 @@ import { SystemStatus } from "../components/SystemStatus";
 import { AlertBanner } from "../components/AlertBanner";
 import { KontrolMerkezi } from "../components/control/KontrolMerkezi";
 import { AgentControlPanel } from "../components/control/AgentControlPanel";
+import { AlertsPanel } from "../components/control/AlertsPanel";
 import { SymbolSelector, type SymbolOption } from "../components/SymbolSelector";
 import { TimeframeSelector } from "../components/TimeframeSelector";
 import { NewsHeadlines } from "../components/NewsHeadlines";
@@ -43,7 +44,7 @@ const PaperTrading = lazy(() => import("./PaperTrading").then((m) => ({ default:
 type TabId = "control" | "portfolio" | "metrics" | "backtest" | "paper_trading";
 
 const TABS: { id: TabId; label: string }[] = [
-  { id: "control",       label: "Kontrol" },
+  { id: "control",       label: "Agent" },
   { id: "portfolio",     label: "Analiz" },
   { id: "metrics",       label: "Metrikler" },
   { id: "backtest",      label: "Backtest" },
@@ -654,20 +655,20 @@ const DashboardV2Inner: React.FC = () => {
 
         {/* ── Tab Bar ──────────────────────────────────────────────────────── */}
         <div className="rounded-2xl border border-slate-700/60 bg-slate-900 px-2 py-1.5">
-          <div className="flex gap-1">
+          <div className="flex min-w-0 gap-1">
             {TABS.map(({ id, label }) => (
               <button
                 key={id}
                 type="button"
                 onClick={() => setActiveTab(id)}
                 aria-pressed={activeTab === id}
-                className={`flex-1 rounded-xl px-3 py-2 text-xs font-semibold uppercase tracking-wider transition-all duration-200 ${
+                className={`min-w-0 flex-1 rounded-xl px-2 py-2 text-xs font-semibold uppercase tracking-wider transition-all duration-200 sm:px-3 ${
                   activeTab === id
                     ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/40"
                     : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
                 }`}
               >
-                {label}
+                <span className="block truncate">{label}</span>
               </button>
             ))}
           </div>
@@ -675,14 +676,17 @@ const DashboardV2Inner: React.FC = () => {
 
         {/* ── KONTROL MERKEZİ TAB ─────────────────────────────────────────── */}
         {activeTab === "control" && (
-          <div className="space-y-4">
+          <div className="space-y-5">
+            <AgentControlPanel />
+
+            <AlertsPanel />
+
             <KontrolMerkezi
               macro={effectiveMacro}
               btcConsensus={assetConsensus.btc.data ?? null}
               dailyPnl={dailyPnl}
               loading={loading && !effectiveMacro}
             />
-            <AgentControlPanel />
           </div>
         )}
 

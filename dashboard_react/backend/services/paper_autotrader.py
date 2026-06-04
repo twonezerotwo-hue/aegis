@@ -253,6 +253,12 @@ class PaperAutoTrader:
         st.entry_z = round(score, 3)
         st.position_size_pct = round(size, 4)
         logger.info("PAPER_OPEN %s %s @ %.2f size=%.1f%% (conf=%.2f)", side, st.symbol, price, size * 100, confidence)
+        try:
+            from services.notifier import notify
+            notify("signal", f"Paper {side} açıldı · {st.symbol} @ ${round(price,2)} · "
+                   f"boyut %{round(size*100)} · güven {round(confidence,2)}", level="signal")
+        except Exception:
+            pass
 
     def _close_position(self, price, pnl_pct, reason):
         st = self.state
@@ -266,6 +272,13 @@ class PaperAutoTrader:
         })
         st.trades = st.trades[-100:]
         logger.info("PAPER_CLOSE %s @ %.2f pnl=%.2f%% (%s)", st.position, price, pnl_pct * 100, reason)
+        try:
+            from services.notifier import notify
+            lvl = "success" if realized > 0 else "warning"
+            notify("signal", f"Paper {st.position} kapandı @ ${round(price,2)} · "
+                   f"{round(pnl_pct*100,2):+.2f}% (${round(realized,2)}) · {reason}", level=lvl)
+        except Exception:
+            pass
         st.position = st.entry_price = st.entry_time = st.entry_z = None
         st.position_size_pct = 0.0
         st.open_pnl_pct = 0.0

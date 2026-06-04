@@ -320,6 +320,14 @@ class OptimizerAgent:
                 f"sağlam skor={best['robust_score']} · OOS+{best['oos_pnl_pct']:.1f}% · "
                 f"PF={best['profit_factor']} · Sharpe={best['sharpe']} · DD={best['max_dd_pct']}%"
             )
+            try:
+                from services.notifier import notify
+                notify("optimizer", f"Yeni config uygulandı: {best['timeframe']} "
+                       f"{'Kontrarian' if best['params']['contrarian'] else 'Momentum'} · "
+                       f"PF={best['profit_factor']} Sharpe={best['sharpe']} OOS+{best['oos_pnl_pct']:.1f}%",
+                       level="success")
+            except Exception:
+                pass
         elif validated:
             self.state.message = (
                 f"⚠ {len(validated)} config OOS kârlı AMA hiçbiri PF≥{min_pf} kapısını geçemedi "

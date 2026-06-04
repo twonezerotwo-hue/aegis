@@ -49,6 +49,62 @@ _training_queue: set[str]         = set()  # şu an eğitilen TF'ler
 # Fallback öncelik sırası — model yokken hangi TF kullanılsın
 _TF_FALLBACK_ORDER = ["BTC/USDT|4h", "BTC/USDT|1d", "BTC/USDT|1h", "BTC/USDT|4h"]
 
+# ── KALICILIK: modeller diske kaydedilir (restart'ta korunur) ──────────────────
+_MODEL_DIR = os.path.join(os.environ.get("AGENT_DATA_DIR", "/app/data"), "ml_models")
+
+
+def _safe_key(symbol_tf: str) -> str:
+    return symbol_tf.replace("/", "_").replace("|", "__")
+
+
+def _save_model(symbol_tf: str) -> None:
+    """Eğitilen modeli + meta'yı diske yaz (joblib)."""
+    try:
+        import joblib
+        os.makedirs(_MODEL_DIR, exist_ok=True)
+        path = os.path.join(_MODEL_DIR, _safe_key(symbol_tf) + ".joblib")
+        joblib.dump({
+            "model_tuple": _models.get(symbol_tf),
+            "metadata":    _metadata.get(symbol_tf),
+            "bar_count":   _bar_count.get(symbol_tf, 0),
+            "pred":        _ml_pred_cache.get(symbol_tf),
+        }, path)
+        logger.info("ML_SAVED %s → %s", symbol_tf, path)
+    except Exception as exc:
+        logger.warning("ML model kaydı başarısız %s: %s", symbol_tf, exc)
+
+
+def _load_models() -> int:
+    """Açılışta diskteki tüm modelleri belleğe yükle."""
+    loaded = 0
+    try:
+        import joblib
+        if not os.path.isdir(_MODEL_DIR):
+            return 0
+        for fn in os.listdir(_MODEL_DIR):
+            if not fn.endswith(".joblib"):
+                continue
+            try:
+                data = joblib.load(os.path.join(_MODEL_DIR, fn))
+                # key'i meta veya dosya adından geri çöz
+                meta = data.get("metadata") or {}
+                # Dosya adından symbol_tf'i geri kur
+                base = fn[:-len(".joblib")].replace("__", "|").replace("_", "/", 1)
+                if data.get("model_tuple"):
+                    _models[base] = data["model_tuple"]
+                    _metadata[base] = meta
+                    _bar_count[base] = data.get("bar_count", 0)
+                    if data.get("pred"):
+                        _ml_pred_cache[base] = data["pred"]
+                    loaded += 1
+            except Exception as exc:
+                logger.debug("model yüklenemedi %s: %s", fn, exc)
+        if loaded:
+            logger.info("ML_LOADED %d model diskten yüklendi: %s", loaded, list(_models.keys()))
+    except Exception as exc:
+        logger.warning("ML model yükleme başarısız: %s", exc)
+    return loaded
+
 
 def _get_fallback_cache(symbol: str, timeframe: str) -> dict | None:
     """Belirtilen TF için önbellekte model yoksa en yakın mevcut modeli döndür."""
@@ -411,6 +467,7 @@ def train_model(df: pd.DataFrame, symbol_tf: str) -> dict:
     _bar_count[symbol_tf] = 0
     logger.info("ML_TRAINED %s: acc=%.1f%% rows=%d buy=%.0f%% sell=%.0f%%",
                 symbol_tf, accuracy, len(X_train), buy_pct, sell_pct)
+    _save_model(symbol_tf)   # KALICILIK: diske yaz (restart'ta korunur)
     return _metadata[symbol_tf]
 
 
@@ -703,3 +760,10 @@ async def status_endpoint():
             "atr_mult": _ATR_MULT,
         },
     }
+
+
+# ── Açılışta diskteki modelleri yükle (kalıcılık) ──────────────────────────
+try:
+    _load_models()
+except Exception as _e:
+    logger.debug("startup model load: %s", _e)

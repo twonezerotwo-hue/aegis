@@ -486,6 +486,9 @@ services:
       AGENT_RISK_PCT: "${AGENT_RISK_PCT:-0.02}"
       AGENT_SIGNAL_TTL_MIN: "${AGENT_SIGNAL_TTL_MIN:-30}"
       AGENT_DATA_DIR: "/app/data"
+      # ── Bildirim (opsiyonel — Telegram bot token + chat id ekleyince aktif) ──
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     ports:
       - "8502:8502"
     volumes:

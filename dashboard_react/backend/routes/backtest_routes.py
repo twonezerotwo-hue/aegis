@@ -897,64 +897,49 @@ def add_ai_scores(
     df['trend_up'] = (df['ema50'] > df['ema200']).astype(float)
     logger.info("Trend module (EMA50/200) calculated")
 
-    # ── FUNDAMENTAL — FIX: rolling vol percentile, no look-ahead bias ────────
-    # Old bug: df['volatility'].max() = FUTURE maximum = look-ahead.
-    # New: z-score of volatility against 60-bar rolling window (causal).
     vol_roll_mean = df['volatility'].rolling(60, min_periods=10).mean().fillna(df['volatility'].mean())
     vol_roll_std  = df['volatility'].rolling(60, min_periods=10).std().fillna(df['volatility'].std()).replace(0, 1e-6)
     vol_z = ((df['volatility'] - vol_roll_mean) / vol_roll_std).fillna(0)
     ret5 = df['returns'].rolling(5, min_periods=2).mean().fillna(0)
-    if ONCHAIN_SCORER_AVAILABLE:
+
+    # ── GERÇEK tarihsel veri dene (yfinance makro + alternative.me F&G) ──────
+    _real_fund = _real_sent = None
+    if "timestamp" in df.columns and len(df) > 0:
         try:
-            scorer = get_scorer()
-            if 'volume' not in df.columns:
-                df['volume'] = 1_000_000
-            fundamental_raw = scorer.calculate_fundamental_score(
-                df,
-                volatility_weight_coef=1.0,
-                volume_weight_coef=0.8,
-                price_action_weight_coef=0.7,
-                momentum_weight_coef=0.5
-            )
-            df['fundamental_score'] = np.clip(fundamental_raw, 0, 1)
-            logger.info("Fundamental: OnChainScorer")
-        except Exception as e:
-            logger.warning(f"OnChainScorer failed: {e} — using rolling vol-z formula")
-            # Fast (20-bar) component + slow (60-bar) component — responds faster to bear markets
-            vol_z_fast = ((df['volatility'] - df['volatility'].rolling(20, min_periods=5).mean().fillna(df['volatility'].mean()))
-                          / df['volatility'].rolling(20, min_periods=5).std().fillna(df['volatility'].std()).replace(0, 1e-6)).fillna(0)
-            ret20 = df['returns'].rolling(20, min_periods=5).mean().fillna(0)
-            df['fundamental_score'] = normalize_score(
-                0.5
-                - vol_z.clip(-2, 2) * 0.10      # slow 60-bar regime signal
-                - vol_z_fast.clip(-2, 2) * 0.10  # fast 20-bar stress signal
-                + ret5.clip(-0.05, 0.05)   / 0.05  * 0.15  # 5-day momentum
-                + ret20.clip(-0.05, 0.05)  / 0.05  * 0.10  # 20-day trend confirmation
-            )
+            from services.historical_macro import compute_real_fundamental, compute_real_sentinel
+            _ts = df["timestamp"].reset_index(drop=True)
+            _start = pd.to_datetime(_ts.iloc[0]).strftime("%Y-%m-%d")
+            _end   = pd.to_datetime(_ts.iloc[-1]).strftime("%Y-%m-%d")
+            _real_fund = compute_real_fundamental(_ts, _start, _end)
+            _real_sent = compute_real_sentinel(_ts, _start, _end)
+        except Exception as _hm_exc:
+            logger.warning("Geçmiş gerçek veri başarısız (%s) — proxy kullanılıyor", _hm_exc)
+
+    # ── FUNDAMENTAL: gerçek F&G geçmişi (yoksa vol-z proxy) ──────────────────
+    if _real_fund is not None and _real_fund.notna().sum() > len(df) * 0.5:
+        df['fundamental_score'] = np.clip(_real_fund.values, 0, 1)
+        logger.info("Fundamental: GERÇEK tarihsel Fear&Greed")
     else:
         vol_z_fast = ((df['volatility'] - df['volatility'].rolling(20, min_periods=5).mean().fillna(df['volatility'].mean()))
                       / df['volatility'].rolling(20, min_periods=5).std().fillna(df['volatility'].std()).replace(0, 1e-6)).fillna(0)
         ret20 = df['returns'].rolling(20, min_periods=5).mean().fillna(0)
         df['fundamental_score'] = normalize_score(
-            0.5
-            - vol_z.clip(-2, 2) * 0.10
-            - vol_z_fast.clip(-2, 2) * 0.10
-            + ret5.clip(-0.05, 0.05)  / 0.05 * 0.15
-            + ret20.clip(-0.05, 0.05) / 0.05 * 0.10
-        )
-        logger.info("Fundamental: dual-window vol-z (fast 20 + slow 60, causal)")
+            0.5 - vol_z.clip(-2, 2) * 0.10 - vol_z_fast.clip(-2, 2) * 0.10
+            + ret5.clip(-0.05, 0.05) / 0.05 * 0.15 + ret20.clip(-0.05, 0.05) / 0.05 * 0.10)
+        logger.info("Fundamental: vol-z proxy (geçmiş F&G yok)")
 
-    # ── QUANTUM SCORE ─────────────────────────────────────────────────────────
+    # ── QUANTUM: getiri/volatilite proxy (geçmiş funding ayrı entegrasyon) ──
     vol20_std = df['returns'].rolling(20, min_periods=5).std().replace(0, 1e-6)
     df['quantum_score'] = normalize_score(
-        0.5 + (df['returns'].rolling(5).mean() / vol20_std).clip(-1, 1) * 0.5
-    )
+        0.5 + (df['returns'].rolling(5).mean() / vol20_std).clip(-1, 1) * 0.5)
 
-    # ── SENTINEL SCORE — FIX: base was 0.75 → always showed ~0.75 ───────────
-    # Old: normalize_score(0.75 - vol_z*0.15) → average always ≈ 0.75 (bias)
-    # New: base 0.50 with wider ±0.25 range → actually reflects risk state
-    df['sentinel_score'] = normalize_score(0.50 - vol_z.clip(-2, 2) * 0.25)
-    # Result: calm (vol_z=-2) → 1.0, normal (vol_z=0) → 0.50, crash (vol_z=+2) → 0.0
+    # ── SENTINEL: gerçek tarihsel VIX/DXY/US10Y (yoksa vol-z proxy) ──────────
+    if _real_sent is not None and _real_sent.notna().sum() > len(df) * 0.5:
+        df['sentinel_score'] = np.clip(_real_sent.values, 0, 1)
+        logger.info("Sentinel: GERÇEK tarihsel VIX/DXY/US10Y")
+    else:
+        df['sentinel_score'] = normalize_score(0.50 - vol_z.clip(-2, 2) * 0.25)
+        logger.info("Sentinel: vol-z proxy (geçmiş makro yok)")
 
     # ── NEWS SENTIMENT — FIX: 3-day return averaged to ~0 → always 0.500 ────
     # Bug: ret3 * sqrt(vol_ratio) averages to ~0 over any long period because

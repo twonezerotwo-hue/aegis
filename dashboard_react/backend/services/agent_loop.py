@@ -310,10 +310,19 @@ class AgentOrchestrator:
                 f.write(json.dumps(d.to_dict(), ensure_ascii=False) + "\n")
         except Exception as exc:
             logger.debug("journal persist failed: %s", exc)
-        # Önemli kararları logla
+        # Önemli kararları logla + uyarı yayınla
         if d.decision not in ("no_action",):
             logger.info("AGENT_DECISION %s %s → %s | %s",
                         d.symbol, d.action, d.decision, d.reason[:80])
+            try:
+                from services.notifier import notify
+                if d.decision in ("would_signal", "queued_for_approval", "auto_execute_logged"):
+                    notify("signal", f"{d.symbol} {d.action} ({d.timeframe}) · skor {d.score:.2f} · {d.decision}",
+                           level="signal", meta={"symbol": d.symbol, "action": d.action})
+                elif d.decision == "blocked_kill_switch":
+                    notify("kill_switch", f"Kill switch aktif — {d.symbol} sinyali bloklandı", level="critical")
+            except Exception:
+                pass
 
     def _load_journal(self) -> None:
         try:
