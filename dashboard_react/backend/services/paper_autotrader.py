@@ -99,10 +99,9 @@ class PaperAutoTrader:
                 symbol=cfg.get("symbol", "BTC/USDT"),
                 timeframe=cfg.get("timeframe", "1d"),
                 started_at=_now(),
-                config_summary=(f"{cfg.get('timeframe')} "
-                                f"{'Kontrarian' if p.get('contrarian') else 'Momentum'} · "
-                                f"z={p.get('z_threshold')} sl={p.get('stop_loss_pct')} "
-                                f"tp={p.get('take_profit_pct')} adx={p.get('adx_min')}"),
+                config_summary=(f"Agent sinyali (canlı consensus) · "
+                                f"sl={p.get('stop_loss_pct')} tp={p.get('take_profit_pct')} "
+                                f"kelly={p.get('kelly_cap')}"),
                 equity_curve=[{"ts": _now(), "equity": 100000.0}],
             )
         else:
@@ -127,61 +126,80 @@ class PaperAutoTrader:
             except Exception as exc:
                 self.state.last_error = str(exc)[:300]
                 logger.warning("paper cycle error: %s", exc)
-            interval = _TF_INTERVAL.get(self.state.timeframe, 3600)
+            # Agent'la aynı tempoda kontrol et (sinyali kaçırma)
+            try:
+                from services.agent_loop import get_agent
+                interval = max(120, int(get_agent().config.interval_sec))
+            except Exception:
+                interval = 300
             slept = 0
             while not self._stop and slept < interval:
                 await asyncio.sleep(5); slept += 5
 
-    # ── Tek cycle: canlı sinyal + pozisyon yönetimi ────────────────────────────
-    async def _cycle(self):
-        import importlib
-        bt = importlib.import_module("routes.backtest_routes")
+    async def _get_price(self, symbol: str) -> Optional[float]:
+        """Binance public ticker'dan anlık fiyat."""
+        try:
+            import httpx
+            bsym = symbol.replace("/", "")
+            async with httpx.AsyncClient(timeout=8.0) as c:
+                r = await c.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": bsym})
+            if r.status_code == 200:
+                return float(r.json().get("price", 0)) or None
+        except Exception:
+            pass
+        return None
 
+    # ── Tek cycle: AGENT'in sinyaline göre (canlı consensus action) ────────────
+    async def _cycle(self):
         cfg = self._applied()
         if not cfg:
             self.state.message = "Uygulanan config kayboldu"
             return
         p = cfg["params"]
-        tf = cfg.get("timeframe", "1d")
         sym = cfg.get("symbol", "BTC/USDT")
-        contrarian = bool(p.get("contrarian", False))
-        z_thr = float(p.get("z_threshold", 1.0))
         sl = float(p.get("stop_loss_pct", -0.08))
         tp = float(p.get("take_profit_pct", 0.15))
-        ze = float(p.get("z_exit_long", 0.0))
-        adx = float(p.get("adx_min", 18))
-        weights = p.get("weights")
 
-        # Şimdiye kadarki veri + sinyaller (backtest fonksiyonları)
-        end_dt = datetime.now(timezone.utc)
-        start_dt = end_dt - timedelta(days=_TF_LOOKBACK_DAYS.get(tf, 400))
-
-        bt._CONTRARIAN_OVERRIDE = contrarian
+        # Trading Agent'ın config'i — paper AYNI TF + AYNI kapılarla sinyal alsın
         try:
-            nf = bt.get_news_fetcher()
-            df = await bt.generate_historical_data_with_ai_signals(
-                sym, tf, start_dt, end_dt, news_fetcher=nf,
-                z_threshold=z_thr, adx_min=adx, module_weights=weights,
-            )
-        finally:
-            bt._CONTRARIAN_OVERRIDE = None
+            from services.agent_loop import get_agent
+            acfg = get_agent().config
+            tf = acfg.timeframe
+            horizon = acfg.horizon
+            min_conf = float(acfg.min_confidence)
+            min_edge = float(acfg.min_score_edge)
+        except Exception:
+            tf, horizon, min_conf, min_edge = cfg.get("timeframe", "1d"), "medium", 0.60, 0.05
 
-        if df is None or df.empty:
-            self.state.message = "Veri alınamadı"
+        # ── CANLI CONSENSUS (agent ile AYNI kaynak) ───────────────────────────
+        from routes import dashboard
+        consensus = await dashboard.get_consensus(
+            symbol=sym, timeframe=tf, horizon=horizon,
+            prometheus_url=os.getenv("PROMETHEUS_URL", "http://prometheus:9090"),
+        )
+        action = str(consensus.get("action", "HOLD")).upper()
+        score = float(consensus.get("weighted_score", 0.5))
+        confidence = float(consensus.get("confidence", 0.5))
+        edge = abs(score - 0.5)
+
+        # Sinyal: AGENT ile birebir — consensus action BUY/SELL ise aç.
+        # (action zaten eşik içeriyor; ekstra güven kapısı hafif tutuldu)
+        signal = 0
+        if action == "BUY" and confidence >= min_conf:
+            signal = 1
+        elif action == "SELL" and confidence >= min_conf:
+            signal = -1
+
+        price = await self._get_price(sym)
+        if not price:
+            self.state.message = "Fiyat alınamadı"
             return
-
-        last = df.iloc[-1]
-        price = float(last["close"])
-        signal = int(last.get("consensus_signal", 0))
-        z = float(last.get("consensus_zscore", 0.0))
-        regime = str(last.get("consensus_regime", "NORMALIZATION"))
-        conf = float(last.get("confluence_multiplier", 0.1))
 
         self.state.cycle_count += 1
         self.state.last_cycle_ts = _now()
         self.state.last_price = round(price, 2)
         self.state.last_signal = signal
-        self.state.last_z = round(z, 3)
+        self.state.last_z = round(score, 3)   # artık consensus skoru (z değil)
         self.state.symbol = sym
         self.state.timeframe = tf
 
@@ -196,19 +214,18 @@ class PaperAutoTrader:
                 exit_reason = "stop_loss"
             elif pnl_pct >= tp:
                 exit_reason = "take_profit"
-            elif st.position == "LONG" and z > ze:
-                exit_reason = "z_reversion"
-            elif st.position == "SHORT" and z < -ze:
-                exit_reason = "z_reversion"
             elif signal != 0 and ((st.position == "LONG" and signal < 0) or (st.position == "SHORT" and signal > 0)):
                 exit_reason = "reverse_signal"
+            # Consensus nötre döndü ve pozisyon kârda → kârı koru
+            elif action == "HOLD" and pnl_pct > 0.01:
+                exit_reason = "signal_neutral"
 
             if exit_reason:
                 self._close_position(price, pnl_pct, exit_reason)
 
-        # ── Yeni giriş ─────────────────────────────────────────────────────────
+        # ── Yeni giriş (agent sinyali) ──────────────────────────────────────────
         if st.position is None and signal != 0:
-            self._open_position("LONG" if signal > 0 else "SHORT", price, z, regime, conf, bt)
+            self._open_position("LONG" if signal > 0 else "SHORT", price, score, confidence)
 
         # ── Equity güncelle ────────────────────────────────────────────────────
         if st.position is not None:
@@ -224,21 +241,18 @@ class PaperAutoTrader:
         st.message = self._status_msg()
         self._save()
 
-    def _open_position(self, side, price, z, regime, conf, bt):
+    def _open_position(self, side, price, score, confidence):
         st = self.state
-        # Kelly-bazlı pozisyon boyutu (backtest ile aynı)
+        # Pozisyon boyutu: güven × kelly_cap (yüksek güven = büyük pozisyon)
         cfg = self._applied(); kelly = float(cfg["params"].get("kelly_cap", 0.25)) if cfg else 0.25
-        regime_conf = {"LIQ_EXPANSION": 1.0, "NORMALIZATION": 0.9, "RECOVERY": 0.8, "RISK_OFF": 0.6}.get(regime, 0.8)
-        try:
-            size = bt.calculate_position_size(z, regime_conf, confluence_multiplier=conf, kelly_cap=kelly)
-        except Exception:
-            size = min(kelly, 0.2)
+        edge = abs(score - 0.5) * 2          # 0-1
+        size = max(0.02, min(kelly, kelly * (0.4 + 0.6 * confidence) * (0.5 + edge)))
         st.position = side
         st.entry_price = round(price, 2)
         st.entry_time = _now()
-        st.entry_z = round(z, 3)
-        st.position_size_pct = round(max(0.02, size), 4)
-        logger.info("PAPER_OPEN %s %s @ %.2f size=%.1f%%", side, st.symbol, price, st.position_size_pct * 100)
+        st.entry_z = round(score, 3)
+        st.position_size_pct = round(size, 4)
+        logger.info("PAPER_OPEN %s %s @ %.2f size=%.1f%% (conf=%.2f)", side, st.symbol, price, size * 100, confidence)
 
     def _close_position(self, price, pnl_pct, reason):
         st = self.state

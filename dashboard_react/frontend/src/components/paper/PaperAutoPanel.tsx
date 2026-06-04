@@ -26,7 +26,8 @@ interface PaperStatus {
 }
 
 const REASON_TR: Record<string, string> = {
-  stop_loss: "Stop", take_profit: "Kâr Al", z_reversion: "Z dönüş", reverse_signal: "Ters sinyal",
+  stop_loss: "Stop", take_profit: "Kâr Al", z_reversion: "Z dönüş",
+  reverse_signal: "Ters sinyal", signal_neutral: "Nötr çıkış",
 };
 
 export const PaperAutoPanel: React.FC = () => {
