@@ -200,6 +200,11 @@ class AgentOrchestrator:
         score      = float(consensus.get("weighted_score", 0.5))
         confidence = float(consensus.get("confidence", 0.5))
         mode       = self.config.execution_mode
+        action, confidence, derived_from_score = self._derive_agent_signal(
+            action=action,
+            score=score,
+            confidence=confidence,
+        )
 
         # HOLD veya zayıf kenar → işlem yok
         edge = abs(score - 0.5)
@@ -252,6 +257,10 @@ class AgentOrchestrator:
                   f"kenar {edge:.3f} (≥{self.config.min_score_edge})")
 
         # ── GÜVENLİ yönlendirme — moda göre ────────────────────────────────────
+        if derived_from_score:
+            reason = (f"agent esiginden turetildi - skor {score:.2f} - "
+                      f"guven {confidence:.2f} - kenar {edge:.3f} (>={self.config.min_score_edge})")
+
         if mode == "DRY_RUN":
             self._journal_add(AgentDecision(
                 ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
@@ -293,6 +302,36 @@ class AgentOrchestrator:
             self._signals_today += 1
 
     # ── Günlük yönetimi ────────────────────────────────────────────────────────
+    def _derive_agent_signal(
+        self,
+        *,
+        action: str,
+        score: float,
+        confidence: float,
+    ) -> tuple[str, float, bool]:
+        """Apply runtime agent thresholds after dashboard consensus.
+
+        dashboard.get_consensus emits HOLD inside a fixed 0.35-0.65 band.
+        The agent UI exposes a narrower min_score_edge, so derive a non-final
+        signal candidate from weighted_score when the score clears the agent
+        edge but dashboard action is still HOLD.
+        """
+        normalized_action = str(action).upper()
+        if normalized_action in ("BUY", "SELL"):
+            return normalized_action, float(confidence), False
+
+        edge = abs(score - 0.5)
+        if edge < self.config.min_score_edge:
+            return "HOLD", float(confidence), False
+
+        if score > 0.5:
+            return "BUY", max(float(confidence), float(score)), True
+
+        if score < 0.5:
+            return "SELL", max(float(confidence), 1.0 - float(score)), True
+
+        return "HOLD", float(confidence), False
+
     def _roll_day(self) -> None:
         today = datetime.now(timezone.utc).date().isoformat()
         if today != self._today_date:

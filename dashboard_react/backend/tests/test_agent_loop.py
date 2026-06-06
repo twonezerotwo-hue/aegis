@@ -1,0 +1,73 @@
+import sys
+from pathlib import Path
+
+import pytest
+
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from services.agent_loop import AgentOrchestrator
+
+
+def _build_agent(consensus_payload: dict, *, min_confidence: float = 0.55, min_edge: float = 0.04) -> AgentOrchestrator:
+    agent = AgentOrchestrator()
+    agent.journal = []
+    agent.config.watch_symbols = ["BTC/USDT"]
+    agent.config.timeframe = "5m"
+    agent.config.horizon = "medium"
+    agent.config.min_confidence = min_confidence
+    agent.config.min_score_edge = min_edge
+    agent.config.max_signals_per_day = 20
+    agent.config.execution_mode = "DRY_RUN"
+
+    async def consensus_fn(symbol: str, timeframe: str, horizon: str) -> dict:
+        assert symbol == "BTC/USDT"
+        assert timeframe == "5m"
+        assert horizon == "medium"
+        return consensus_payload
+
+    agent.wire(
+        consensus_fn=consensus_fn,
+        enqueue_fn=lambda sig: None,
+        kill_switch_fn=lambda: (False, ""),
+        price_check_fn=None,
+    )
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_agent_thresholds_can_derive_signal_from_dashboard_hold_band():
+    agent = _build_agent(
+        {
+            "action": "HOLD",
+            "weighted_score": 0.5694,
+            "confidence": 0.5,
+        }
+    )
+
+    result = await agent.run_once()
+    decision = result["new_decisions"][0]
+
+    assert decision["decision"] == "would_signal"
+    assert decision["score"] == pytest.approx(0.5694)
+    assert decision["confidence"] == pytest.approx(0.5694)
+    assert "agent esiginden turetildi" in decision["reason"]
+
+
+@pytest.mark.asyncio
+async def test_agent_still_blocks_hold_when_score_edge_is_too_small():
+    agent = _build_agent(
+        {
+            "action": "HOLD",
+            "weighted_score": 0.53,
+            "confidence": 0.5,
+        }
+    )
+
+    result = await agent.run_once()
+    decision = result["new_decisions"][0]
+
+    assert decision["decision"] == "no_action"
+    assert decision["confidence"] == pytest.approx(0.5)
