@@ -144,21 +144,77 @@ async def aegis_core_signal(request: AegisCoreSignalRequest) -> dict:
         raw_regime=request.raw_regime,
     )
 
-    confluence = apply_multi_tf_confluence(
-        base_score=base_signal.get("consensus_score", 50.0),
-        higher_tf_scores=request.higher_tf_scores,
+    if base_signal.get("consensus_available") is False:
+        warnings = _merge_warnings(gate_warnings, base_signal.get("warnings", []))
+        risk_result = evaluate_signal_risk(
+            aegis_signal=base_signal,
+            brainchain_signal=None,
+            data_integrity_result=data_integrity_result,
+            risk_context=request.risk_context,
+        )
+        kill_switch_result = evaluate_kill_switch(
+            data_integrity_result=data_integrity_result,
+            risk_result=risk_result,
+            kill_switch_context=request.kill_switch_context,
+        )
+        ownerbrief = build_ownerbrief(
+            aegis_signal=base_signal,
+            brainchain_signal=None,
+            data_integrity_result=data_integrity_result,
+            risk_result=risk_result,
+            kill_switch_result=kill_switch_result,
+            request_context=request_payload,
+        )
+        audit_record = build_audit_record(
+            route="/aegis-core/signal",
+            request_payload=request_payload,
+            data_integrity_result=data_integrity_result,
+            aegis_signal=base_signal,
+            brainchain_signal=None,
+            risk_result=risk_result,
+            kill_switch_result=kill_switch_result,
+            ownerbrief=ownerbrief,
+        )
+        return {
+            "success": False,
+            "blocked": True,
+            "decision_permission": "BLOCKED_BY_INSUFFICIENT_DATA",
+            "final_decision": False,
+            "data_integrity_result": data_integrity_result,
+            "risk_result": risk_result,
+            "kill_switch_result": kill_switch_result,
+            "aegis_signal": base_signal,
+            "brainchain_signal": None,
+            "ownerbrief": ownerbrief,
+            "audit_record": audit_record,
+            "warnings": _merge_warnings(
+                warnings,
+                risk_result.get("warnings", []),
+                kill_switch_result.get("warnings", []),
+                ownerbrief.get("warnings", []),
+            ),
+        }
+
+    confluence = (
+        apply_multi_tf_confluence(
+            base_score=base_signal.get("consensus_score", 50.0),
+            higher_tf_scores=request.higher_tf_scores,
+        )
+        if request.higher_tf_scores
+        else None
     )
 
     aegis_signal = {
         **base_signal,
-        "confluence": confluence,
-        "confluence_adjusted_score": confluence["adjusted_score"],
         "warnings": _merge_warnings(
             gate_warnings,
             base_signal.get("warnings", []),
-            confluence.get("warnings", []),
+            confluence.get("warnings", []) if isinstance(confluence, dict) else [],
         ),
     }
+    if isinstance(confluence, dict):
+        aegis_signal["confluence"] = confluence
+        aegis_signal["confluence_adjusted_score"] = confluence["adjusted_score"]
 
     brainchain_signal = to_brainchain_signal(aegis_signal)
     risk_result = evaluate_signal_risk(

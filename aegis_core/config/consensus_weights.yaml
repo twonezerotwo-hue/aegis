@@ -5,27 +5,27 @@
 regime_weights:
   bull:
     primary_tf: "1h"
-    touche_weight: 0.30
-    fundamental_weight: 0.40
+    touche_weight: 0.32
+    fundamental_weight: 0.34
     news_weight: 0.10
-    sentinel_weight: 0.15
-    quantum_weight: 0.05
+    sentinel_weight: 0.16
+    quantum_weight: 0.08
 
   accumulation:
     primary_tf: "1d"
-    touche_weight: 0.30
-    fundamental_weight: 0.40
-    news_weight: 0.10
-    sentinel_weight: 0.15
-    quantum_weight: 0.05
+    touche_weight: 0.18
+    fundamental_weight: 0.42
+    news_weight: 0.08
+    sentinel_weight: 0.24
+    quantum_weight: 0.08
 
   mega_bull:
     primary_tf: "4h"
-    touche_weight: 0.30
-    fundamental_weight: 0.40
-    news_weight: 0.10
-    sentinel_weight: 0.15
-    quantum_weight: 0.05
+    touche_weight: 0.36
+    fundamental_weight: 0.22
+    news_weight: 0.08
+    sentinel_weight: 0.14
+    quantum_weight: 0.20
 
   mega_bull_aggressive:
     primary_tf: "1d"
@@ -45,8 +45,8 @@ regime_weights:
 
   bear_2022:
     primary_tf: "1d"
-    touche_weight: 0.20
-    fundamental_weight: 0.45
-    news_weight: 0.15
-    sentinel_weight: 0.15
-    quantum_weight: 0.05
+    touche_weight: 0.12
+    fundamental_weight: 0.24
+    news_weight: 0.26
+    sentinel_weight: 0.30
+    quantum_weight: 0.08

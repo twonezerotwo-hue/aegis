@@ -39,9 +39,22 @@
       }
     },
     "consensus_score": {
-      "type": "number",
+      "type": [
+        "number",
+        "null"
+      ],
       "minimum": 0,
       "maximum": 100
+    },
+    "consensus_status": {
+      "type": "string",
+      "enum": [
+        "AVAILABLE",
+        "INSUFFICIENT_DATA"
+      ]
+    },
+    "consensus_available": {
+      "type": "boolean"
     },
     "raw_regime": {
       "type": "string"

@@ -25,6 +25,7 @@ KNOWN_REGIME_MAP = {
 DIRECT_WEIGHT_KEYS = {
     "BULL": "bull",
     "MEGA_BULL": "mega_bull",
+    "MEGA_BULL_AGGRESSIVE": "mega_bull_aggressive",
     "BEAR_2022": "bear_2022",
     "ACCUMULATION": "accumulation",
     "DEFAULT": "default",
@@ -78,7 +79,15 @@ def map_regime_to_weight_key(raw_regime: str) -> tuple[str, list[str]]:
 def _extract_weights(regime_config: dict) -> dict[str, float]:
     weights: dict[str, float] = {}
     for source_key, target_key in WEIGHT_FIELDS.items():
-        weights[target_key] = float(regime_config.get(source_key, 0.0))
+        if source_key not in regime_config:
+            raise ValueError(f"Missing required regime weight field: {source_key}")
+        try:
+            value = float(regime_config[source_key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Regime weight field '{source_key}' must be numeric.") from exc
+        if value < 0:
+            raise ValueError(f"Regime weight field '{source_key}' cannot be negative.")
+        weights[target_key] = value
     return weights
 
 

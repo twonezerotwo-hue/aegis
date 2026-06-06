@@ -142,7 +142,14 @@ def test_missing_module_score_returns_warning():
     }
     response = client.post("/aegis-core/signal", json=payload)
     assert response.status_code == 200
-    warnings = response.json()["warnings"]
+    data = response.json()
+    warnings = data["warnings"]
+    assert data["success"] is False
+    assert data["blocked"] is True
+    assert data["decision_permission"] == "BLOCKED_BY_INSUFFICIENT_DATA"
+    assert data["aegis_signal"]["consensus_status"] == "INSUFFICIENT_DATA"
+    assert data["aegis_signal"]["consensus_score"] is None
+    assert data["brainchain_signal"] is None
     assert any("Missing module score" in warning for warning in warnings)
 
 
