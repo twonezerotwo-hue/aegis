@@ -57,7 +57,7 @@ export const PaperAutoPanel: React.FC = () => {
   if (!s) return null;
 
   const pnlCls = (v: number) => v > 0 ? "text-emerald-400" : v < 0 ? "text-rose-400" : "text-slate-400";
-  const sigLabel = s.last_signal === 1 ? "AL" : s.last_signal === -1 ? "SAT" : "BEKLE";
+  const sigLabel = s.last_signal === 1 ? "Pozitif" : s.last_signal === -1 ? "Negatif" : "Notr";
   const sigCls = s.last_signal === 1 ? "text-emerald-400" : s.last_signal === -1 ? "text-rose-400" : "text-slate-500";
   const curve = (s.equity_curve_compact ?? []).map((p, i) => ({ i, equity: p.equity }));
 
@@ -118,7 +118,7 @@ export const PaperAutoPanel: React.FC = () => {
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
             <span className={`rounded-md border px-2 py-0.5 font-bold ${
               s.position === "LONG" ? "border-emerald-500/40 text-emerald-400" : "border-rose-500/40 text-rose-400"
-            }`}>{s.position === "LONG" ? "LONG (AL)" : "SHORT (SAT)"}</span>
+            }`}>{s.position === "LONG" ? "LONG (pozitif)" : "SHORT (negatif)"}</span>
             <span className="text-slate-400">giriş ${s.entry_price} (z={s.entry_z})</span>
             <span className="text-slate-500">boyut {(s.position_size_pct * 100).toFixed(0)}%</span>
             <span className={`font-mono font-bold ${pnlCls(s.open_pnl_pct)}`}>anlık {s.open_pnl_pct >= 0 ? "+" : ""}{s.open_pnl_pct.toFixed(2)}%</span>

@@ -16,9 +16,9 @@ interface Props {
 }
 
 const ACTION_CFG = {
-  BUY:  { label: "AL",    cls: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300", ring: "ring-1 ring-emerald-500/20" },
-  HOLD: { label: "TUT",   cls: "border-amber-500/40 bg-amber-500/15 text-amber-300",       ring: "ring-1 ring-amber-500/20" },
-  SELL: { label: "AZALT", cls: "border-rose-500/40 bg-rose-500/15 text-rose-300",          ring: "ring-1 ring-rose-500/20" },
+  BUY:  { label: "Pozitif", cls: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300", ring: "ring-1 ring-emerald-500/20" },
+  HOLD: { label: "Notr",    cls: "border-amber-500/40 bg-amber-500/15 text-amber-300",       ring: "ring-1 ring-amber-500/20" },
+  SELL: { label: "Negatif", cls: "border-rose-500/40 bg-rose-500/15 text-rose-300",          ring: "ring-1 ring-rose-500/20" },
 } as const;
 
 const MODULE_BAR: Record<string, string> = {

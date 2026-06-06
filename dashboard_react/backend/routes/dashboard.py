@@ -488,8 +488,8 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
             confs = cf.get("confluences", [])
             rev = cf.get("reversal_note")
             n_votes = cf.get("vote_count", 0)
-            sig_tr = {"STRONG_BUY": "GÜÇLÜ AL", "BUY": "AL", "HOLD": "BEKLE",
-                      "SELL": "SAT", "STRONG_SELL": "GÜÇLÜ SAT"}.get(sig_cf, sig_cf)
+            sig_tr = {"STRONG_BUY": "GUCLU POZITIF ADAY", "BUY": "POZITIF ADAY", "HOLD": "NOTR",
+                      "SELL": "NEGATIF ADAY", "STRONG_SELL": "GUCLU NEGATIF ADAY"}.get(sig_cf, sig_cf)
 
             parts_out = [f"EQS {eqs:.1f}/100 · {n_votes} gösterge konsensüsü → {sig_tr} (konviksiyon %{conv:.0f})"]
             if rev:
@@ -513,9 +513,9 @@ def _build_metric_summary(module: str, score: float, raw: Optional[dict]) -> str
         buy_count  = sum(1 for v in tf.values() if str(v).upper() in ("BUY", "STRONG_BUY"))
         sell_count = sum(1 for v in tf.values() if str(v).upper() in ("SELL", "STRONG_SELL"))
         hold_count = sum(1 for v in tf.values() if str(v).upper() in ("HOLD", "NEUTRAL"))
-        if buy_count > sell_count:    bias = "Çoğunluk AL"
-        elif sell_count > buy_count:  bias = "Çoğunluk SAT"
-        elif hold_count > 0 and buy_count == 0 and sell_count == 0:  bias = "Tümü Nötr (Bekleme)"
+        if buy_count > sell_count:    bias = "Cogunluk pozitif aday"
+        elif sell_count > buy_count:  bias = "Cogunluk negatif aday"
+        elif hold_count > 0 and buy_count == 0 and sell_count == 0:  bias = "Tumu notr"
         else:                         bias = "Karışık sinyal"
         return f"EQS {eqs:.1f} (küresel) · {signals} · {bias}.{indicator_hint}"
 

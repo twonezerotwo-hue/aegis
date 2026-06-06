@@ -26,11 +26,16 @@ except Exception as _aegis_core_import_err:
 from routes import dashboard
 from routes import macro
 from routes import stream
-from routes import ml_model
 from routes import agent as agent_routes
-from routes import optimizer_agent_routes
-from routes import paper_autotrader_routes
 from routes import alerts_routes
+try:
+    from routes import ml_model as _ml_model_routes_mod
+    _ml_model_available = True
+except Exception as _ml_model_import_err:
+    _ml_model_routes_mod = None  # type: ignore[assignment]
+    _ml_model_available = False
+    import logging as _log
+    _log.getLogger(__name__).warning("ml_model routes unavailable: %s", _ml_model_import_err)
 
 # Setup logging early
 logging.basicConfig(
@@ -61,7 +66,7 @@ def _legacy_feature_detail(feature: str, env_var: str, extra_reason: Optional[st
         "feature": feature,
         "reason": f"{feature} is disabled in the default safe runtime.",
         "env_var": env_var,
-        "legacy_runtime_enabled": False,
+        "legacy_runtime_enabled": LEGACY_RUNTIME_ENABLED,
     }
     if extra_reason:
         detail["extra_reason"] = extra_reason
@@ -128,6 +133,56 @@ def _load_paper_trading_router() -> APIRouter:
             feature="paper trading routes",
             env_var="AEGIS_ENABLE_PAPER_TRADING",
             tags=["paper_trading_disabled"],
+            extra_reason=str(exc),
+        )
+
+
+def _load_paper_autotrader_router() -> APIRouter:
+    if not PAPER_TRADING_ENABLED:
+        logger.info("Paper auto routes disabled in default safe runtime")
+        return _build_legacy_disabled_router(
+            prefix="/api/paper_auto",
+            feature="paper auto routes",
+            env_var="AEGIS_ENABLE_PAPER_TRADING",
+            tags=["paper_auto_disabled"],
+        )
+
+    try:
+        module = importlib.import_module("routes.paper_autotrader_routes")
+        logger.info("Paper auto routes enabled explicitly")
+        return module.router
+    except Exception as exc:
+        logger.warning("Paper auto router unavailable: %s", exc)
+        return _build_legacy_disabled_router(
+            prefix="/api/paper_auto",
+            feature="paper auto routes",
+            env_var="AEGIS_ENABLE_PAPER_TRADING",
+            tags=["paper_auto_disabled"],
+            extra_reason=str(exc),
+        )
+
+
+def _load_optimizer_agent_router() -> APIRouter:
+    if not OPTIMIZER_ENDPOINTS_ENABLED:
+        logger.info("Optimizer agent routes disabled in default safe runtime")
+        return _build_legacy_disabled_router(
+            prefix="/api/optimizer",
+            feature="optimizer agent routes",
+            env_var="AEGIS_ENABLE_OPTIMIZER_ENDPOINTS",
+            tags=["optimizer_agent_disabled"],
+        )
+
+    try:
+        module = importlib.import_module("routes.optimizer_agent_routes")
+        logger.info("Optimizer agent routes enabled explicitly")
+        return module.router
+    except Exception as exc:
+        logger.warning("Optimizer agent router unavailable: %s", exc)
+        return _build_legacy_disabled_router(
+            prefix="/api/optimizer",
+            feature="optimizer agent routes",
+            env_var="AEGIS_ENABLE_OPTIMIZER_ENDPOINTS",
+            tags=["optimizer_agent_disabled"],
             extra_reason=str(exc),
         )
 
@@ -264,10 +319,13 @@ app.include_router(_load_paper_trading_router())
 
 # Include macro routes
 app.include_router(macro.router)
-app.include_router(ml_model.router)
+if _ml_model_available and _ml_model_routes_mod is not None:
+    app.include_router(_ml_model_routes_mod.router)
+    logger.info("ml_model routes loaded")
+else:
+    logger.info("ml_model routes skipped in this runtime")
 app.include_router(agent_routes.router)
-app.include_router(optimizer_agent_routes.router)
-app.include_router(paper_autotrader_routes.router)
+app.include_router(_load_paper_autotrader_router())
 app.include_router(alerts_routes.router)
 
 # Include SSE live-feed route
@@ -1216,9 +1274,9 @@ async def get_dashboard(symbol: str = Query("BTC/USDT"), timeframe: str = Query(
             train_note = " | egitiliyor..." if is_training else ""
             detail = (
                 f"Tahmin: {sig}{fb_note} | "
-                f"AL=%{round(cached['buy_prob']*100,0):.0f} "
-                f"TUT=%{round(cached['hold_prob']*100,0):.0f} "
-                f"SAT=%{round(cached['sell_prob']*100,0):.0f} | "
+                f"Poz=%{round(cached['buy_prob']*100,0):.0f} "
+                f"Notr=%{round(cached['hold_prob']*100,0):.0f} "
+                f"Neg=%{round(cached['sell_prob']*100,0):.0f} | "
                 f"Guven: %{round(cached['confidence']*100,1)} | "
                 f"acc=%{meta.get('accuracy','?')}{train_note}"
             )
@@ -1416,10 +1474,10 @@ async def get_analysis(symbol: str = Query("BTC/USDT"), timeframe: str = Query("
 
             # Generate detailed analysis comments
             def get_touche_comment(val):
-                if val > 65: return "Guclu AL sinyali"
-                elif val > 55: return "AL bolgesine yakin"
-                elif val < 35: return "Guclu SAT sinyali"
-                elif val < 45: return "SAT bolgesine yakin"
+                if val > 65: return "Guclu pozitif aday"
+                elif val > 55: return "Pozitif aday bolgesine yakin"
+                elif val < 35: return "Guclu negatif aday"
+                elif val < 45: return "Negatif aday bolgesine yakin"
                 else: return "Kararsiz bolge"
 
             def get_fundamental_comment(val):
@@ -1454,14 +1512,14 @@ async def get_analysis(symbol: str = Query("BTC/USDT"), timeframe: str = Query("
             now_ts = datetime.now(timezone.utc).isoformat()
 
             if score < 40:
-                risk_notes.append(f"Guclu SAT sinyali - {score:.1f} puaninda")
-                action_points.append("SAT pozisyonu dusun (65+ beklediginde tekrar AL)")
+                risk_notes.append(f"Guclu negatif aday - {score:.1f} puaninda")
+                action_points.append("Evidence-only: pozitif teyit gelene kadar aday zayif kalir")
             elif score > 65:
-                risk_notes.append(f"Guclu AL sinyali - {score:.1f} puaninda")
-                action_points.append(f"AL pozisyonu dusun (Risk: Fundamental={fundamental_score:.1f})")
+                risk_notes.append(f"Guclu pozitif aday - {score:.1f} puaninda")
+                action_points.append(f"Evidence-only: fundamental risk {fundamental_score:.1f} ile izlenmeli")
             else:
                 risk_notes.append(f"Kararsiz bolge - {score:.1f} puaninda BEKLE")
-                action_points.append("65+ veya 35- beklemeye devam et")
+                action_points.append("Evidence-only: net aday icin 65+ veya 35- bolgesi izlenir")
 
             if fundamental_score < 40:
                 risk_notes.append("Fundamental skor dusuk - on-chain aktivite azalis")
@@ -1487,20 +1545,20 @@ async def get_analysis(symbol: str = Query("BTC/USDT"), timeframe: str = Query("
                     },
                     "consensus": {
                         "weighted_score": score,
-                        "final_direction": recommendation,
+                        "candidate_direction": recommendation,
                         "confidence": confidence * 100,
                     },
-                    "final_recommendation": recommendation,
-                    "final_reason": (
+                    "candidate_assessment": recommendation,
+                    "evidence_reason": (
                         f"Teknik: {touche_score:.1f}% - {get_touche_comment(touche_score)}\n"
                         f"Temel: {fundamental_score:.1f}% - {get_fundamental_comment(fundamental_score)}\n"
                         f"Likidite: {touche_score:.1f}% - {get_quantum_comment(touche_score)}\n"
                         f"Risk: {fundamental_score:.1f}% - {get_sentinel_comment(fundamental_score)}\n"
                         f"Haber: {news_score:.1f}% - {get_news_comment(news_score)}\n\n"
-                        f"Oneri: {recommendation} - Skor={score:.2f}% (Confidence={confidence*100:.0f}%)"
+                        f"Aday: {recommendation} - Skor={score:.2f}% (Confidence={confidence*100:.0f}%)"
                     ),
                     "risk_notes": [note for note in risk_notes if note],
-                    "action_points": action_points,
+                    "evidence_points": action_points,
                 },
             }
     except httpx.ConnectError:
@@ -1784,6 +1842,9 @@ async def get_optimization_history(limit: int = Query(10)):
     except Exception as e:
         logger.error(f"Error getting optimization history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+app.include_router(_load_optimizer_agent_router())
 
 
 if __name__ == "__main__":

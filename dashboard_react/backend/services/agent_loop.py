@@ -349,6 +349,12 @@ class AgentOrchestrator:
                 f.write(json.dumps(d.to_dict(), ensure_ascii=False) + "\n")
         except Exception as exc:
             logger.debug("journal persist failed: %s", exc)
+        try:
+            from aegis_research.outcomes import get_default_store
+
+            get_default_store().record_agent_decision(d.to_dict())
+        except Exception as exc:
+            logger.debug("research candidate persist failed: %s", exc)
         # Önemli kararları logla + uyarı yayınla
         if d.decision not in ("no_action",):
             logger.info("AGENT_DECISION %s %s → %s | %s",

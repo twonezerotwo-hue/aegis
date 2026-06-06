@@ -290,7 +290,7 @@ class PaperAutoTrader:
                     f"fiyat ${st.last_price}")
         wins = sum(1 for t in st.trades if t["pnl_usd"] > 0)
         return (f"Pozisyon yok · {len(st.trades)} işlem ({wins} kâr) · "
-                f"sinyal={'AL' if st.last_signal==1 else 'SAT' if st.last_signal==-1 else 'BEKLE'} · z={st.last_z}")
+                f"sinyal={'pozitif' if st.last_signal==1 else 'negatif' if st.last_signal==-1 else 'notr'} · z={st.last_z}")
 
     # ── Durum + kalıcılık ──────────────────────────────────────────────────────
     def status(self) -> dict:

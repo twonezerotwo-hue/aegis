@@ -43,7 +43,7 @@ def _build_prompt(ctx: dict[str, Any]) -> str:
     timeframe    = ctx.get("timeframe", "4h")
     warnings     = ctx.get("warnings", [])
 
-    action_tr = {"BUY": "AL", "SELL": "SAT", "HOLD": "TUT"}.get(action, action)
+    action_tr = {"BUY": "pozitif aday", "SELL": "negatif aday", "HOLD": "notr / aday yok"}.get(action, action)
 
     mod_lines = "\n".join(
         f"  - {k.capitalize()}: {round(v*100)}%"
@@ -63,8 +63,8 @@ Aşağıdaki verilere dayanarak {symbol}/{timeframe} için kısa, net ve profesy
 Türkçe gerekçe yaz. Maksimum 3 cümle. Teknik jargon kullan ama anlaşılır ol.
 Sayısal verileri kullan. "Sistem" veya "AEGIS" kelimesini kullanma.
 
-== SİNYAL ==
-Karar: {action_tr} (Güven: {confidence}%, 5-Modül: {round(five_mod*100, 1)})
+== ADAY DURUMU ==
+Aday: {action_tr} (Guven: {confidence}%, 5-Modul: {round(five_mod*100, 1)})
 
 == MODÜL SKORLARI ==
 {mod_lines}

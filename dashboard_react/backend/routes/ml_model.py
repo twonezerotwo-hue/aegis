@@ -16,7 +16,7 @@ Hedef değişken:
 Çıktı:
   buy_prob : 0-1   → 0.5 normalleştirilerek consensus'a girer
   sell_prob: 0-1
-  ml_score : 0-1   → 0.5 nötr, >0.65 AL, <0.35 SAT
+  ml_score : 0-1   -> 0.5 notr, >0.65 pozitif aday, <0.35 negatif aday
 """
 from __future__ import annotations
 
@@ -231,7 +231,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         return (s - mu) / (sig + 1e-10)
 
     # ── Getiriler: Z-score'lu (trend etkisi giderilmiş) ───────────────────
-    # Sorun: ham ret_1=+0.02 → model "pozitif → AL" öğreniyor (bull'da hep 0.95)
+    # Sorun: ham ret_1=+0.02 -> model pozitif aday ogreniyor (bull'da hep 0.95)
     # Düzeltme: ret_z = (bu getiri - son 50 bar ortalama getiri) / std
     #   → "olağan trend" mı yoksa "olağandışı hareket" mi ayrımı yapılır
     for n in [1, 2, 3, 5, 10, 20]:

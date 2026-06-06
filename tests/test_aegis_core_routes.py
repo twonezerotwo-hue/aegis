@@ -201,6 +201,7 @@ def test_route_file_does_not_import_forbidden_modules():
         "optimizer_service",
         "paper_trading",
         "bounded_updater",
+        "aegis_research",
     }
     imported: set[str] = set()
 

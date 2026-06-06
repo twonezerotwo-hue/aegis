@@ -50,6 +50,8 @@ def test_main_file_avoids_top_level_legacy_imports():
 
     joined = " | ".join(top_level_imports)
     assert "routes:paper_trading" not in joined
+    assert "routes:paper_autotrader_routes" not in joined
+    assert "routes:optimizer_agent_routes" not in joined
     assert "unified_optimizer" not in joined
     assert "execution_engine" not in joined
 
@@ -81,6 +83,12 @@ def test_default_runtime_disables_legacy_execution_and_optimizer(monkeypatch):
     assert optimizer_data["feature"] == "optimizer endpoints"
     assert optimizer_data["env_var"] == "AEGIS_ENABLE_OPTIMIZER_ENDPOINTS"
 
+    optimizer_run_response = client.post("/api/optimizer/run", json={})
+    assert optimizer_run_response.status_code == 503
+    optimizer_run_data = optimizer_run_response.json()
+    assert optimizer_run_data["detail"]["feature"] == "optimizer agent routes"
+    assert optimizer_run_data["detail"]["env_var"] == "AEGIS_ENABLE_OPTIMIZER_ENDPOINTS"
+
 
 def test_default_runtime_disables_paper_trading_routes(monkeypatch):
     module = _load_main_module(monkeypatch)
@@ -91,3 +99,9 @@ def test_default_runtime_disables_paper_trading_routes(monkeypatch):
     data = response.json()
     assert data["detail"]["feature"] == "paper trading routes"
     assert data["detail"]["env_var"] == "AEGIS_ENABLE_PAPER_TRADING"
+
+    auto_response = client.get("/api/paper_auto/status")
+    assert auto_response.status_code == 503
+    auto_data = auto_response.json()
+    assert auto_data["detail"]["feature"] == "paper auto routes"
+    assert auto_data["detail"]["env_var"] == "AEGIS_ENABLE_PAPER_TRADING"

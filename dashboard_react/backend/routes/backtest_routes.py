@@ -1434,7 +1434,7 @@ def generate_zscore_signals(
         # 1d/1w için "contrarian" mod:
         #   z < -threshold AND trend_up = 1  → LONG (dip al, trend yukarı)
         #   z >  threshold AND trend_up = 0  → SHORT (tepe sat, trend aşağı)
-        # Neden: günlük timeframe'de consensus yüksekken HERKES AL diyor = tepe
+        # Neden: gunluk timeframe'de consensus yuksekken herkes pozitif aday veriyor = tepe
         #        consensus düşükken herkes korku içinde = dip fırsatı (klasik)
         # 1d: iteratif optimizasyon → kontrarian z=1.734 adx=13 (WR=73.7% kârlı)
         "1d":   {"window":  30, "min_periods":  5, "threshold": 1.734, "adx_default": 13,

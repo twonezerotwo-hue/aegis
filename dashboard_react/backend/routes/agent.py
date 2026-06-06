@@ -40,6 +40,36 @@ async def agent_journal(limit: int = Query(50, ge=1, le=250)) -> Dict[str, Any]:
     }
 
 
+@router.get("/research/summary")
+async def agent_research_summary(limit: int = Query(500, ge=1, le=5000)) -> Dict[str, Any]:
+    """Research-only candidate summary. Does not change runtime config."""
+    from aegis_research.data_adapters import adapter_inventory
+    from aegis_research.metrics import optional_dependency_status
+    from aegis_research.outcomes import get_default_store
+
+    return {
+        "summary": get_default_store().summarize(limit=limit),
+        "optional_metrics": optional_dependency_status(),
+        "data_adapters": adapter_inventory(),
+        "safe_mode": "RESEARCH_ONLY_NO_EXECUTION",
+    }
+
+
+@router.get("/research/suggestions")
+async def agent_research_suggestions(limit: int = Query(500, ge=1, le=5000)) -> Dict[str, Any]:
+    """Shadow-only threshold suggestions. Owner approval is required separately."""
+    from aegis_research.calibration import suggest_thresholds
+    from aegis_research.metrics import calculate_metric_summary
+    from aegis_research.outcomes import get_default_store
+
+    records = list(get_default_store().iter_candidates(limit=limit))
+    return {
+        "metrics": calculate_metric_summary(records).to_dict(),
+        "thresholds": suggest_thresholds(records).to_dict(),
+        "safe_mode": "SHADOW_ONLY_NO_CONFIG_WRITE",
+    }
+
+
 @router.post("/start")
 async def agent_start() -> Dict[str, Any]:
     """Otonom karar döngüsünü başlat (güvenli — moda göre yönlendirir)."""

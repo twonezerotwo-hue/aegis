@@ -21,9 +21,7 @@ import { DataSyncMonitor } from "../components/debug/DataSyncMonitor";
 
 // V1 components
 import { MetricCard } from "../components/MetricCard";
-import { ConsensusCard } from "../components/ConsensusCard";
 import { SystemStatus } from "../components/SystemStatus";
-import { AlertBanner } from "../components/AlertBanner";
 import { KontrolMerkezi } from "../components/control/KontrolMerkezi";
 import { AgentControlPanel } from "../components/control/AgentControlPanel";
 import { AlertsPanel } from "../components/control/AlertsPanel";
@@ -171,7 +169,7 @@ function whyLines(key: string, m: MetricRaw, tf: string): string[] {
   const summary = m.summary ?? "";
 
   if (key === "touche") {
-    // summary: "EQS 17.1 (küresel) · 15m: BUY · 1h: NEUTRAL · 4h: SELL · 1d: SELL · Çoğunluk SAT. | 4H RSI=18↓(aşırı satım) MACD=↓ EMA=↓trend"
+    // summary: "EQS 17.1 (kuresel) - 15m: BUY - 1h: NEUTRAL - 4h: SELL - 1d: SELL - cogunluk negatif."
     const tfMatches = [...summary.matchAll(/(\d+[mhd]+):\s*(BUY|SELL|NEUTRAL)/gi)];
     const tfs: { tf: string; sig: string }[] = tfMatches.map(m2 => ({ tf: m2[1].toLowerCase(), sig: m2[2].toUpperCase() }));
     const eqsMatch  = summary.match(/EQS\s*([\d.]+)/);
@@ -191,7 +189,7 @@ function whyLines(key: string, m: MetricRaw, tf: string): string[] {
         : `${tf.toUpperCase()} için sinyal yok, küresel EQS kullanıldı.`;
     const l3 = conflict.length
       ? `Çelişki yüzünden ağırlıklı oy ortaya çekildi → nihai skor %${pct}.`
-      : `TF'ler uyumlu → skor ${pct >= 65 ? "güçlü AL bölgesi" : pct >= 45 ? "nötr bekleme" : "güçlü SAT bölgesi"}; %${pct}.`;
+      : `TF'ler uyumlu → skor ${pct >= 65 ? "pozitif aday bolgesi" : pct >= 45 ? "notr bekleme" : "negatif aday bolgesi"}; %${pct}.`;
     return [l1, l2, l3];
   }
 
@@ -827,7 +825,7 @@ const DashboardV2Inner: React.FC = () => {
                     const actCls = act === "BUY" ? "text-emerald-400 border-emerald-500/40 bg-emerald-500/10"
                                  : act === "SELL" ? "text-rose-400 border-rose-500/40 bg-rose-500/10"
                                  : "text-amber-400 border-amber-500/40 bg-amber-500/10";
-                    const actTr = act === "BUY" ? "AL" : act === "SELL" ? "SAT" : "TUT";
+                    const actTr = act === "BUY" ? "Pozitif aday" : act === "SELL" ? "Negatif aday" : "Aday yok";
                     const svcs  = metricsData.health?.services ?? {};
                     const svcList = [
                       { k: "touche",      label: "T" },
@@ -988,11 +986,11 @@ const DashboardV2Inner: React.FC = () => {
                             <div className="ml-[1.4rem] flex items-center gap-2 text-[9px] text-slate-600">
                               {detail?.signal && (
                                 <span className={`rounded border px-1.5 py-0.5 font-mono text-[8px] font-bold ${sigBadge}`}>
-                                  {detail.signal === "BUY" ? "AL" : detail.signal === "SELL" ? "SAT" : "TUT"}
+                                  {detail.signal === "BUY" ? "POS" : detail.signal === "SELL" ? "NEG" : "NEU"}
                                 </span>
                               )}
-                              <span>AL {Math.round((detail.buy_prob ?? 0) * 100)}%</span>
-                              <span>SAT {Math.round((detail.sell_prob ?? 0) * 100)}%</span>
+                              <span>Poz {Math.round((detail.buy_prob ?? 0) * 100)}%</span>
+                              <span>Neg {Math.round((detail.sell_prob ?? 0) * 100)}%</span>
                               <span className="text-slate-700">· güven %{Math.round((detail.confidence ?? 0) * 100)}</span>
                               <span className="text-indigo-700">· XGBoost · consensus ağırlık %{Math.round((wMap.ml ?? 0) * 100)}</span>
                             </div>

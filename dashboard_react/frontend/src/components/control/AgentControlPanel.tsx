@@ -45,6 +45,33 @@ interface Decision {
   signal_id?: string | null;
 }
 
+interface ResearchSummary {
+  summary?: {
+    sample_size: number;
+    by_decision: Record<string, number>;
+    by_direction: Record<string, number>;
+    safe_mode: string;
+  };
+  optional_metrics?: Record<string, string>;
+  safe_mode?: string;
+}
+
+interface ResearchSuggestions {
+  thresholds?: {
+    status: string;
+    proposed_thresholds: Record<string, number>;
+    sample_size: number;
+    reason: string;
+    shadow_only: boolean;
+  };
+  metrics?: {
+    hit_rate: number | null;
+    calibration_error: number | null;
+    sample_size: number;
+  };
+  safe_mode?: string;
+}
+
 const DECISION_STYLE: Record<string, { label: string; cls: string }> = {
   no_action:               { label: "Yön yok",          cls: "text-slate-400 bg-slate-700/35" },
   would_signal:            { label: "Sinyal kaydı",     cls: "text-sky-300 bg-sky-500/10" },
@@ -172,6 +199,8 @@ function heartbeatState(status: AgentStatus): { label: string; cls: string } {
 export const AgentControlPanel: React.FC = () => {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [journal, setJournal] = useState<Decision[]>([]);
+  const [research, setResearch] = useState<ResearchSummary | null>(null);
+  const [suggestions, setSuggestions] = useState<ResearchSuggestions | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -179,9 +208,11 @@ export const AgentControlPanel: React.FC = () => {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const [statusRes, journalRes] = await Promise.all([
+      const [statusRes, journalRes, researchRes, suggestionsRes] = await Promise.all([
         fetch(`${API_BASE}/api/agent/status`),
         fetch(`${API_BASE}/api/agent/journal?limit=40`),
+        fetch(`${API_BASE}/api/agent/research/summary?limit=500`),
+        fetch(`${API_BASE}/api/agent/research/suggestions?limit=500`),
       ]);
 
       if (!statusRes.ok) throw new Error(`status ${statusRes.status}`);
@@ -193,6 +224,12 @@ export const AgentControlPanel: React.FC = () => {
       if (journalRes.ok) {
         const data = (await journalRes.json()) as { decisions?: Decision[] };
         setJournal(data.decisions ?? []);
+      }
+      if (researchRes.ok) {
+        setResearch((await researchRes.json()) as ResearchSummary);
+      }
+      if (suggestionsRes.ok) {
+        setSuggestions((await suggestionsRes.json()) as ResearchSuggestions);
       }
     } catch {
       setLoadError("Agent API erişilemedi.");
@@ -387,7 +424,7 @@ export const AgentControlPanel: React.FC = () => {
           )}
         </div>
 
-        <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-6">
           <div className="rounded-xl border border-slate-800 bg-slate-950/35 p-4">
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500">Döngü</p>
             <p className="mt-2 font-mono text-2xl font-bold text-slate-100">{status.cycle_count}</p>
