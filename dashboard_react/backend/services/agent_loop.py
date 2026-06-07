@@ -187,6 +187,7 @@ class AgentOrchestrator:
             return {"status": "error", "error": "Agent not wired — consensus_fn missing"}
         self._stop_evt.clear()
         self._running = True
+        self.config.enabled = True
         self.started_at = _now_iso()
         self.last_error = None
         self._task = asyncio.get_event_loop().create_task(self._run_loop())
@@ -199,6 +200,7 @@ class AgentOrchestrator:
             return {"status": "already_stopped", **self.status()}
         self._stop_evt.set()
         self._running = False
+        self.config.enabled = False
         if self._task:
             try:
                 await asyncio.wait_for(self._task, timeout=5.0)
@@ -538,9 +540,13 @@ class AgentOrchestrator:
         """Tek döngü çalıştır (test/manuel tetikleme) — agent kapalıyken bile."""
         if self._consensus_fn is None:
             return {"status": "error", "error": "Agent not wired"}
-        before = len(self.journal)
+        before_ids = {id(item) for item in self.journal}
         await self._decision_cycle()
-        new = self.recent_journal(limit=len(self.journal) - before) if len(self.journal) > before else []
+        new = [
+            item.to_dict()
+            for item in reversed(self.journal)
+            if id(item) not in before_ids
+        ]
         return {"status": "ok", "cycle": self.cycle_count, "new_decisions": new}
 
 

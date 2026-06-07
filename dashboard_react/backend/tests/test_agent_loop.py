@@ -8,7 +8,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from services.agent_loop import AgentOrchestrator
+from services.agent_loop import AgentDecision, AgentOrchestrator
 from services.agent_guard import CANONICAL_DECISION_PERMISSION, guard_agent_response
 
 
@@ -56,6 +56,37 @@ async def test_agent_thresholds_can_derive_signal_from_dashboard_hold_band():
     assert decision["score"] == pytest.approx(0.5694)
     assert decision["confidence"] == pytest.approx(0.5694)
     assert "agent esiginden turetildi" in decision["reason"]
+
+
+@pytest.mark.asyncio
+async def test_run_once_returns_new_decision_when_journal_ring_is_full():
+    agent = _build_agent(
+        {
+            "action": "HOLD",
+            "weighted_score": 0.5694,
+            "confidence": 0.5,
+        }
+    )
+    agent.journal = [
+        AgentDecision(
+            ts=f"2026-01-01T00:00:{idx % 60:02d}+00:00",
+            symbol="BTC/USDT",
+            timeframe="5m",
+            action="HOLD",
+            score=0.5,
+            confidence=0.5,
+            decision="no_action",
+            reason="seed",
+            mode="DRY_RUN",
+        )
+        for idx in range(250)
+    ]
+
+    result = await agent.run_once()
+
+    assert len(agent.journal) == 250
+    assert len(result["new_decisions"]) == 1
+    assert result["new_decisions"][0]["decision"] == "would_signal"
 
 
 @pytest.mark.asyncio
