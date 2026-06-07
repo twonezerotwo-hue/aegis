@@ -15,9 +15,12 @@ gerekir ve her sinyal insan onayı bekler.
 from __future__ import annotations
 
 import logging
+import time
 from fastapi import APIRouter, Body, Query
 from typing import Any, Dict
 
+from services.agent_audit import agent_audit_stats, get_recent_agent_audit, record_agent_audit
+from services.agent_guard import guard_agent_response
 from services.agent_loop import get_agent
 
 logger = logging.getLogger(__name__)
@@ -27,17 +30,37 @@ router = APIRouter(prefix="/api/agent", tags=["agent"])
 @router.get("/status")
 async def agent_status() -> Dict[str, Any]:
     """Agent yaşam döngüsü + config + heartbeat."""
-    return get_agent().status()
+    return guard_agent_response(get_agent().status(), source="agent.status")
 
 
 @router.get("/journal")
 async def agent_journal(limit: int = Query(50, ge=1, le=250)) -> Dict[str, Any]:
     """Son kararlar (en yeni önce)."""
     agent = get_agent()
-    return {
+    return guard_agent_response({
         "decisions": agent.recent_journal(limit=limit),
         "total_in_memory": len(agent.journal),
-    }
+    }, source="agent.journal")
+
+
+@router.get("/audit/recent")
+async def agent_audit_recent(
+    limit: int = Query(50, ge=1, le=500),
+    endpoint: str | None = Query(None),
+) -> Dict[str, Any]:
+    """Recent agent audit entries."""
+    items = get_recent_agent_audit(limit=limit, endpoint=endpoint)
+    return guard_agent_response({
+        "status": "ok",
+        "count": len(items),
+        "items": items,
+    }, source="agent.audit.recent")
+
+
+@router.get("/audit/stats")
+async def agent_audit_stats_route() -> Dict[str, Any]:
+    """Agent audit ring-buffer stats."""
+    return guard_agent_response({"status": "ok", **agent_audit_stats()}, source="agent.audit.stats")
 
 
 @router.get("/research/summary")
@@ -47,12 +70,12 @@ async def agent_research_summary(limit: int = Query(500, ge=1, le=5000)) -> Dict
     from aegis_research.metrics import optional_dependency_status
     from aegis_research.outcomes import get_default_store
 
-    return {
+    return guard_agent_response({
         "summary": get_default_store().summarize(limit=limit),
         "optional_metrics": optional_dependency_status(),
         "data_adapters": adapter_inventory(),
         "safe_mode": "RESEARCH_ONLY_NO_EXECUTION",
-    }
+    }, source="agent.research.summary")
 
 
 @router.get("/research/suggestions")
@@ -63,29 +86,51 @@ async def agent_research_suggestions(limit: int = Query(500, ge=1, le=5000)) -> 
     from aegis_research.outcomes import get_default_store
 
     records = list(get_default_store().iter_candidates(limit=limit))
-    return {
+    return guard_agent_response({
         "metrics": calculate_metric_summary(records).to_dict(),
         "thresholds": suggest_thresholds(records).to_dict(),
         "safe_mode": "SHADOW_ONLY_NO_CONFIG_WRITE",
-    }
+    }, source="agent.research.suggestions")
 
 
 @router.post("/start")
 async def agent_start() -> Dict[str, Any]:
     """Otonom karar döngüsünü başlat (güvenli — moda göre yönlendirir)."""
-    return await get_agent().start()
+    started_at = time.monotonic()
+    response = guard_agent_response(await get_agent().start(), source="agent.start")
+    record_agent_audit(
+        endpoint="agent.start",
+        output_payload=response,
+        duration_ms=(time.monotonic() - started_at) * 1000.0,
+    )
+    return response
 
 
 @router.post("/stop")
 async def agent_stop() -> Dict[str, Any]:
     """Otonom döngüyü durdur."""
-    return await get_agent().stop()
+    started_at = time.monotonic()
+    response = guard_agent_response(await get_agent().stop(), source="agent.stop")
+    record_agent_audit(
+        endpoint="agent.stop",
+        output_payload=response,
+        duration_ms=(time.monotonic() - started_at) * 1000.0,
+    )
+    return response
 
 
 @router.post("/run_once")
 async def agent_run_once() -> Dict[str, Any]:
     """Tek döngü çalıştır — agent kapalıyken test için."""
-    return await get_agent().run_once()
+    started_at = time.monotonic()
+    response = guard_agent_response(await get_agent().run_once(), source="agent.run_once")
+    record_agent_audit(
+        endpoint="agent.run_once",
+        output_payload=response,
+        duration_ms=(time.monotonic() - started_at) * 1000.0,
+        extra={"new_decisions": len(response.get("new_decisions", []))},
+    )
+    return response
 
 
 @router.post("/config")
@@ -135,4 +180,14 @@ async def agent_config(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         changed["max_signals_per_day"] = cfg.max_signals_per_day
 
     logger.info("Agent config updated: %s", changed)
-    return {"status": "updated", "changed": changed, "config": cfg.to_dict()}
+    response = guard_agent_response(
+        {"status": "updated", "changed": changed, "config": cfg.to_dict()},
+        source="agent.config",
+    )
+    record_agent_audit(
+        endpoint="agent.config",
+        input_payload=body,
+        output_payload=response,
+        extra={"changed": sorted(changed.keys())},
+    )
+    return response

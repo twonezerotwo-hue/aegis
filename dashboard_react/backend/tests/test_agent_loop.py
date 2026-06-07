@@ -9,6 +9,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from services.agent_loop import AgentOrchestrator
+from services.agent_guard import CANONICAL_DECISION_PERMISSION, guard_agent_response
 
 
 def _build_agent(consensus_payload: dict, *, min_confidence: float = 0.55, min_edge: float = 0.04) -> AgentOrchestrator:
@@ -114,3 +115,17 @@ async def test_agent_selects_best_candidate_across_timeframes():
     assert decision["confidence"] == pytest.approx(0.61)
     assert "5m=0.530" in decision["reason"]
     assert "1h=0.610" in decision["reason"]
+    assert len(decision["evaluations"]) == 3
+    assert decision["evaluations"][-1]["passes"] is True
+
+
+def test_agent_guard_marks_response_signal_only():
+    response = guard_agent_response(
+        {"status": "ok", "final_decision": True, "summary": "execute this trade"},
+        source="test",
+    )
+
+    assert response["decision_permission"] == CANONICAL_DECISION_PERMISSION
+    assert response["final_decision"] is False
+    assert response["execution_authority"] == "human"
+    assert response["guard_warnings"]

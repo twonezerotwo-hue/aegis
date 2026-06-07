@@ -59,6 +59,22 @@ def _default_candidate_timeframes() -> list[str]:
     return list(_AGENT_VALID_TIMEFRAMES)
 
 
+def _compact_evaluations(evaluations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for item in evaluations:
+        compact.append({
+            "timeframe": item.get("timeframe"),
+            "action": item.get("action"),
+            "raw_action": item.get("raw_action"),
+            "score": round(float(item.get("score", 0.5)), 4),
+            "confidence": round(float(item.get("confidence", 0.0)), 4),
+            "edge": round(float(item.get("edge", 0.0)), 4),
+            "passes": bool(item.get("passes", False)),
+            "error": item.get("error"),
+        })
+    return compact
+
+
 # ── Bağımlılık tipleri (main.py enjekte eder) ──────────────────────────────────
 ConsensusFn   = Callable[[str, str, str], Awaitable[dict]]      # (symbol, tf, horizon) → consensus dict
 EnqueueFn     = Callable[[dict], Optional[str]]                 # signal dict → signal_id | None
@@ -101,6 +117,7 @@ class AgentDecision:
     reason: str
     mode: str
     signal_id: Optional[str] = None
+    evaluations: Optional[list[dict[str, Any]]] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -308,6 +325,7 @@ class AgentOrchestrator:
             f"{item['timeframe']}={float(item['score']):.3f}/{item['action']}"
             for item in evaluations
         )
+        evaluation_summary = _compact_evaluations(evaluations)
 
         if action == "HOLD" or action not in ("BUY", "SELL"):
             self._journal_add(AgentDecision(
@@ -316,6 +334,7 @@ class AgentOrchestrator:
                 decision="no_action",
                 reason=f"Timeframe candidates produced no direction ({tf_summary})",
                 mode=mode,
+                evaluations=evaluation_summary,
             ))
             return
 
@@ -329,6 +348,7 @@ class AgentOrchestrator:
                     f"or edge {edge:.3f}<{self.config.min_score_edge}. Candidates: {tf_summary}"
                 ),
                 mode=mode,
+                evaluations=evaluation_summary,
             ))
             return
 
@@ -339,6 +359,7 @@ class AgentOrchestrator:
                 decision="rejected_daily_limit",
                 reason=f"Daily signal limit reached ({self.config.max_signals_per_day})",
                 mode=mode,
+                evaluations=evaluation_summary,
             ))
             return
 
@@ -352,6 +373,7 @@ class AgentOrchestrator:
                         decision="rejected_price_unverified",
                         reason=f"Price could not be verified (deviation %{vld.get('deviation_pct', 0)})",
                         mode=mode,
+                        evaluations=evaluation_summary,
                     ))
                     return
             except Exception:
@@ -373,6 +395,7 @@ class AgentOrchestrator:
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
                 decision="would_signal",
                 reason=f"DRY_RUN - no order is opened. {reason}", mode=mode,
+                evaluations=evaluation_summary,
             ))
             self._signals_today += 1
         elif mode == "MANUAL_APPROVAL":
@@ -396,6 +419,7 @@ class AgentOrchestrator:
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
                 decision="queued_for_approval",
                 reason=f"Waiting for human approval. {reason}", mode=mode, signal_id=sig_id,
+                evaluations=evaluation_summary,
             ))
             self._signals_today += 1
         else:
@@ -408,6 +432,7 @@ class AgentOrchestrator:
                     f"manual execution endpoint would be required. {reason}"
                 ),
                 mode=mode,
+                evaluations=evaluation_summary,
             ))
             self._signals_today += 1
 
