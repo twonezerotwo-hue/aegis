@@ -80,6 +80,7 @@ services:
     restart: unless-stopped
 
   postgres-exporter:
+    profiles: ["observe"]
     image: prometheuscommunity/postgres-exporter:latest
     container_name: aegis-postgres-exporter
     command:
@@ -101,6 +102,7 @@ services:
     restart: unless-stopped
 
   redis-exporter:
+    profiles: ["observe"]
     image: oliver006/redis_exporter:latest
     container_name: aegis-redis-exporter
     environment:
@@ -118,6 +120,7 @@ services:
     restart: unless-stopped
 
   pushgateway:
+    profiles: ["observe"]
     image: prom/pushgateway:latest
     container_name: aegis-pushgateway
     ports:
@@ -132,6 +135,7 @@ services:
     restart: unless-stopped
 
   metrics-pusher:
+    profiles: ["observe"]
     build:
       context: .
       dockerfile: Dockerfile.metrics
@@ -150,6 +154,7 @@ services:
     restart: unless-stopped
 
   grafana:
+    profiles: ["observe"]
     image: grafana/grafana:latest
     container_name: aegis-grafana
     environment:
@@ -398,6 +403,7 @@ services:
 
   # Optuna Optimizer Service
   optimizer-api:
+    profiles: ["research"]
     build:
       context: .
       dockerfile: optimizer_service/Dockerfile
@@ -516,6 +522,7 @@ services:
 
   # Macro Bridge - Streamlit macro regime bridge service
   macro-bridge:
+    profiles: ["research"]
     build:
       context: ./macro_bridge
     container_name: aegis-macro-bridge
