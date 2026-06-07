@@ -31,6 +31,32 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = os.getenv("AGENT_DATA_DIR", "/app/data")
 _JOURNAL_PATH = os.path.join(_DATA_DIR, "agent_journal.jsonl")
 _MAX_MEMORY_ENTRIES = 250
+_AGENT_VALID_TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d", "1w")
+
+
+def _normalize_agent_timeframes(value: Any, fallback: list[str] | None = None) -> list[str]:
+    if isinstance(value, str):
+        raw_values = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = [str(part).strip() for part in value]
+    else:
+        raw_values = []
+
+    normalized: list[str] = []
+    for item in raw_values:
+        if item in _AGENT_VALID_TIMEFRAMES and item not in normalized:
+            normalized.append(item)
+
+    if not normalized and fallback is not None:
+        return _normalize_agent_timeframes(fallback)
+    return normalized
+
+
+def _default_candidate_timeframes() -> list[str]:
+    configured = os.getenv("AGENT_CANDIDATE_TIMEFRAMES", "").strip()
+    if configured:
+        return _normalize_agent_timeframes(configured, fallback=[os.getenv("AGENT_TIMEFRAME", "4h")])
+    return list(_AGENT_VALID_TIMEFRAMES)
 
 
 # ── Bağımlılık tipleri (main.py enjekte eder) ──────────────────────────────────
@@ -46,6 +72,7 @@ class AgentConfig:
     interval_sec: int      = field(default_factory=lambda: int(os.getenv("AGENT_INTERVAL_SEC", "300")))
     watch_symbols: list[str] = field(default_factory=lambda: os.getenv("AGENT_SYMBOLS", "BTC/USDT").split(","))
     timeframe: str         = field(default_factory=lambda: os.getenv("AGENT_TIMEFRAME", "4h"))
+    candidate_timeframes: list[str] = field(default_factory=_default_candidate_timeframes)
     horizon: str           = field(default_factory=lambda: os.getenv("AGENT_HORIZON", "medium"))
     min_confidence: float  = field(default_factory=lambda: float(os.getenv("AGENT_MIN_CONFIDENCE", "0.62")))
     min_score_edge: float  = field(default_factory=lambda: float(os.getenv("AGENT_MIN_SCORE_EDGE", "0.08")))  # |score-0.5|
@@ -55,6 +82,10 @@ class AgentConfig:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["watch_symbols"] = [s.strip() for s in self.watch_symbols if s.strip()]
+        d["candidate_timeframes"] = _normalize_agent_timeframes(
+            self.candidate_timeframes,
+            fallback=[self.timeframe],
+        )
         return d
 
 
@@ -117,6 +148,16 @@ class AgentOrchestrator:
         self._kill_switch_fn = kill_switch_fn
         self._price_check_fn = price_check_fn
         logger.info("Agent dependencies wired (consensus, enqueue, kill_switch, price_check)")
+
+    def _candidate_timeframes(self) -> list[str]:
+        configured = _normalize_agent_timeframes(
+            self.config.candidate_timeframes,
+            fallback=[self.config.timeframe],
+        )
+        primary = str(self.config.timeframe).strip()
+        if primary in _AGENT_VALID_TIMEFRAMES and primary not in configured:
+            configured.insert(0, primary)
+        return configured
 
     # ── Yaşam döngüsü ──────────────────────────────────────────────────────────
     def is_running(self) -> bool:
@@ -194,114 +235,182 @@ class AgentOrchestrator:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Agent evaluate %s failed: %s", symbol, exc)
 
+    # ── Çoklu timeframe değerlendirme ─────────────────────────────────────────
     async def _evaluate_symbol(self, symbol: str) -> None:
-        consensus = await self._consensus_fn(symbol, self.config.timeframe, self.config.horizon)
-        action     = str(consensus.get("action", "HOLD")).upper()
-        score      = float(consensus.get("weighted_score", 0.5))
-        confidence = float(consensus.get("confidence", 0.5))
-        mode       = self.config.execution_mode
-        action, confidence, derived_from_score = self._derive_agent_signal(
-            action=action,
-            score=score,
-            confidence=confidence,
-        )
+        mode = self.config.execution_mode
 
-        # HOLD veya zayıf kenar → işlem yok
-        edge = abs(score - 0.5)
-        if action == "HOLD" or action not in ("BUY", "SELL"):
+        evaluations: list[dict[str, Any]] = []
+        for timeframe in self._candidate_timeframes():
+            try:
+                consensus = await self._consensus_fn(symbol, timeframe, self.config.horizon)
+                raw_action = str(consensus.get("action", "HOLD")).upper()
+                score = float(consensus.get("weighted_score", 0.5))
+                confidence = float(consensus.get("confidence", 0.5))
+                action, confidence, derived_from_score = self._derive_agent_signal(
+                    action=raw_action,
+                    score=score,
+                    confidence=confidence,
+                )
+                edge = abs(score - 0.5)
+                evaluations.append({
+                    "timeframe": timeframe,
+                    "action": action,
+                    "raw_action": raw_action,
+                    "score": score,
+                    "confidence": confidence,
+                    "edge": edge,
+                    "derived_from_score": derived_from_score,
+                    "passes": (
+                        action in ("BUY", "SELL")
+                        and confidence >= self.config.min_confidence
+                        and edge >= self.config.min_score_edge
+                    ),
+                    "error": None,
+                })
+            except Exception as exc:  # noqa: BLE001
+                evaluations.append({
+                    "timeframe": timeframe,
+                    "action": "HOLD",
+                    "raw_action": "HOLD",
+                    "score": 0.5,
+                    "confidence": 0.0,
+                    "edge": 0.0,
+                    "derived_from_score": False,
+                    "passes": False,
+                    "error": str(exc)[:160],
+                })
+
+        if not evaluations:
             self._journal_add(AgentDecision(
                 ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
+                action="HOLD", score=0.5, confidence=0.0,
+                decision="no_action", reason="No evaluable timeframe", mode=mode,
+            ))
+            return
+
+        valid_candidates = [item for item in evaluations if item["passes"]]
+        selected = max(
+            valid_candidates or evaluations,
+            key=lambda item: (
+                bool(item["passes"]),
+                float(item["confidence"]),
+                float(item["edge"]),
+            ),
+        )
+
+        timeframe = str(selected["timeframe"])
+        action = str(selected["action"])
+        score = float(selected["score"])
+        confidence = float(selected["confidence"])
+        edge = float(selected["edge"])
+        derived_from_score = bool(selected["derived_from_score"])
+        tf_summary = ", ".join(
+            f"{item['timeframe']}={float(item['score']):.3f}/{item['action']}"
+            for item in evaluations
+        )
+
+        if action == "HOLD" or action not in ("BUY", "SELL"):
+            self._journal_add(AgentDecision(
+                ts=_now_iso(), symbol=symbol, timeframe=timeframe,
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
-                decision="no_action", reason="Konsensüs HOLD / yön yok", mode=mode,
+                decision="no_action",
+                reason=f"Timeframe candidates produced no direction ({tf_summary})",
+                mode=mode,
             ))
             return
 
         if confidence < self.config.min_confidence or edge < self.config.min_score_edge:
             self._journal_add(AgentDecision(
-                ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
+                ts=_now_iso(), symbol=symbol, timeframe=timeframe,
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
                 decision="rejected_low_conviction",
-                reason=f"Güven {confidence:.2f}<{self.config.min_confidence} veya kenar {edge:.3f}<{self.config.min_score_edge}",
+                reason=(
+                    f"Best timeframe {timeframe}; confidence {confidence:.2f}<{self.config.min_confidence} "
+                    f"or edge {edge:.3f}<{self.config.min_score_edge}. Candidates: {tf_summary}"
+                ),
                 mode=mode,
             ))
             return
 
-        # Günlük sinyal limiti
         if self._signals_today >= self.config.max_signals_per_day:
             self._journal_add(AgentDecision(
-                ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
+                ts=_now_iso(), symbol=symbol, timeframe=timeframe,
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
                 decision="rejected_daily_limit",
-                reason=f"Günlük sinyal limiti doldu ({self.config.max_signals_per_day})",
+                reason=f"Daily signal limit reached ({self.config.max_signals_per_day})",
                 mode=mode,
             ))
             return
 
-        # Cross-source fiyat doğrulaması (varsa)
         if self._price_check_fn:
             try:
                 vld = await self._price_check_fn(symbol)
                 if vld.get("unverified"):
                     self._journal_add(AgentDecision(
-                        ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
+                        ts=_now_iso(), symbol=symbol, timeframe=timeframe,
                         action=action, score=round(score, 4), confidence=round(confidence, 4),
                         decision="rejected_price_unverified",
-                        reason=f"Fiyat doğrulanamadı (sapma %{vld.get('deviation_pct', 0)})",
+                        reason=f"Price could not be verified (deviation %{vld.get('deviation_pct', 0)})",
                         mode=mode,
                     ))
                     return
             except Exception:
-                pass  # fiyat doğrulama başarısızsa sinyali bloklama, sadece atla
+                pass
 
-        reason = (f"Konsensüs {action} · skor {score:.2f} · güven {confidence:.2f} · "
-                  f"kenar {edge:.3f} (≥{self.config.min_score_edge})")
-
-        # ── GÜVENLİ yönlendirme — moda göre ────────────────────────────────────
+        reason = (
+            f"Consensus {action} - best timeframe {timeframe} - score {score:.2f} - "
+            f"confidence {confidence:.2f} - edge {edge:.3f} (>={self.config.min_score_edge})"
+        )
         if derived_from_score:
-            reason = (f"agent esiginden turetildi - skor {score:.2f} - "
-                      f"guven {confidence:.2f} - kenar {edge:.3f} (>={self.config.min_score_edge})")
+            reason = (
+                f"agent esiginden turetildi - skor {score:.2f} - guven {confidence:.2f} - "
+                f"kenar {edge:.3f} (>={self.config.min_score_edge}) - tf {timeframe} - adaylar {tf_summary}"
+            )
 
         if mode == "DRY_RUN":
             self._journal_add(AgentDecision(
-                ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
+                ts=_now_iso(), symbol=symbol, timeframe=timeframe,
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
                 decision="would_signal",
-                reason=f"DRY_RUN — emir AÇILMAZ. {reason}", mode=mode,
+                reason=f"DRY_RUN - no order is opened. {reason}", mode=mode,
             ))
             self._signals_today += 1
-
         elif mode == "MANUAL_APPROVAL":
             sig_id = None
             if self._enqueue_fn:
                 sig_payload = {
-                    "symbol": symbol, "action": action, "timeframe": self.config.timeframe,
-                    "confidence": confidence, "score": score,
-                    "reason": reason, "source": "agent_auto",
+                    "symbol": symbol,
+                    "action": action,
+                    "timeframe": timeframe,
+                    "confidence": confidence,
+                    "score": score,
+                    "reason": reason,
+                    "source": "agent_auto",
                 }
                 try:
                     sig_id = self._enqueue_fn(sig_payload)
                 except Exception as exc:
                     logger.warning("enqueue failed: %s", exc)
             self._journal_add(AgentDecision(
-                ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
+                ts=_now_iso(), symbol=symbol, timeframe=timeframe,
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
                 decision="queued_for_approval",
-                reason=f"İnsan onayı bekliyor. {reason}", mode=mode, signal_id=sig_id,
+                reason=f"Waiting for human approval. {reason}", mode=mode, signal_id=sig_id,
             ))
             self._signals_today += 1
-
-        else:  # AUTO_LIMITED — gerçek emir GÖNDERİLMEZ (güvenlik)
+        else:
             self._journal_add(AgentDecision(
-                ts=_now_iso(), symbol=symbol, timeframe=self.config.timeframe,
+                ts=_now_iso(), symbol=symbol, timeframe=timeframe,
                 action=action, score=round(score, 4), confidence=round(confidence, 4),
                 decision="auto_execute_logged",
-                reason=(f"AUTO_LIMITED — gerçek emir bu katmanda AÇILMAZ; "
-                        f"elle açılan execution endpoint gerekir. {reason}"),
+                reason=(
+                    "AUTO_LIMITED - no real order is opened in this layer; "
+                    f"manual execution endpoint would be required. {reason}"
+                ),
                 mode=mode,
             ))
             self._signals_today += 1
 
-    # ── Günlük yönetimi ────────────────────────────────────────────────────────
     def _derive_agent_signal(
         self,
         *,

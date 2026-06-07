@@ -16,6 +16,7 @@ def _build_agent(consensus_payload: dict, *, min_confidence: float = 0.55, min_e
     agent.journal = []
     agent.config.watch_symbols = ["BTC/USDT"]
     agent.config.timeframe = "5m"
+    agent.config.candidate_timeframes = ["5m"]
     agent.config.horizon = "medium"
     agent.config.min_confidence = min_confidence
     agent.config.min_score_edge = min_edge
@@ -71,3 +72,45 @@ async def test_agent_still_blocks_hold_when_score_edge_is_too_small():
 
     assert decision["decision"] == "no_action"
     assert decision["confidence"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_agent_selects_best_candidate_across_timeframes():
+    agent = AgentOrchestrator()
+    agent.journal = []
+    agent.config.watch_symbols = ["BTC/USDT"]
+    agent.config.timeframe = "5m"
+    agent.config.candidate_timeframes = ["5m", "15m", "1h"]
+    agent.config.horizon = "medium"
+    agent.config.min_confidence = 0.55
+    agent.config.min_score_edge = 0.04
+    agent.config.max_signals_per_day = 20
+    agent.config.execution_mode = "DRY_RUN"
+
+    payloads = {
+        "5m": {"action": "HOLD", "weighted_score": 0.53, "confidence": 0.5},
+        "15m": {"action": "HOLD", "weighted_score": 0.5694, "confidence": 0.5},
+        "1h": {"action": "HOLD", "weighted_score": 0.61, "confidence": 0.5},
+    }
+
+    async def consensus_fn(symbol: str, timeframe: str, horizon: str) -> dict:
+        assert symbol == "BTC/USDT"
+        assert horizon == "medium"
+        return payloads[timeframe]
+
+    agent.wire(
+        consensus_fn=consensus_fn,
+        enqueue_fn=lambda sig: None,
+        kill_switch_fn=lambda: (False, ""),
+        price_check_fn=None,
+    )
+
+    result = await agent.run_once()
+    decision = result["new_decisions"][0]
+
+    assert decision["decision"] == "would_signal"
+    assert decision["timeframe"] == "1h"
+    assert decision["score"] == pytest.approx(0.61)
+    assert decision["confidence"] == pytest.approx(0.61)
+    assert "5m=0.530" in decision["reason"]
+    assert "1h=0.610" in decision["reason"]

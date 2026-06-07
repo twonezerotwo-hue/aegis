@@ -113,6 +113,14 @@ async def agent_config(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     if "timeframe" in body:
         cfg.timeframe = str(body["timeframe"])
         changed["timeframe"] = cfg.timeframe
+    if "candidate_timeframes" in body:
+        from services.agent_loop import _normalize_agent_timeframes
+
+        cfg.candidate_timeframes = _normalize_agent_timeframes(
+            body["candidate_timeframes"],
+            fallback=[cfg.timeframe],
+        )
+        changed["candidate_timeframes"] = cfg.candidate_timeframes
     if "horizon" in body:
         cfg.horizon = str(body["horizon"])
         changed["horizon"] = cfg.horizon

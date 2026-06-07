@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 import httpx
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from services.prometheus_client import PrometheusClient, TIMEFRAME_MAPPING
 from services.market_data import fetch_market_data
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api", tags=["dashboard"])
 
 # ── Fear & Greed Index (gerçek veri, ücretsiz, key gerektirmez) ────────────────
 # alternative.me crypto Fear & Greed — 5 dakika önbellekli
-_FNG_CACHE: dict[str, Any] = {"value": None, "ts": 0.0, "classification": ""}
+_FNG_CACHE: dict[str, Any] = {"value": None, "ts": 0.0, "classification": "", "source_timestamp": None}
 _FNG_TTL = 300.0  # 5 dakika
 
 async def _fetch_fear_greed() -> dict:
@@ -29,7 +29,12 @@ async def _fetch_fear_greed() -> dict:
     import time as _t
     now = _t.time()
     if _FNG_CACHE["value"] is not None and (now - _FNG_CACHE["ts"]) < _FNG_TTL:
-        return {"value": _FNG_CACHE["value"], "classification": _FNG_CACHE["classification"], "cached": True}
+        return {
+            "value": _FNG_CACHE["value"],
+            "classification": _FNG_CACHE["classification"],
+            "timestamp": _FNG_CACHE.get("source_timestamp"),
+            "cached": True,
+        }
     try:
         async with httpx.AsyncClient(timeout=6.0) as client:
             r = await client.get("https://api.alternative.me/fng/?limit=1")
@@ -37,11 +42,28 @@ async def _fetch_fear_greed() -> dict:
             data = (r.json().get("data") or [{}])[0]
             val = int(data.get("value", 50))
             cls = data.get("value_classification", "Neutral")
-            _FNG_CACHE.update({"value": val, "ts": now, "classification": cls})
-            return {"value": val, "classification": cls, "cached": False}
+            source_timestamp = None
+            try:
+                raw_ts = data.get("timestamp")
+                if raw_ts is not None:
+                    source_timestamp = datetime.fromtimestamp(int(raw_ts), timezone.utc).isoformat()
+            except Exception:
+                source_timestamp = None
+            _FNG_CACHE.update({
+                "value": val,
+                "ts": now,
+                "classification": cls,
+                "source_timestamp": source_timestamp,
+            })
+            return {"value": val, "classification": cls, "timestamp": source_timestamp, "cached": False}
     except Exception as exc:
         logger.debug("Fear&Greed fetch failed: %s", exc)
-    return {"value": _FNG_CACHE["value"] or 50, "classification": _FNG_CACHE["classification"] or "Neutral", "cached": True}
+    return {
+        "value": _FNG_CACHE["value"] or 50,
+        "classification": _FNG_CACHE["classification"] or "Neutral",
+        "timestamp": _FNG_CACHE.get("source_timestamp"),
+        "cached": True,
+    }
 
 # Available symbols
 SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT"]
@@ -57,12 +79,35 @@ _MACRO_ASSETS = {"BOND", "CASH"}
 # Emtia için Touche timeout'u daha uzun tutulur (yfinance ilk çekiş ~8-12s)
 _TOUCHE_COMMODITY_SYMBOLS = {"XAU", "XAG", "WTI", "BRENT"}
 
-# AI service base URLs
-_TOUCHE_URL = os.environ.get("TOUCHE_URL", "http://touche-api:8001")
-_FUNDAMENTAL_URL = os.environ.get("FUNDAMENTAL_URL", "http://fundamental-api:8002")
-_NEWS_URL = os.environ.get("NEWS_URL", "http://news-ai-limited:8006")
-_SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://sentinel-api:8004")
-_QUANTUM_URL = os.environ.get("QUANTUM_URL", "http://quantum-api:8003")
+def _default_service_url(env_name: str, docker_url: str, local_url: str) -> str:
+    configured = os.environ.get(env_name)
+    if configured:
+        return configured
+    service_mode = os.environ.get("AEGIS_SERVICE_MODE", "").strip().lower()
+    if service_mode in {"docker", "compose"} or os.path.exists("/.dockerenv"):
+        return docker_url
+    return local_url
+
+
+# AI service base URLs. Local desktop runs use localhost unless explicitly overridden.
+_TOUCHE_URL = _default_service_url("TOUCHE_URL", "http://touche-api:8001", "http://localhost:8001")
+_FUNDAMENTAL_URL = _default_service_url("FUNDAMENTAL_URL", "http://fundamental-api:8002", "http://localhost:8002")
+_NEWS_URL = _default_service_url("NEWS_URL", "http://news-ai-limited:8006", "http://localhost:8006")
+_SENTINEL_URL = _default_service_url("SENTINEL_URL", "http://sentinel-api:8004", "http://localhost:8004")
+_QUANTUM_URL = _default_service_url("QUANTUM_URL", "http://quantum-api:8003", "http://localhost:8003")
+_PROMETHEUS_URL = _default_service_url("PROMETHEUS_URL", "http://prometheus:9090", "http://localhost:9090")
+
+
+def _symbol_clean(symbol: str) -> str:
+    return symbol.replace("/USDT", "").replace("/", "")
+
+
+def _asset_key(symbol: str) -> str:
+    return _symbol_clean(symbol).upper()
+
+
+def _symbol_binance(symbol: str) -> str:
+    return _symbol_clean(symbol) + "USDT"
 
 
 import math as _math
@@ -91,23 +136,33 @@ _TF_SIGNAL_SCORE: dict[str, float] = {
 }
 
 
-async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, Optional[dict[str, Any]]]:
+async def _fetch_live_module_payloads(
+    symbol: str,
+    timeframe: str,
+    modules: set[str] | None = None,
+) -> dict[str, Optional[dict[str, Any]]]:
     """Fetch raw live module payloads from each AI service."""
-    symbol_binance = symbol.replace("/USDT", "").replace("/", "") + "USDT"
-    symbol_clean = symbol.replace("/USDT", "").replace("/", "")
-    asset_key = symbol_clean.upper()
+    symbol_binance = _symbol_binance(symbol)
+    symbol_clean = _symbol_clean(symbol)
+    asset_key = _asset_key(symbol)
 
     # Emtia sembolleri (XAU/XAG) için Touche yfinance çekişi ~8-12s sürer.
     # Timeout: emtia=20s, kripto=5s
     touche_timeout = 20.0 if asset_key in _TOUCHE_COMMODITY_SYMBOLS else 5.0
 
+    service_requests = [
+        ("touche", f"{_TOUCHE_URL}/touche/analyze", {"symbol": symbol_binance, "timeframe": timeframe}),
+        ("fundamental", f"{_FUNDAMENTAL_URL}/fundamental/metrics", {"symbol": symbol_clean, "timeframe": timeframe}),
+        ("news", f"{_NEWS_URL}/signals", {"symbol": symbol_clean, "timeframe": timeframe}),
+        ("sentinel", f"{_SENTINEL_URL}/sentinel/event_risk", {"symbol": symbol_clean}),
+        ("quantum", f"{_QUANTUM_URL}/quantum/futures_data", {"symbol": symbol_binance}),
+    ]
+    if modules is not None:
+        service_requests = [request for request in service_requests if request[0] in modules]
+
     async with httpx.AsyncClient(timeout=httpx.Timeout(touche_timeout, connect=5.0)) as client:
         results = await asyncio.gather(
-            client.get(f"{_TOUCHE_URL}/touche/analyze", params={"symbol": symbol_binance, "timeframe": timeframe}),
-            client.get(f"{_FUNDAMENTAL_URL}/fundamental/metrics", params={"symbol": symbol_clean, "timeframe": timeframe}),
-            client.get(f"{_NEWS_URL}/signals", params={"symbol": symbol_clean, "timeframe": timeframe}),
-            client.get(f"{_SENTINEL_URL}/sentinel/event_risk", params={"symbol": symbol_clean}),
-            client.get(f"{_QUANTUM_URL}/quantum/futures_data", params={"symbol": symbol_binance}),
+            *(client.get(url, params=params) for _, url, params in service_requests),
             return_exceptions=True,
         )
 
@@ -118,54 +173,63 @@ async def _fetch_live_module_payloads(symbol: str, timeframe: str) -> dict[str, 
         "sentinel": None,
         "quantum": None,
     }
-    for key, result in zip(payloads.keys(), results):
+    for (key, url, _params), result in zip(service_requests, results):
         try:
-            if not isinstance(result, Exception) and result.status_code == 200:
+            if isinstance(result, Exception):
+                logger.warning("live payload unavailable: module=%s url=%s error=%s", key, url, result)
+                continue
+            if result.status_code == 200:
                 data = result.json()
                 payloads[key] = data if isinstance(data, dict) else None
+            else:
+                logger.warning("live payload non-200: module=%s url=%s status=%s", key, url, result.status_code)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("live payload %s error: %s", key, exc)
+            logger.warning("live payload %s parse error: %s", key, exc)
 
     # ── Fundamental'a gerçek Fear & Greed Index enjekte et ─────────────────────
     # MVRV/NUPL mock olsa bile F&G GERÇEK veri (alternative.me, ücretsiz)
-    try:
-        fng = await _fetch_fear_greed()
-        if payloads.get("fundamental") is None:
-            payloads["fundamental"] = {}
-        payloads["fundamental"]["fear_greed_value"] = fng["value"]
-        payloads["fundamental"]["fear_greed_class"] = fng["classification"]
-    except Exception as exc:
-        logger.debug("F&G enrich failed: %s", exc)
+    if modules is None or "fundamental" in modules:
+        try:
+            fng = await _fetch_fear_greed()
+            if payloads.get("fundamental") is None:
+                payloads["fundamental"] = {}
+            payloads["fundamental"]["fear_greed_value"] = fng["value"]
+            payloads["fundamental"]["fear_greed_class"] = fng["classification"]
+            if fng.get("timestamp") and not payloads["fundamental"].get("timestamp"):
+                payloads["fundamental"]["timestamp"] = fng["timestamp"]
+        except Exception as exc:
+            logger.debug("F&G enrich failed: %s", exc)
 
     # ── News'i GERÇEK RSS akışıyla değiştir (CoinDesk/Cointelegraph/Decrypt) ────
     # Statik "47 haber" yerine canlı, taze, sembol-filtreli gerçek haberler
-    try:
-        from services.news_feed import get_live_news
-        live_news = await get_live_news(symbol_clean)
-        if live_news.get("available"):
-            # signals[0] formatına uydur (mevcut tüketici kodu çalışsın)
-            if payloads.get("news") is None:
-                payloads["news"] = {}
-            _dh = live_news.get("display_headlines", [])
-            payloads["news"]["signals"] = [{
-                "crypto_impact_score":  live_news["crypto_impact_score"],
-                "aggregated_sentiment": live_news.get("symbol_sentiment", live_news["aggregated_sentiment"]),
-                "news_items_count":     live_news["count_total"],
-                "count_24h":            live_news["count_24h"],
-                "confidence_level":     min(95, 50 + live_news["count_24h"] * 2),
-                "primary_countries":    [],
-                "impact_factors":       {"regulatory_score": 50},
-                "sources":              live_news.get("sources", []),
-                "newest_age_h":         live_news.get("newest_age_h"),
-                "top_headline":         _dh[0]["title"] if _dh else None,
-                "top_headline_sentiment": _dh[0]["sentiment"] if _dh else 0,
-                "display_headlines":    _dh,
-            }]
-            payloads["news"]["_live_feed"] = live_news   # zengin veri (başlıklar)
-            payloads["news"]["data_status"] = "LIVE"
-            payloads["news"]["verified"] = True
-    except Exception as exc:
-        logger.debug("Live news enrich failed: %s", exc)
+    if modules is None or "news" in modules:
+        try:
+            from services.news_feed import get_live_news
+            live_news = await get_live_news(symbol_clean)
+            if live_news.get("available"):
+                # signals[0] formatına uydur (mevcut tüketici kodu çalışsın)
+                if payloads.get("news") is None:
+                    payloads["news"] = {}
+                _dh = live_news.get("display_headlines", [])
+                payloads["news"]["signals"] = [{
+                    "crypto_impact_score":  live_news["crypto_impact_score"],
+                    "aggregated_sentiment": live_news.get("symbol_sentiment", live_news["aggregated_sentiment"]),
+                    "news_items_count":     live_news["count_total"],
+                    "count_24h":            live_news["count_24h"],
+                    "confidence_level":     min(95, 50 + live_news["count_24h"] * 2),
+                    "primary_countries":    [],
+                    "impact_factors":       {"regulatory_score": 50},
+                    "sources":              live_news.get("sources", []),
+                    "newest_age_h":         live_news.get("newest_age_h"),
+                    "top_headline":         _dh[0]["title"] if _dh else None,
+                    "top_headline_sentiment": _dh[0]["sentiment"] if _dh else 0,
+                    "display_headlines":    _dh,
+                }]
+                payloads["news"]["_live_feed"] = live_news   # zengin veri (başlıklar)
+                payloads["news"]["data_status"] = "LIVE"
+                payloads["news"]["verified"] = True
+        except Exception as exc:
+            logger.debug("Live news enrich failed: %s", exc)
 
     return payloads
 
@@ -833,6 +897,7 @@ async def _prometheus_module_snapshot(
     symbol: str | None,
     module: str,
     allow_unlabelled_fallback: bool,
+    value_normalizer: Callable[[float], float | None] | None = None,
 ) -> tuple[float, dict[str, Any]]:
     duration = TIMEFRAME_MAPPING.get(timeframe, "1h")
     candidates: list[tuple[str, str, str, bool, bool]] = []
@@ -872,7 +937,8 @@ async def _prometheus_module_snapshot(
             warnings.append("Prometheus historical value available, but latest sample timestamp is unavailable.")
 
         data_status = _status_from_timestamp(timestamp, False, timeframe=timeframe) if timestamp else "STALE"
-        normalized_value = _normalize_score(float(averaged["value"]))
+        raw_value = float(averaged["value"])
+        normalized_value = value_normalizer(raw_value) if value_normalizer else _normalize_score(raw_value)
         if normalized_value is None:
             continue
 
@@ -907,6 +973,191 @@ async def _prometheus_module_snapshot(
     )
 
 
+def _normalize_quantum_pnl(value: float) -> float:
+    return min(abs(float(value)) / 50000.0, 1.0)
+
+
+def _normalize_sentinel_multiplier(value: float) -> float:
+    return max(0.0, min(float(value) / 2.0, 1.0))
+
+
+_PROMETHEUS_MODULES: dict[str, dict[str, Any]] = {
+    "touche": {
+        "metric_name": "touche_eqs_score",
+        "module": "technical",
+        "allow_unlabelled_fallback": False,
+        "normalizer": None,
+    },
+    "fundamental": {
+        "metric_name": "fundamental_score",
+        "module": "fundamental",
+        "allow_unlabelled_fallback": False,
+        "normalizer": None,
+    },
+    "news": {
+        "metric_name": "news_sentiment_score",
+        "module": "news",
+        "allow_unlabelled_fallback": True,
+        "normalizer": None,
+    },
+    "sentinel": {
+        "metric_name": "sentinel_multiplier",
+        "module": "sentinel",
+        "allow_unlabelled_fallback": False,
+        "normalizer": _normalize_sentinel_multiplier,
+    },
+    "quantum": {
+        "metric_name": "quantum_pnl",
+        "module": "quantum",
+        "allow_unlabelled_fallback": False,
+        "normalizer": _normalize_quantum_pnl,
+    },
+}
+
+
+async def _prometheus_snapshot_for_key(
+    client: PrometheusClient,
+    *,
+    payload_key: str,
+    timeframe: str,
+    symbol: str | None,
+) -> tuple[float, dict[str, Any]]:
+    config = _PROMETHEUS_MODULES[payload_key]
+    return await _prometheus_module_snapshot(
+        client,
+        metric_name=config["metric_name"],
+        timeframe=timeframe,
+        symbol=symbol if payload_key != "news" else None,
+        module=config["module"],
+        allow_unlabelled_fallback=bool(config["allow_unlabelled_fallback"]),
+        value_normalizer=config["normalizer"],
+    )
+
+
+def _metric_health(score: float, source_info: dict[str, Any] | None = None) -> str:
+    data_status = str((source_info or {}).get("data_status", "")).upper()
+    if data_status in {"MISSING", "FALLBACK", "MOCK"}:
+        return "down"
+    if data_status in {"STALE", "PARTIAL_FALLBACK", "UNKNOWN"}:
+        return "warning"
+    return "healthy" if score > 0.5 else "warning" if score > 0.3 else "down"
+
+
+def _metric_payload(
+    *,
+    name: str,
+    score: float,
+    color: str,
+    symbol: str | None,
+    timeframe: str,
+    source_info: dict[str, Any],
+    summary: str = "",
+) -> dict[str, Any]:
+    timestamp = source_info.get("timestamp")
+    payload: dict[str, Any] = {
+        "name": name,
+        "score": round(score, 4),
+        "health": _metric_health(score, source_info),
+        "color": color,
+        "summary": summary,
+        "timeframe": timeframe,
+        "timestamp": timestamp,
+        "last_updated": timestamp,
+        "source": source_info.get("source"),
+        "source_detail": source_info,
+        "fallback_used": bool(source_info.get("fallback_used", False)),
+        "verified": bool(source_info.get("verified", False)),
+        "data_status": source_info.get("data_status", "UNKNOWN"),
+        "warnings": source_info.get("warnings", []),
+    }
+    if symbol is not None:
+        payload["symbol"] = symbol
+    return payload
+
+
+def _live_module_source(
+    *,
+    payload_key: str,
+    module: str,
+    live_score: float,
+    payload: dict[str, Any],
+    timeframe: str,
+) -> dict[str, Any]:
+    timestamp = _extract_payload_timestamp(payload, payload_key)
+    data_status = _payload_data_status(payload, payload_key, timeframe)
+    return _build_module_source(
+        module=module,
+        service=f"{payload_key}-api",
+        source=str(payload.get("source", "live_service_api")),
+        source_data=f"{payload_key}_service_response",
+        timestamp=timestamp,
+        timestamp_source="service_payload" if timestamp else "none",
+        data_status=data_status,
+        fallback_used=bool(payload.get("fallback_used", False)),
+        asset_specific=True,
+        shared_score=False,
+        warnings=_merge_warnings(payload.get("warnings", [])),
+        value=live_score,
+    )
+
+
+async def _metric_from_live_or_prometheus(
+    *,
+    payload_key: str,
+    name: str,
+    color: str,
+    symbol: str | None,
+    timeframe: str,
+    prometheus_url: str,
+) -> dict[str, Any]:
+    payload_symbol = symbol or "BTC/USDT"
+    payloads = await _fetch_live_module_payloads(payload_symbol, timeframe, modules={payload_key})
+    live_scores = _extract_live_scores(payloads, timeframe, payload_symbol)
+    live_score = live_scores.get(payload_key)
+    payload = payloads.get(payload_key)
+    module = _PROMETHEUS_MODULES[payload_key]["module"]
+
+    if live_score is not None and isinstance(payload, dict):
+        source_info = _live_module_source(
+            payload_key=payload_key,
+            module=module,
+            live_score=float(live_score),
+            payload=payload,
+            timeframe=timeframe,
+        )
+        raw_for_summary = (payload.get("signals") or [payload])[0] if payload_key == "news" else payload
+        return _metric_payload(
+            name=name,
+            score=float(live_score),
+            color=color,
+            symbol=symbol,
+            timeframe=timeframe,
+            source_info=source_info,
+            summary=_build_metric_summary(payload_key, float(live_score), raw_for_summary),
+        )
+
+    client = get_prometheus_client(prometheus_url)
+    score, source_info = await _prometheus_snapshot_for_key(
+        client,
+        payload_key=payload_key,
+        timeframe=timeframe,
+        symbol=symbol,
+    )
+    if isinstance(payload, dict):
+        source_info["warnings"] = _merge_warnings(
+            source_info.get("warnings", []),
+            ["Live service payload was present but did not contain a usable verified score."],
+        )
+    return _metric_payload(
+        name=name,
+        score=score,
+        color=color,
+        symbol=symbol,
+        timeframe=timeframe,
+        source_info=source_info,
+    )
+
+
 def get_prometheus_client(prometheus_url: str = "http://localhost:9090") -> PrometheusClient:
     """Get Prometheus client instance"""
     return PrometheusClient(prometheus_url)
@@ -916,41 +1167,37 @@ def get_prometheus_client(prometheus_url: str = "http://localhost:9090") -> Prom
 async def get_touche_metrics(
     symbol: str = Query("BTC/USDT"),
     timeframe: str = Query("1h"),
-    prometheus_url: str = Query("http://prometheus:9090")
+    prometheus_url: str = Query(_PROMETHEUS_URL)
 ):
     """Get Touche EQS score with timeframe"""
     if timeframe not in VALID_TIMEFRAMES:
         timeframe = "1h"
 
     try:
-        client = get_prometheus_client(prometheus_url)
-        score = await client.get_touche_score(symbol, timeframe)
-
-        if score is None:
-            score = 0.5
-
-        status = "healthy" if score > 0.5 else "warning" if score > 0.3 else "down"
-
-        return {
-            "name": "Touche EQS",
-            "score": score,
-            "health": status,
-            "color": "#3B82F6",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "source": "prometheus",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return await _metric_from_live_or_prometheus(
+            payload_key="touche",
+            name="Touche EQS",
+            color="#3B82F6",
+            symbol=symbol,
+            timeframe=timeframe,
+            prometheus_url=prometheus_url,
+        )
     except Exception as e:
         logger.error(f"Error fetching touche score: {e}")
         return {
             "name": "Touche EQS",
             "score": 0.5,
-            "health": "warning",
+            "health": "down",
             "color": "#3B82F6",
             "symbol": symbol,
             "timeframe": timeframe,
-            "source": "cache",
+            "source": "metric_error",
+            "timestamp": None,
+            "last_updated": None,
+            "fallback_used": False,
+            "verified": False,
+            "data_status": "MISSING",
+            "warnings": ["Metric endpoint failed; no verified score available."],
             "error": str(e),
         }
 
@@ -959,41 +1206,37 @@ async def get_touche_metrics(
 async def get_fundamental_metrics(
     symbol: str = Query("BTC/USDT"),
     timeframe: str = Query("1h"),
-    prometheus_url: str = Query("http://prometheus:9090")
+    prometheus_url: str = Query(_PROMETHEUS_URL)
 ):
     """Get Fundamental score with timeframe"""
     if timeframe not in VALID_TIMEFRAMES:
         timeframe = "1h"
 
     try:
-        client = get_prometheus_client(prometheus_url)
-        score = await client.get_fundamental_score(symbol, timeframe)
-
-        if score is None:
-            score = 0.5
-
-        status = "healthy" if score > 0.5 else "warning" if score > 0.3 else "down"
-
-        return {
-            "name": "Fundamental Score",
-            "score": score,
-            "health": status,
-            "color": "#10B981",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "source": "prometheus",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return await _metric_from_live_or_prometheus(
+            payload_key="fundamental",
+            name="Fundamental Score",
+            color="#10B981",
+            symbol=symbol,
+            timeframe=timeframe,
+            prometheus_url=prometheus_url,
+        )
     except Exception as e:
         logger.error(f"Error fetching fundamental score: {e}")
         return {
             "name": "Fundamental Score",
             "score": 0.5,
-            "health": "warning",
+            "health": "down",
             "color": "#10B981",
             "symbol": symbol,
             "timeframe": timeframe,
-            "source": "cache",
+            "source": "metric_error",
+            "timestamp": None,
+            "last_updated": None,
+            "fallback_used": False,
+            "verified": False,
+            "data_status": "MISSING",
+            "warnings": ["Metric endpoint failed; no verified score available."],
             "error": str(e),
         }
 
@@ -1002,41 +1245,37 @@ async def get_fundamental_metrics(
 async def get_quantum_metrics(
     symbol: str = Query("BTC/USDT"),
     timeframe: str = Query("1h"),
-    prometheus_url: str = Query("http://prometheus:9090")
+    prometheus_url: str = Query(_PROMETHEUS_URL)
 ):
     """Get Quantum score with timeframe"""
     if timeframe not in VALID_TIMEFRAMES:
         timeframe = "1h"
 
     try:
-        client = get_prometheus_client(prometheus_url)
-        score = await client.get_quantum_pnl(symbol, timeframe)
-
-        if score is None:
-            score = 0.5
-
-        status = "healthy" if score > 0.5 else "warning" if score > 0.3 else "down"
-
-        return {
-            "name": "Quantum Score",
-            "score": score,
-            "health": status,
-            "color": "#F59E0B",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "source": "prometheus",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return await _metric_from_live_or_prometheus(
+            payload_key="quantum",
+            name="Quantum Score",
+            color="#F59E0B",
+            symbol=symbol,
+            timeframe=timeframe,
+            prometheus_url=prometheus_url,
+        )
     except Exception as e:
         logger.error(f"Error fetching quantum score: {e}")
         return {
             "name": "Quantum Score",
             "score": 0.5,
-            "health": "warning",
+            "health": "down",
             "color": "#F59E0B",
             "symbol": symbol,
             "timeframe": timeframe,
-            "source": "cache",
+            "source": "metric_error",
+            "timestamp": None,
+            "last_updated": None,
+            "fallback_used": False,
+            "verified": False,
+            "data_status": "MISSING",
+            "warnings": ["Metric endpoint failed; no verified score available."],
             "error": str(e),
         }
 
@@ -1045,41 +1284,37 @@ async def get_quantum_metrics(
 async def get_sentinel_metrics(
     symbol: str = Query("BTC/USDT"),
     timeframe: str = Query("1h"),
-    prometheus_url: str = Query("http://prometheus:9090")
+    prometheus_url: str = Query(_PROMETHEUS_URL)
 ):
     """Get Sentinel score with timeframe"""
     if timeframe not in VALID_TIMEFRAMES:
         timeframe = "1h"
 
     try:
-        client = get_prometheus_client(prometheus_url)
-        score = await client.get_sentinel_multiplier(symbol, timeframe)
-
-        if score is None:
-            score = 0.5
-
-        status = "healthy" if score > 0.5 else "warning" if score > 0.3 else "down"
-
-        return {
-            "name": "Sentinel Score",
-            "score": score,
-            "health": status,
-            "color": "#8B5CF6",
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "source": "prometheus",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return await _metric_from_live_or_prometheus(
+            payload_key="sentinel",
+            name="Sentinel Score",
+            color="#8B5CF6",
+            symbol=symbol,
+            timeframe=timeframe,
+            prometheus_url=prometheus_url,
+        )
     except Exception as e:
         logger.error(f"Error fetching sentinel score: {e}")
         return {
             "name": "Sentinel Score",
             "score": 0.5,
-            "health": "warning",
+            "health": "down",
             "color": "#8B5CF6",
             "symbol": symbol,
             "timeframe": timeframe,
-            "source": "cache",
+            "source": "metric_error",
+            "timestamp": None,
+            "last_updated": None,
+            "fallback_used": False,
+            "verified": False,
+            "data_status": "MISSING",
+            "warnings": ["Metric endpoint failed; no verified score available."],
             "error": str(e),
         }
 
@@ -1087,39 +1322,36 @@ async def get_sentinel_metrics(
 @router.get("/metrics/news")
 async def get_news_metrics(
     timeframe: str = Query("1h"),
-    prometheus_url: str = Query("http://prometheus:9090")
+    prometheus_url: str = Query(_PROMETHEUS_URL)
 ):
     """Get News sentiment score with timeframe"""
     if timeframe not in VALID_TIMEFRAMES:
         timeframe = "1h"
 
     try:
-        client = get_prometheus_client(prometheus_url)
-        score = await client.get_news_sentiment_score(timeframe)
-
-        if score is None:
-            score = 0.5
-
-        status = "healthy" if score > 0.5 else "warning" if score > 0.3 else "down"
-
-        return {
-            "name": "News Sentiment",
-            "score": score,
-            "health": status,
-            "color": "#EC4899",
-            "timeframe": timeframe,
-            "source": "prometheus",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        return await _metric_from_live_or_prometheus(
+            payload_key="news",
+            name="News Sentiment",
+            color="#EC4899",
+            symbol=None,
+            timeframe=timeframe,
+            prometheus_url=prometheus_url,
+        )
     except Exception as e:
         logger.error(f"Error fetching news score: {e}")
         return {
             "name": "News Sentiment",
             "score": 0.5,
-            "health": "warning",
+            "health": "down",
             "color": "#EC4899",
             "timeframe": timeframe,
-            "source": "cache",
+            "source": "metric_error",
+            "timestamp": None,
+            "last_updated": None,
+            "fallback_used": False,
+            "verified": False,
+            "data_status": "MISSING",
+            "warnings": ["Metric endpoint failed; no verified score available."],
             "error": str(e),
         }
 
@@ -1284,7 +1516,7 @@ async def get_consensus(
     symbol: str = Query("BTC/USDT"),
     timeframe: str = Query("1h"),
     horizon: str = Query("medium"),
-    prometheus_url: str = Query("http://prometheus:9090")
+    prometheus_url: str = Query(_PROMETHEUS_URL)
 ):
     """Get 3-way weighted consensus with timeframe"""
     if timeframe not in VALID_TIMEFRAMES:
@@ -1295,6 +1527,7 @@ async def get_consensus(
     try:
         # Detect non-crypto assets for macro-derived scoring
         asset_key = symbol.replace("/USDT", "").replace("/", "").upper()
+        live_payloads: dict[str, Optional[dict[str, Any]]] = {}
         module_sources: dict[str, Any]
 
         if asset_key in _MACRO_ASSETS:
@@ -1364,8 +1597,9 @@ async def get_consensus(
         else:
             live_payloads = await _fetch_live_module_payloads(symbol, timeframe)
             live = _extract_live_scores(live_payloads, timeframe, symbol)
+            prometheus_client = get_prometheus_client(prometheus_url)
 
-            def _module_payload_source(
+            async def _module_payload_source(
                 payload_key: str,
                 module: str,
                 live_score: Optional[float],
@@ -1373,17 +1607,12 @@ async def get_consensus(
                 payload = live_payloads.get(payload_key)
                 timestamp = _extract_payload_timestamp(payload, payload_key)
                 data_status = _payload_data_status(payload, payload_key, timeframe)
-                # GERÇEK veri override: gateway gerçek F&G/makro kullanıyor → LIVE
-                if module == "fundamental" and payload and payload.get("fear_greed_value") is not None:
-                    data_status = "LIVE"; timestamp = timestamp or datetime.now(timezone.utc).isoformat()
-                if module == "sentinel" and live_score is not None:
-                    data_status = "LIVE"; timestamp = timestamp or datetime.now(timezone.utc).isoformat()
                 if live_score is not None and payload:
                     return live_score, _build_module_source(
                         module=module,
-                        service=f"{module}-api",
+                        service=f"{payload_key}-api",
                         source=str(payload.get("source", "live_service_api")),
-                        source_data=f"{module}_service_response",
+                        source_data=f"{payload_key}_service_response",
                         timestamp=timestamp,
                         timestamp_source="service_payload" if timestamp else "none",
                         data_status=data_status,
@@ -1393,6 +1622,23 @@ async def get_consensus(
                         warnings=_merge_warnings(payload.get("warnings", [])),
                         value=live_score,
                     )
+                prometheus_score, prometheus_source = await _prometheus_snapshot_for_key(
+                    prometheus_client,
+                    payload_key=payload_key,
+                    timeframe=timeframe,
+                    symbol=symbol,
+                )
+                if prometheus_source["data_status"] != "MISSING":
+                    fallback_note = (
+                        "Live service payload was present but did not contain a usable verified score."
+                        if payload
+                        else "Live service unavailable; Prometheus metric used as explicit fallback source."
+                    )
+                    prometheus_source["warnings"] = _merge_warnings(
+                        prometheus_source.get("warnings", []),
+                        [fallback_note],
+                    )
+                    return prometheus_score, prometheus_source
                 if payload:
                     unusable_status = data_status if data_status in {"MOCK", "FALLBACK", "PARTIAL_FALLBACK", "UNKNOWN", "MISSING"} else "MISSING"
                     warning_text = (
@@ -1402,9 +1648,9 @@ async def get_consensus(
                     )
                     return 0.5, _build_module_source(
                         module=module,
-                        service=f"{module}-api",
+                        service=f"{payload_key}-api",
                         source=str(payload.get("source", "live_service_payload_unusable")),
-                        source_data=f"{module}_service_response",
+                        source_data=f"{payload_key}_service_response",
                         timestamp=timestamp,
                         timestamp_source="service_payload" if timestamp else "none",
                         data_status=unusable_status,
@@ -1414,26 +1660,17 @@ async def get_consensus(
                         warnings=_merge_warnings(payload.get("warnings", []), [warning_text]),
                         value=0.5,
                     )
-                return 0.5, _build_module_source(
-                    module=module,
-                    service=f"{module}-api",
-                    source="live_service_missing",
-                    source_data=f"{module}_service_response",
-                    timestamp=None,
-                    timestamp_source="none",
-                    data_status="MISSING",
-                    fallback_used=False,
-                    asset_specific=False,
-                    shared_score=False,
-                    warnings=["No verified live module score available."],
-                    value=0.5,
+                prometheus_source["warnings"] = _merge_warnings(
+                    prometheus_source.get("warnings", []),
+                    ["No verified live module score available."],
                 )
+                return prometheus_score, prometheus_source
 
-            touche_score, technical_source = _module_payload_source("touche", "technical", live["touche"])
-            fundamental_score, fundamental_source = _module_payload_source("fundamental", "fundamental", live["fundamental"])
-            news_score, news_source = _module_payload_source("news", "news", live["news"])
-            _, sentinel_source = _module_payload_source("sentinel", "sentinel", live["sentinel"])
-            _, quantum_source = _module_payload_source("quantum", "quantum", live["quantum"])
+            touche_score, technical_source = await _module_payload_source("touche", "technical", live["touche"])
+            fundamental_score, fundamental_source = await _module_payload_source("fundamental", "fundamental", live["fundamental"])
+            news_score, news_source = await _module_payload_source("news", "news", live["news"])
+            _, sentinel_source = await _module_payload_source("sentinel", "sentinel", live["sentinel"])
+            _, quantum_source = await _module_payload_source("quantum", "quantum", live["quantum"])
             module_sources = {
                 "technical": technical_source,
                 "fundamental": fundamental_source,
@@ -1545,7 +1782,7 @@ async def get_consensus(
         )
         if data_status in {"STALE", "FALLBACK", "PARTIAL_FALLBACK", "MOCK", "MISSING", "UNKNOWN"}:
             warnings = _merge_warnings(warnings, ["Signal is not verified because source data is stale/fallback/mock."])
-        source = "dashboard_gateway_macro_derived_consensus" if asset_key in _MACRO_ASSETS else "dashboard_gateway_prometheus_consensus"
+        source = "dashboard_gateway_macro_derived_consensus" if asset_key in _MACRO_ASSETS else "dashboard_gateway_live_consensus"
         return {
             "asset": asset_key,
             "weighted_score": round(weighted_score, 4),
@@ -1658,26 +1895,94 @@ async def get_touche_multiframe_metrics(
     symbol: str = Query("BTC/USDT"),
 ):
     """Touche multi-timeframe analizi (15m, 1h, 4h, 1d)"""
+    timeframes_to_check = ["5m", "15m", "1h", "4h", "1d", "1w"]
+    results = await asyncio.gather(
+        *(_fetch_live_module_payloads(symbol, tf, modules={"touche"}) for tf in timeframes_to_check),
+        return_exceptions=True,
+    )
+
+    timeframe_payloads: dict[str, dict[str, Any]] = {}
+    statuses: list[str] = []
+    timestamps: list[str | None] = []
+    valid_scores: list[float] = []
+    warnings: list[str] = []
+
+    for tf, result in zip(timeframes_to_check, results):
+        if isinstance(result, Exception):
+            statuses.append("MISSING")
+            warnings.append(f"{tf}: Touche analysis unavailable ({result})")
+            timeframe_payloads[tf] = {
+                "signal": "UNKNOWN",
+                "score": None,
+                "atr": None,
+                "data_status": "MISSING",
+                "verified": False,
+                "warnings": ["Touche analysis unavailable."],
+            }
+            continue
+
+        payload = result.get("touche") if isinstance(result, dict) else None
+        score = _extract_live_scores({"touche": payload}, tf, symbol).get("touche") if payload else None
+        status = _payload_data_status(payload, "touche", tf)
+        timestamp = _extract_payload_timestamp(payload, "touche")
+        statuses.append(status)
+        timestamps.append(timestamp)
+
+        if score is not None:
+            valid_scores.append(float(score))
+        else:
+            warnings.append(f"{tf}: no usable Touche score")
+
+        signal = "UNKNOWN"
+        if isinstance(payload, dict):
+            tf_signals = payload.get("tf_signals") or {}
+            signal = str(payload.get("signal") or tf_signals.get(tf) or "UNKNOWN")
+
+        timeframe_payloads[tf] = {
+            "signal": signal,
+            "score": round(float(score) * 100, 2) if score is not None else None,
+            "atr": None,
+            "data_status": status,
+            "verified": _payload_verified(payload),
+            "timestamp": timestamp,
+        }
+
+    confluence_score = round((sum(valid_scores) / len(valid_scores)) * 100, 2) if valid_scores else None
+    average_score = (confluence_score / 100.0) if confluence_score is not None else 0.5
+    if confluence_score is None:
+        final_signal = "NO_VERIFIED_CANDIDATE"
+        confidence = 0.0
+    elif average_score >= 0.5:
+        final_signal = "POSITIVE_CANDIDATE" if abs(average_score - 0.5) >= 0.04 else "NO_CANDIDATE"
+        confidence = average_score
+    else:
+        final_signal = "NEGATIVE_CANDIDATE" if abs(average_score - 0.5) >= 0.04 else "NO_CANDIDATE"
+        confidence = 1.0 - average_score
+
     return {
         "module": "Touche AI",
         "symbol": symbol,
-        "volatility_regime": "NORMAL",
+        "volatility_regime": "UNKNOWN",
         "dynamic_params": {
-            "zone_tolerance_atr": 0.3,
-            "confluence_min": 2,
-            "signal_threshold": 50.0,
+            "zone_tolerance_atr": None,
+            "confluence_min": None,
+            "signal_threshold": None,
         },
-        "timeframes": {
-            "15m": {"signal": "BULLISH", "score": 72, "atr": 0.0045},
-            "1h": {"signal": "BULLISH", "score": 68, "atr": 0.0062},
-            "4h": {"signal": "BEARISH", "score": 45, "atr": 0.0089},
-            "1d": {"signal": "NEUTRAL", "score": 50, "atr": 0.0125},
-        },
-        "confluence_score": 65.5,
-        "alignment": "moderate",
-        "final_signal": "WAIT",  # Zaman dilimleri uyumsuz
-        "confidence": 0.42,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timeframes": timeframe_payloads,
+        "confluence_score": confluence_score,
+        "alignment": _compute_mtf_alignment(
+            {tf: data["signal"] for tf, data in timeframe_payloads.items()},
+            "1h",
+        ),
+        "final_signal": final_signal,
+        "confidence": round(confidence, 4),
+        "timestamp": _latest_timestamp(*timestamps),
+        "last_updated": _latest_timestamp(*timestamps),
+        "source": "touche_live_multiframe" if valid_scores else "touche_multiframe_missing",
+        "fallback_used": False,
+        "verified": bool(valid_scores) and _aggregate_status(statuses) in {"LIVE", "RECENT"},
+        "data_status": _aggregate_status(statuses),
+        "warnings": _merge_warnings(warnings),
     }
 
 
@@ -1714,7 +2019,13 @@ async def get_fundamental_onchain_flows(
         } if symbol == "BTC" else {},
         "composite_signal": "BULLISH",
         "confidence": 0.68,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": None,
+        "last_updated": None,
+        "source": "static_mock_payload",
+        "fallback_used": True,
+        "verified": False,
+        "data_status": "MOCK",
+        "warnings": ["Static illustrative endpoint; not verified live data."],
     }
 
 
@@ -1753,7 +2064,13 @@ async def get_quantum_liquidity_analysis(
         },
         "liquidity_verdict": "GOOD",
         "confidence": 0.84,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": None,
+        "last_updated": None,
+        "source": "static_mock_payload",
+        "fallback_used": True,
+        "verified": False,
+        "data_status": "MOCK",
+        "warnings": ["Static illustrative endpoint; not verified live data."],
     }
 
 
@@ -1789,7 +2106,13 @@ async def get_sentinel_crypto_macro():
         },
         "macro_composite": "MIXED",
         "confidence": 0.71,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": None,
+        "last_updated": None,
+        "source": "static_mock_payload",
+        "fallback_used": True,
+        "verified": False,
+        "data_status": "MOCK",
+        "warnings": ["Static illustrative endpoint; not verified live data."],
     }
 
 
@@ -1828,7 +2151,13 @@ async def get_news_source_reliability():
         ],
         "weighted_sentiment": 0.72,
         "sentiment_confidence": 0.85,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": None,
+        "last_updated": None,
+        "source": "static_mock_payload",
+        "fallback_used": True,
+        "verified": False,
+        "data_status": "MOCK",
+        "warnings": ["Static illustrative endpoint; not verified live data."],
     }
 
 
@@ -1866,5 +2195,11 @@ async def get_consensus_performance_feedback():
             "conflicts_resolved": 3,
             "resolution_success_rate": 0.95
         },
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": None,
+        "last_updated": None,
+        "source": "static_mock_payload",
+        "fallback_used": True,
+        "verified": False,
+        "data_status": "MOCK",
+        "warnings": ["Static illustrative endpoint; not verified live data."],
     }
