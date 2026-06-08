@@ -93,6 +93,17 @@ async def agent_research_suggestions(limit: int = Query(500, ge=1, le=5000)) -> 
     }, source="agent.research.suggestions")
 
 
+@router.get("/research/external-repo-matrix")
+async def agent_external_repo_matrix() -> Dict[str, Any]:
+    """Top external repo feature matrix. Research-only; no runtime config changes."""
+    from aegis_research.external_repo_matrix import top10_external_repo_matrix
+
+    return guard_agent_response(
+        top10_external_repo_matrix(),
+        source="agent.research.external_repo_matrix",
+    )
+
+
 @router.post("/start")
 async def agent_start() -> Dict[str, Any]:
     """Otonom karar döngüsünü başlat (güvenli — moda göre yönlendirir)."""

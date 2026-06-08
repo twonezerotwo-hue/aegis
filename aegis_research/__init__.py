@@ -12,6 +12,7 @@ from .models import (
     ThresholdSuggestion,
     WeightSuggestion,
 )
+from .external_repo_matrix import repo_feature_table_rows, top10_external_repo_matrix
 
 __all__ = [
     "DataSnapshot",
@@ -19,4 +20,6 @@ __all__ = [
     "SignalCandidate",
     "ThresholdSuggestion",
     "WeightSuggestion",
+    "repo_feature_table_rows",
+    "top10_external_repo_matrix",
 ]
