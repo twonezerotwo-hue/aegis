@@ -7,6 +7,25 @@ from typing import Any
 SAFE_MODE = "RESEARCH_ONLY_NO_ORDER_ROUTING"
 CATALOG_DATE = "2026-06-08"
 
+_RESTRICTED_LICENSES = {"GPL-3.0", "AGPL-3.0", "NOASSERTION"}
+
+
+def _license_risk(license_id: str) -> str:
+    if license_id in {"GPL-3.0", "AGPL-3.0"}:
+        return "HIGH_COPYLEFT"
+    if license_id == "NOASSERTION":
+        return "UNKNOWN_REVIEW_REQUIRED"
+    return "LOW_WITH_ATTRIBUTION_REVIEW"
+
+
+def _safe_level(item: dict[str, Any]) -> str:
+    category = str(item.get("category", ""))
+    if "data" in category or "sentiment" in category or "news" in category:
+        return "read_only_adapter"
+    if str(item.get("phase")) == "phase_1":
+        return "metadata_only"
+    return "offline_research"
+
 
 _EXTERNAL_REPO_FEATURES: tuple[dict[str, Any], ...] = (
     {
@@ -337,10 +356,31 @@ def top10_external_repo_matrix() -> dict[str, Any]:
     """
 
     matrix = deepcopy(list(_EXTERNAL_REPO_FEATURES))
+    for item in matrix:
+        license_id = str(item.get("license", "NOASSERTION"))
+        safe_level = _safe_level(item)
+        item["integration_stage"] = item.get("phase")
+        item["license_risk"] = _license_risk(license_id)
+        item["code_import_allowed"] = license_id not in _RESTRICTED_LICENSES and safe_level != "metadata_only"
+        item["first_safe_adapter"] = (item.get("safe_integration_target") or ["metadata catalog"])[0]
+        item["required_contract"] = (
+            "ProviderManifest/DataSnapshot"
+            if safe_level == "read_only_adapter"
+            else "ModuleManifest/research evidence"
+        )
+        item["test_required"] = True
+        item["production_allowed"] = False
+        item["research_only"] = True
+        item["affects_signals"] = False
+        item["affects_execution"] = False
+        item["safe_integration_level"] = safe_level
     return {
         "status": "ok",
         "catalog_date": CATALOG_DATE,
         "safe_mode": SAFE_MODE,
+        "research_only": True,
+        "affects_signals": False,
+        "affects_execution": False,
         "count": len(matrix),
         "items": matrix,
         "next_build_order": [
@@ -363,7 +403,7 @@ def repo_feature_table_rows() -> list[dict[str, Any]]:
     """Compact rows for docs/UI tables."""
 
     rows: list[dict[str, Any]] = []
-    for item in _EXTERNAL_REPO_FEATURES:
+    for item in top10_external_repo_matrix()["items"]:
         rows.append({
             "repo": item["repo"],
             "category": item["category"],
@@ -372,6 +412,9 @@ def repo_feature_table_rows() -> list[dict[str, Any]]:
             "safe_target": item["safe_integration_target"][0],
             "phase": item["phase"],
             "license": item["license"],
+            "license_risk": item["license_risk"],
+            "safe_integration_level": item["safe_integration_level"],
+            "production_allowed": item["production_allowed"],
         })
     return rows
 

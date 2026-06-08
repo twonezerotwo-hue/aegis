@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AEGIS Module Manifest",
+  "type": "object",
+  "required": [
+    "module_id",
+    "name",
+    "version",
+    "category",
+    "enabled",
+    "required",
+    "runtime",
+    "dependencies",
+    "provides",
+    "consumes",
+    "input_contract",
+    "output_contract",
+    "failure_mode",
+    "data_safety"
+  ],
+  "properties": {
+    "module_id": { "type": "string", "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+$" },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "category": { "enum": ["data", "signal", "risk", "research", "dashboard", "backtest", "report"] },
+    "enabled": { "type": "boolean" },
+    "required": { "type": "boolean" },
+    "runtime": { "enum": ["active", "research_only", "legacy", "disabled"] },
+    "dependencies": { "type": "array", "items": { "type": "string" } },
+    "provides": { "type": "array", "items": { "type": "string" } },
+    "consumes": { "type": "array", "items": { "type": "string" } },
+    "input_contract": { "type": "object" },
+    "output_contract": {
+      "type": "object",
+      "not": {
+        "anyOf": [
+          { "required": ["action"] },
+          { "required": ["order"] },
+          { "required": ["broker"] },
+          { "required": ["execution"] },
+          { "required": ["position_size"] }
+        ]
+      }
+    },
+    "failure_mode": { "enum": ["degrade", "block", "disable", "fallback"] },
+    "data_safety": {
+      "type": "object",
+      "required": ["requires_verified_data", "can_emit_live_label", "can_emit_decision", "can_emit_execution"],
+      "properties": {
+        "requires_verified_data": { "type": "boolean" },
+        "can_emit_live_label": { "type": "boolean" },
+        "can_emit_decision": { "type": "boolean" },
+        "can_emit_execution": { "const": false }
+      }
+    }
+  },
+  "additionalProperties": true
+}

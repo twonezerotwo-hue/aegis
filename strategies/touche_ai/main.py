@@ -25,7 +25,14 @@ except:
 # Load environment variables from .env
 load_dotenv()
 
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, REGISTRY
+try:
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, REGISTRY
+except Exception:  # pragma: no cover - optional metrics dependency
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4"
+    REGISTRY = None
+
+    def generate_latest(*args, **kwargs):
+        return b""
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -771,9 +778,9 @@ async def touche_exit_signal(
             ohlcv = {"close": closes, "volume": volumes}
             fetch_meta["warning"] = str(exc)
     else:
-        closes = []
-        volumes = []
-        ohlcv = {"close": closes, "volume": volumes}
+        ohlcv = _get_recent_ohlcv(sym, limit=120)
+        closes = [float(v) for v in ohlcv.get("close", [])]
+        volumes = [float(v) for v in ohlcv.get("volume", [])]
 
     current_price = float(closes[-1]) if closes else float(entry_price)
     rsi_val = _compute_rsi(closes)

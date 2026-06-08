@@ -38,7 +38,6 @@ import { RiskControlCard } from "../components/backtest/RiskControlCard";
 import { ScenarioSimulator } from "../components/backtest/ScenarioSimulator";
 import { ExpertControls } from "../components/backtest/ExpertControls";
 import { AdvancedAnalytics } from "../components/backtest/AdvancedAnalytics";
-import { OptimizerAgentPanel } from "../components/backtest/OptimizerAgentPanel";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8502";
 
@@ -268,9 +267,6 @@ export const BacktestV2: React.FC = () => {
             </span>
           </div>
         </div>
-
-        {/* Optimizasyon Agent — tüm uzayı tarar, en iyiyi otomatik uygular */}
-        <OptimizerAgentPanel />
 
         {/* Controls */}
         <div className="rounded-xl border border-slate-700/50 bg-slate-900/80 p-5">

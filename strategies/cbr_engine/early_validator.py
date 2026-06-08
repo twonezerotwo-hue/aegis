@@ -17,8 +17,8 @@ class CBREarlyValidator:
                 "edge_pct": edge_pct,
                 "include_in_consensus": True,
                 "is_historical_weak": True,
-                "confidence_modifier": 0.80,
-                "reason": "historical_data_insufficient",
+                "confidence_modifier": 0.85,
+                "reason": "fallback_active",
             }
 
         return {

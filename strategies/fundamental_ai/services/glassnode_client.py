@@ -14,7 +14,21 @@ from typing import Any, Dict, List, Optional
 import httpx
 import pandas as pd
 import redis.asyncio as aioredis
-from prometheus_client import Gauge
+try:
+    from prometheus_client import Gauge
+except Exception:  # pragma: no cover - optional metrics dependency
+    class _NoOpGauge:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def labels(self, *args, **kwargs):
+            return self
+
+        def set(self, *args, **kwargs):
+            return None
+
+    def Gauge(*args, **kwargs):
+        return _NoOpGauge()
 
 logger = logging.getLogger(__name__)
 

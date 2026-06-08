@@ -23,6 +23,7 @@ import asyncio
 from services.market_data import fetch_market_data
 from services.portfolio_allocator import ASSET_METADATA, build_allocation_plan, build_real_estate_decision
 from routes.dashboard import _fetch_live_scores
+from aegis_platform.providers.registry import get_default_provider_registry
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +259,7 @@ async def get_macro_metrics(
             else "market_data_partial_plus_fallback" if data_status == "PARTIAL_FALLBACK"
             else "all_hardcoded_fallback"
         ),
+        "provider_registry": get_default_provider_registry().dashboard_status(),
         # Core data
         "metrics": {k: v for k, v in metrics.items() if k in _FALLBACK_METRICS},
         "regime": regime,

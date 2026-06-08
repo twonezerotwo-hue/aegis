@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AEGIS Provider Manifest",
+  "type": "object",
+  "required": [
+    "provider_id",
+    "name",
+    "provider_type",
+    "enabled",
+    "required_credentials",
+    "output_fields",
+    "verified_capability",
+    "fallback_behavior",
+    "timestamp_behavior",
+    "read_only",
+    "production_allowed"
+  ],
+  "properties": {
+    "provider_id": { "type": "string" },
+    "name": { "type": "string" },
+    "provider_type": { "type": "string" },
+    "enabled": { "type": "boolean" },
+    "required_credentials": { "type": "array", "items": { "type": "string" } },
+    "optional_package": { "type": ["string", "null"] },
+    "rate_limit_note": { "type": "string" },
+    "output_fields": { "type": "array", "items": { "type": "string" } },
+    "verified_capability": { "type": "boolean" },
+    "fallback_behavior": { "type": "string" },
+    "timestamp_behavior": { "type": "string" },
+    "read_only": { "const": true },
+    "production_allowed": { "const": false }
+  },
+  "additionalProperties": true
+}

@@ -30,7 +30,38 @@ except Exception:
 
 load_dotenv()
 
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge, Histogram
+try:
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge, Histogram
+except Exception:  # pragma: no cover - optional metrics dependency
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4"
+
+    def generate_latest(*args, **kwargs):
+        return b""
+
+    class _NoOpMetric:
+        def labels(self, *args, **kwargs):
+            return self
+
+        def inc(self, *args, **kwargs):
+            return None
+
+        def dec(self, *args, **kwargs):
+            return None
+
+        def set(self, *args, **kwargs):
+            return None
+
+        def observe(self, *args, **kwargs):
+            return None
+
+    def Counter(*args, **kwargs):
+        return _NoOpMetric()
+
+    def Gauge(*args, **kwargs):
+        return _NoOpMetric()
+
+    def Histogram(*args, **kwargs):
+        return _NoOpMetric()
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -218,20 +249,31 @@ async def fundamental_metrics(
         description="Comma-separated metric names: mvrv, nupl, transaction_volume, active_addresses",
     ),
 ) -> dict:
-    if _glassnode_client is None:
-        return {
-            "error": "service_not_initialized",
-            "status": 503,
-            "source": "unavailable",
+    global _glassnode_client
+    metric_list: List[str] = [m.strip() for m in metrics.split(",") if m.strip()]
+
+    if not os.getenv("GLASSNODE_API_KEY", "").strip():
+        payload = {
+            "symbol": symbol.upper(),
+            "source": "mock",
+            "quality": "mock",
             "verified": False,
-            "fallback_used": False,
-            "data_status": "UNKNOWN",
-            "warnings": ["Fundamental client not initialized."],
+            "fallback_used": True,
+            "data_status": "MOCK",
+            "warnings": ["GLASSNODE_API_KEY missing; explicit mock fundamental metrics returned."],
             "timestamp": None,
         }
+        if "mvrv" in metric_list:
+            payload["mvrv_z_score"] = 1.87
+        if "nupl" in metric_list:
+            payload["nupl"] = 0.34
+        return payload
 
-    metric_list: List[str] = [m.strip() for m in metrics.split(",") if m.strip()]
-    return await _glassnode_client.fetch_metrics(symbol.upper(), metric_list)
+    if _glassnode_client is None:
+        _glassnode_client = GlassnodeServiceClient()
+
+    data = await _glassnode_client.fetch_metrics(symbol.upper(), metric_list)
+    return data if isinstance(data, dict) else {"symbol": symbol.upper(), "source": "unavailable", "data_status": "UNKNOWN"}
 
 
 if __name__ == "__main__":

@@ -37,7 +37,38 @@ def _env_flag(name: str, default: bool = False) -> bool:
         return default
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
 
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge, Histogram
+try:
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Gauge, Histogram
+except Exception:  # pragma: no cover - optional metrics dependency
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4"
+
+    def generate_latest(*args, **kwargs):
+        return b""
+
+    class _NoOpMetric:
+        def labels(self, *args, **kwargs):
+            return self
+
+        def inc(self, *args, **kwargs):
+            return None
+
+        def dec(self, *args, **kwargs):
+            return None
+
+        def set(self, *args, **kwargs):
+            return None
+
+        def observe(self, *args, **kwargs):
+            return None
+
+    def Counter(*args, **kwargs):
+        return _NoOpMetric()
+
+    def Gauge(*args, **kwargs):
+        return _NoOpMetric()
+
+    def Histogram(*args, **kwargs):
+        return _NoOpMetric()
 
 # Consensus Engine imports
 try:
@@ -136,7 +167,17 @@ _metric_values = {
 # Layer-2 manager state
 module_weight_manager = ModuleDynamicWeights()
 current_regime = "NORMALIZATION"
-current_module_weights = module_weight_manager.get_weights(current_regime, horizon="medium")
+try:
+    current_module_weights = module_weight_manager.get_weights(current_regime, horizon="medium")
+except Exception as exc:  # pragma: no cover - partial local runtimes
+    logger.warning("initial_horizon_weights_unavailable: %s", exc)
+    current_module_weights = {
+        "touche": 0.35,
+        "fundamental": 0.30,
+        "news": 0.20,
+        "sentinel": 0.10,
+        "quantum": 0.05,
+    }
 
 # v7.0 — Meta-Scorer, Attribution Engine, Bounded Updater (lazy-safe init)
 meta_scorer = MetaScorer()

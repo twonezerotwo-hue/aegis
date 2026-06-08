@@ -50,9 +50,10 @@ class OrderManager:
 
     def apply_signal_quality_filters(
         self,
-        entry_signal: float,
-        liquidity: float,
+        entry_signal: float | None = None,
+        liquidity: float | None = None,
         order_book_skewness: float = 0.0,
+        signal_confidence: float | None = None,
     ) -> Tuple[float, Dict[str, float]]:
         """
         COMPONENT 4: Quantum AI signal quality filters.
@@ -66,7 +67,9 @@ class OrderManager:
         Returns:
             (adjusted_confidence, filter_breakdown)
         """
-        adjusted_confidence = entry_signal
+        if liquidity is None:
+            raise ValueError("liquidity is required")
+        adjusted_confidence = float(entry_signal if entry_signal is not None else signal_confidence or 0.0)
         filters = {}
 
         # Liquidity filter: liquidity < 0.4 → reduce confidence by 30%

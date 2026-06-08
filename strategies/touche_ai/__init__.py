@@ -15,8 +15,15 @@ import sys
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from .src.engine.orchestrator import ToucheOrchestrator
-from .src.engine.scoring import EQSScorer
+try:
+    from .src.engine.orchestrator import ToucheOrchestrator
+except Exception:  # pragma: no cover - optional heavy pipeline dependency
+    ToucheOrchestrator = None  # type: ignore[assignment]
+
+try:
+    from .src.engine.scoring import EQSScorer
+except Exception:  # pragma: no cover
+    EQSScorer = None  # type: ignore[assignment]
 
 __version__ = "1.0.0"
 __strategy_id__ = "touche_ai"

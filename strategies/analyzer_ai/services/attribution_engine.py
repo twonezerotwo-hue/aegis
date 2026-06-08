@@ -1,12 +1,21 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
 import time
 from typing import Any
 
-import psycopg2
-import psycopg2.extras
-from redis import Redis
+try:
+    import psycopg2
+    import psycopg2.extras
+except Exception:  # pragma: no cover - optional local dependency
+    psycopg2 = None  # type: ignore[assignment]
+
+try:
+    from redis import Redis
+except Exception:  # pragma: no cover - optional cache dependency
+    Redis = None  # type: ignore[assignment]
 
 try:
     from models.attribution import ExitAttributionResponse, ModuleAttributionStats
@@ -30,6 +39,8 @@ class ExitAttributionEngine:
         self._redis_client = self._init_redis()
 
     def _init_redis(self) -> Redis | None:
+        if Redis is None:
+            return None
         try:
             client = Redis.from_url(self.redis_url, decode_responses=True)
             client.ping()
@@ -74,6 +85,10 @@ class ExitAttributionEngine:
         return ""
 
     def _fetch_trade_rows(self, period: str) -> list[dict[str, Any]]:
+        if psycopg2 is None:
+            logger.warning("[exit_attribution] psycopg2 unavailable, returning empty attribution rows")
+            return []
+
         where_period = self._period_filter_sql(period)
         queries = [
             f"""

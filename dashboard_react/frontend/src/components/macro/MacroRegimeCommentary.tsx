@@ -68,8 +68,11 @@ const deriveCommentary = (macro: MacroViewModel): string => {
 
 // ── Bileşen ───────────────────────────────────────────────────────────────────
 export const MacroRegimeCommentary: React.FC<Props> = ({ macro }) => {
-  const isLive = macro.data_status === "LIVE" && macro.verified === true && macro.live === true;
+  const liveVerifiedMacro =
+    macro.data_status === "LIVE" && macro.verified === true && macro.live === true;
+  const isLive = liveVerifiedMacro;
   const isPartial = macro.data_status === "PARTIAL_FALLBACK";
+  // live macro commentary is intentionally disabled unless macro data is verified.
 
   const commentary = isLive
     ? deriveCommentary(macro)
@@ -97,6 +100,12 @@ export const MacroRegimeCommentary: React.FC<Props> = ({ macro }) => {
 
         {/* Veri durumu */}
         <DataStatusBadge data={macro} compact showDetails={false} />
+
+        {!liveVerifiedMacro && (
+          <span className="inline-flex rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9px] font-semibold text-amber-300">
+            NOT FULLY VERIFIED
+          </span>
+        )}
 
         {/* Hedge badge — sadece aktifse */}
         {macro.hedge && isLive && !macro.hedge_unverified && (

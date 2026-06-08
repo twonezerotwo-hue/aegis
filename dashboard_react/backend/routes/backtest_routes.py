@@ -418,6 +418,8 @@ async def run_ai_backtest(
                         "type": "BUY_AND_HOLD",
                         "entry_price": bnh_entry,
                         "exit_price": bnh_exit,
+                        "position": "LONG",
+                        "pnl": round(bnh_exit - bnh_entry, 2),
                         "pnl_pct": round(bnh_pnl, 4),
                         "entry_time": datetime.utcfromtimestamp(klines[0][0] / 1000).isoformat(),
                         "exit_time": datetime.utcfromtimestamp(klines[-1][0] / 1000).isoformat(),

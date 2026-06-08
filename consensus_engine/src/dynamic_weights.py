@@ -13,9 +13,34 @@ Phase 2 Enhancement: Dynamic Weights + Continuous Learning
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import numpy as np
 import structlog
 import yaml
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - protects partial local runtimes
+    class _NumpyFallbackRandom:
+        @staticmethod
+        def normal(mean: float, scale: float) -> float:
+            return float(mean)
+
+    class _NumpyFallback:
+        random = _NumpyFallbackRandom()
+
+        @staticmethod
+        def clip(value: float, lower: float, upper: float) -> float:
+            return max(lower, min(upper, float(value)))
+
+        @staticmethod
+        def std(values) -> float:
+            items = [float(value) for value in values]
+            if not items:
+                return 0.0
+            mean = sum(items) / len(items)
+            variance = sum((value - mean) ** 2 for value in items) / len(items)
+            return variance ** 0.5
+
+    np = _NumpyFallback()
 
 try:
     from .horizon_config_loader import get_horizon_config

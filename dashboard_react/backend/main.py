@@ -29,6 +29,14 @@ from routes import stream
 from routes import agent as agent_routes
 from routes import alerts_routes
 try:
+    from routes import system as _system_routes_mod
+    _system_routes_available = True
+except Exception as _system_routes_import_err:
+    _system_routes_mod = None  # type: ignore[assignment]
+    _system_routes_available = False
+    import logging as _log
+    _log.getLogger(__name__).warning("system routes unavailable: %s", _system_routes_import_err)
+try:
     from routes import ml_model as _ml_model_routes_mod
     _ml_model_available = True
 except Exception as _ml_model_import_err:
@@ -325,6 +333,11 @@ if _ml_model_available and _ml_model_routes_mod is not None:
 else:
     logger.info("ml_model routes skipped in this runtime")
 app.include_router(agent_routes.router)
+if _system_routes_available and _system_routes_mod is not None:
+    app.include_router(_system_routes_mod.router)
+    logger.info("system routes loaded")
+else:
+    logger.info("system routes skipped in this runtime")
 app.include_router(_load_paper_autotrader_router())
 app.include_router(alerts_routes.router)
 

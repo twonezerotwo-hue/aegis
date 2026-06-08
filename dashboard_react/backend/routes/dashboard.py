@@ -801,7 +801,7 @@ def _payload_data_status(payload: Optional[dict[str, Any]], module: str, timefra
             # FIX: Glassnode key yoksa simüle MVRV/NUPL döner → "mock".
             # Ama bu "tamamen uydurma" değil, tutarlı bir fallback model.
             # MOCK yerine PARTIAL_FALLBACK — tek MOCK modül tüm BTC'yi MOCK yapıyor.
-            return "PARTIAL_FALLBACK"
+            return "MOCK"
         if fallback_used:
             return "FALLBACK"
         if timestamp:

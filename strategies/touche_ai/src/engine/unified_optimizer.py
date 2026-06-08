@@ -20,9 +20,14 @@ import copy
 import os
 
 # COMPONENT 3: Optuna optimizer imports
-import optuna
-from optuna.samplers import TPESampler
-from optuna.pruners import MedianPruner
+try:
+    import optuna
+    from optuna.samplers import TPESampler
+    from optuna.pruners import MedianPruner
+except Exception:  # pragma: no cover - optional local dependency
+    optuna = None  # type: ignore[assignment]
+    TPESampler = None  # type: ignore[assignment]
+    MedianPruner = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -441,6 +446,7 @@ class UnifiedOptimizer:
         elif phase_id == 5:  # Zamanlama - MACD
             # MACD parametrelerini hafif ayarla
             if abs(trade.macd_at_entry) < 0.001:
+                self.phase_params[5].setdefault("macd_fast", 12)
                 self.phase_params[5]["macd_fast"] = max(
                     self.phase_params[5]["macd_fast"] - 1,
                     8
@@ -636,6 +642,14 @@ class UnifiedOptimizer:
         param_ranges = self.param_ranges.get(phase_id, {})
         if not param_ranges:
             return {}, 0.0
+
+        if optuna is None:
+            fallback_params = {
+                name: values[0]
+                for name, values in param_ranges.items()
+                if isinstance(values, list) and values
+            }
+            return fallback_params, self._estimate_score_for_phase(phase_id, loss_trades, fallback_params)
 
         # Trial objective fonksiyonu tanımla
         def trial_objective(trial):
@@ -969,7 +983,8 @@ class UnifiedOptimizer:
 
     def record_phase_signals(
         self,
-        phase_signals: Dict[int, float],
+        trade_or_phase_signals,
+        phase_signals: Optional[Dict[int, float]] = None,
         entry_reason: str = "",
         exit_reason: str = ""
     ) -> None:
@@ -982,9 +997,17 @@ class UnifiedOptimizer:
             entry_reason: Which phase triggered entry
             exit_reason: Which phase triggered exit
         """
-        if len(self.trade_history) > 0:
+        if isinstance(trade_or_phase_signals, TradeRecord):
+            trade = trade_or_phase_signals
+            signals = dict(phase_signals or {})
+        elif len(self.trade_history) > 0:
             trade = self.trade_history[-1]
-            trade.stage_signals = phase_signals.copy()
+            signals = dict(trade_or_phase_signals or {})
+        else:
+            return
+
+        if trade is not None:
+            trade.stage_signals = signals
             trade.entry_reason = entry_reason
             trade.exit_reason = exit_reason
 
@@ -992,7 +1015,7 @@ class UnifiedOptimizer:
                 "phase_signals_recorded",
                 entry_reason=entry_reason,
                 exit_reason=exit_reason,
-                phase_signals=phase_signals,
+                phase_signals=signals,
             )
 
     def get_status(self) -> Dict[str, Any]:
@@ -1036,6 +1059,7 @@ class UnifiedOptimizer:
             yaml.dump(config, f, default_flow_style=False)
 
         logger.info(f"Config saved to {filepath}")
+        return config
 
     def load_config(self, filepath: str) -> None:
         """YAML'dan ayarları yükle"""
